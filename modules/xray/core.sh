@@ -156,8 +156,8 @@ update_node() {
     fi
 
     log "Загрузка и обновление модулей just1knode из репозитория GitHub..."
-    local repo_url="${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1kbot}"
-    local ref="${JUST1KBOT_REF:-main}"
+    local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+    local ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
     local tmp_tar
     tmp_tar="$(mktemp /tmp/just1knode_update.XXXXXX.tar.gz 2>/dev/null || mktemp)"
     local tmp_dir
@@ -181,15 +181,22 @@ update_node() {
             error "Ошибка целостности архива: распаковка не удалась. Обновление прервано."
         fi
 
-        # Валидация синтаксиса shell-скриптов перед установкой (Pre-Deploy Syntax Check)
+        local node_src_dir=""
         if [[ -d "${tmp_dir}/just1knode" ]]; then
+            node_src_dir="${tmp_dir}/just1knode"
+        elif [[ -f "${tmp_dir}/just1knode.sh" ]]; then
+            node_src_dir="${tmp_dir}"
+        fi
+
+        # Валидация синтаксиса shell-скриптов перед установкой (Pre-Deploy Syntax Check)
+        if [[ -n "$node_src_dir" ]]; then
             local syntax_err=0
             while IFS= read -r -d '' sh_file; do
                 if ! bash -n "$sh_file"; then
                     warn "Синтаксическая ошибка в обновлении: $sh_file"
                     syntax_err=1
                 fi
-            done < <(find "${tmp_dir}/just1knode" -type f -name "*.sh" -print0 2>/dev/null)
+            done < <(find "$node_src_dir" -maxdepth 3 -type f -name "*.sh" -print0 2>/dev/null)
 
             if [[ $syntax_err -ne 0 ]]; then
                 rm -rf "$tmp_tar" "$tmp_dir"
@@ -198,7 +205,7 @@ update_node() {
         fi
 
         # Обновление модулей утилиты и/или API
-        if [[ -d "${tmp_dir}/just1knode" || -d "${tmp_dir}/scripts/xray_api" || -d "${tmp_dir}/scripts/amnezia_api" ]]; then
+        if [[ -n "$node_src_dir" || -d "${tmp_dir}/scripts/xray_api" || -d "${tmp_dir}/scripts/amnezia_api" ]]; then
             # Подготовка безопасного каталога для резервных копий
             local backup_root=""
             local node_backup=""
@@ -218,7 +225,7 @@ update_node() {
             chmod 700 "$backup_root" 2>/dev/null || true
 
             # 1. Резервная копия just1knode
-            if [[ -d "${tmp_dir}/just1knode" && -d "$node_dir" ]]; then
+            if [[ -n "$node_src_dir" && -d "$node_dir" ]]; then
                 node_backup="${backup_root}/just1knode"
                 mkdir -p "$node_backup"
                 if ! cp -a "${node_dir}/." "$node_backup/" 2>/dev/null; then
@@ -363,10 +370,19 @@ update_node() {
             }
 
             # 3. Установка обновлений just1knode
-            if [[ -d "${tmp_dir}/just1knode" ]]; then
+            if [[ -n "$node_src_dir" ]]; then
                 mkdir -p "$node_dir"
-                find "$node_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-                if ! cp -a "${tmp_dir}/just1knode/." "${node_dir}/" 2>/dev/null; then
+                find "$node_dir" -mindepth 1 -maxdepth 1 ! -name 'scripts' -exec rm -rf {} + 2>/dev/null || true
+                local copy_ok=1
+                if [[ "$node_src_dir" == "${tmp_dir}/just1knode" ]]; then
+                    cp -a "${node_src_dir}/." "${node_dir}/" 2>/dev/null || copy_ok=0
+                else
+                    cp -a "${node_src_dir}/just1knode.sh" "${node_dir}/" 2>/dev/null || copy_ok=0
+                    cp -a "${node_src_dir}/VERSION" "${node_dir}/" 2>/dev/null || true
+                    cp -a "${node_src_dir}/lib" "${node_dir}/" 2>/dev/null || copy_ok=0
+                    cp -a "${node_src_dir}/modules" "${node_dir}/" 2>/dev/null || copy_ok=0
+                fi
+                if [[ $copy_ok -ne 1 ]]; then
                     rollback_node_components || true
                     rm -rf "$tmp_tar" "$tmp_dir"
                     error "Не удалось скопировать модули в ${node_dir}. Обновление прервано."

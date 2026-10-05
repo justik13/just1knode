@@ -1,0 +1,43 @@
+# Compiled Python files
+*.py[cod]
+__pycache__/
+
+# Dependencies and virtual environments
+.venv/
+venv/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# Environment and local secrets
+.env
+.env.local
+*.env.*
+*.pem
+*.key
+*.crt
+*.conf
+!awg0.example.conf
+
+# Editors
+.vscode/
+.idea/
+
+# Tool caches and test artifacts
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+
+# AI Agent & Scratch Files
+.agents/
+.gemini/
+scratch_*.py
+*.patch
+pr_body.txt
+log.txt
+log-failed.txt

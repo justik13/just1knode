@@ -9,8 +9,8 @@ XRAY_API_LIB="${XRAY_API_LIB:-/var/lib/xray-api}"
 XRAY_API_CONFIG_ENV="${XRAY_API_CONFIG_ENV:-${XRAY_API_ETC}/config.env}"
 SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
 
-JUST1KBOT_REPO_URL="${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1kbot}"
-JUST1KBOT_REF="${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}"
+JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
 
 ensure_xrayapi_user() {
     if ! getent group xrayapi >/dev/null 2>&1; then
@@ -48,10 +48,10 @@ deploy_xray_api_sources() {
         local tmp_extracted
         tmp_extracted="$(mktemp -d /tmp/just1k_extracted.XXXXXX 2>/dev/null || mktemp -d)"
         local archive_url
-        if [[ "$JUST1KBOT_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            archive_url="${JUST1KBOT_REPO_URL}/archive/${JUST1KBOT_REF}.tar.gz"
+        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            archive_url="${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
         else
-            archive_url="${JUST1KBOT_REPO_URL}/archive/refs/heads/${JUST1KBOT_REF}.tar.gz"
+            archive_url="${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
         fi
         if ! curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_extracted"

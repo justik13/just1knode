@@ -15,7 +15,8 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-JUST1KNODE_SH = REPO_ROOT / "scripts" / "just1knode.sh"
+NODE_ROOT = REPO_ROOT if (REPO_ROOT / "lib").exists() else (REPO_ROOT / "just1knode")
+JUST1KNODE_SH = (REPO_ROOT / "just1knode.sh") if (REPO_ROOT / "just1knode.sh").exists() else (REPO_ROOT / "scripts" / "just1knode.sh")
 REQUIREMENTS_TXT = REPO_ROOT / "scripts" / "xray_api" / "requirements.txt"
 
 
@@ -568,11 +569,11 @@ exit 0
 
     def test_get_public_ipv4_and_early_hardening_contract(self):
         """Verify get_public_ipv4 contract, early role checks before mutations, and DNS validation safety."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        amnezia_sh = (REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
-        node_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
+        node_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
 
         # common.sh must define validate_public_ipv4 and get_public_ipv4
         self.assertIn("validate_public_ipv4()", common_sh)
@@ -601,7 +602,7 @@ exit 0
 
     def test_validate_public_ipv4_behavioural(self):
         """Verify public IPv4 classification rejects private, loopback, link-local, CGNAT, and IPv6."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn("10#$oct < 0 || 10#$oct > 255", common_sh, "Bash fallback must enforce decimal base")
 
         import ipaddress
@@ -649,7 +650,7 @@ exit 0
 
     def test_validate_relay_dns_script_behavioural(self):
         """Verify the Python DNS validator snippet inside relay.sh handles match, mismatch, invalid, and empty expected IP."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         m = re.search(r'python3 -c "\n(.*?)\n" "\$domain" "\$expected_ip"', relay_sh, re.DOTALL)
         self.assertIsNotNone(m, "Python snippet in validate_relay_dns must be extractable")
         py_code = m.group(1)
@@ -697,9 +698,9 @@ socket.getaddrinfo = _mock_gai
 
     def test_origin_and_relay_xhttp_inbound_limits_and_nginx_keepalive(self):
         """Verify origin.sh and relays_manage.sh set scMaxEachPostBytes=1000000, serverMaxHeaderBytes=65536, and keepalive_requests=100000."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
 
         self.assertIn("'scMaxEachPostBytes': 1000000", origin_sh)
         self.assertIn("'serverMaxHeaderBytes': 65536", origin_sh)
@@ -751,7 +752,7 @@ socket.getaddrinfo = _mock_gai
             ]
             relays_file.write_text(json.dumps(relays_data), encoding="utf-8")
 
-            common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+            common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
             # Extract python script from sync_xhttp_upstreams_conf
             func_idx = common_sh.find("sync_xhttp_upstreams_conf()")
             py_start = common_sh.find('python3 -c "', func_idx) + len('python3 -c "')
@@ -817,14 +818,14 @@ socket.getaddrinfo = _mock_gai
 
     def test_doctor_icmp_stealth_fails_closed_when_dropin_missing(self):
         """Verify doctor ICMP stealth check fails closed if runtime=1 but drop-in is missing."""
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('icmp_persisted=0', just1knode_sh)
         self.assertIn('echo -e "  ${RED}✗${NC} ICMP Echo отключен в ядре, но не зафиксирован в $sysctl_conf', just1knode_sh)
         self.assertIn('failed=$((failed + 1))', just1knode_sh)
 
     def test_doctor_ipv6_fails_closed_when_dropin_missing(self):
         """Verify doctor IPv6 check fails closed if runtime=1 but drop-in is missing."""
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('11. Проверка отключения IPv6 (защита от утечек трафика)...', just1knode_sh)
         self.assertIn('ipv6_persisted=0', just1knode_sh)
         self.assertIn('echo -e "  ${RED}✗${NC} IPv6 отключен в ядре, но не зафиксирован в $sysctl_conf', just1knode_sh)
@@ -832,7 +833,7 @@ socket.getaddrinfo = _mock_gai
 
     def test_configure_safe_ufw_fails_closed_on_ssh_port_error(self):
         """Verify configure_safe_ufw fails closed if SSH port rule cannot be applied."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('if ! ufw allow "$ssh_port/tcp" >/dev/null 2>&1; then', common_sh)
         self.assertIn('return 1', common_sh)
 
@@ -844,7 +845,7 @@ socket.getaddrinfo = _mock_gai
 
         # Case 1: Corrupted non-JSON file
         state_file.write_text("INVALID_JSON_CONTENT{{{", encoding="utf-8")
-        state_sh = (REPO_ROOT / "just1knode" / "lib" / "state.sh").read_text(encoding="utf-8")
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
         py_match = re.search(r'python3 -c "(.*?)" "\$STATE_FILE"', state_sh, re.DOTALL)
         self.assertIsNotNone(py_match, "python script inside set_state_val must be found")
         py_code = py_match.group(1)
@@ -877,7 +878,7 @@ socket.getaddrinfo = _mock_gai
 
     def test_update_xray_core_uses_isolated_mktemp_directory(self):
         """Verify update_xray_core avoids static /tmp paths and uses mktemp directory with cleanup."""
-        core_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         self.assertIn('tmp_dir="$(mktemp -d /tmp/xray_update.XXXXXX', core_sh)
         self.assertIn('rm -rf "$tmp_dir"', core_sh)
         self.assertNotIn('/tmp/xray_update.zip', core_sh)
@@ -885,43 +886,43 @@ socket.getaddrinfo = _mock_gai
 
     def test_configure_safe_ufw_verifies_status_active(self):
         """Verify configure_safe_ufw checks ufw status active before logging successful activation."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('if echo "y" | ufw enable >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then', common_sh)
         self.assertIn('warn "Внимание: не удалось активировать фаервол UFW."', common_sh)
 
     def test_relay_setup_fails_closed_when_active_ufw_rejects_tunnel_rule(self):
         """Verify relay setup fails closed (returns 1) if UFW is active and cannot open the tunnel port."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('ufw status 2>/dev/null | grep -qi "Status: active"', relay_sh)
         self.assertIn('Не удалось открыть порт туннеля', relay_sh)
         self.assertIn('return 1', relay_sh)
 
     def test_state_lock_file_uses_o_nofollow(self):
         """Verify set_state_val opens lock file with O_NOFOLLOW to mitigate symlink races."""
-        state_sh = (REPO_ROOT / "just1knode" / "lib" / "state.sh").read_text(encoding="utf-8")
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
         self.assertIn("getattr(os, 'O_NOFOLLOW', 0)", state_sh)
 
     def test_update_node_declares_is_menu_and_survives_set_u(self):
         """Verify update_node initializes local is_menu to prevent unbound variable under set -u."""
-        core_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         self.assertIn('local is_menu="${2:-0}"', core_sh)
         self.assertIn('exec "$bin_path" update-post "$target" "${is_menu:-0}"', core_sh)
         self.assertIn('update_node_post "$target" "${is_menu:-0}"', core_sh)
 
     def test_ensure_xray_api_healthy_guards_relay_nodes(self):
         """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('role="$(get_state_val "role" "")"', common_sh)
         self.assertIn('if [[ "$role" != "origin" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('local ufw_conf="${JUST1KNODE_UFW_SYSCTL_CONF:-/etc/ufw/sysctl.conf}"', common_sh)
         self.assertIn('net/ipv4/icmp_echo_ignore_all=1', common_sh)
         self.assertIn('sed -i -E \'/^[#[:space:]]*net\\/ipv4\\/icmp_echo_ignore_all[[:space:]]*=/d\' "$ufw_conf"', common_sh)
 
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('local ufw_conf="${JUST1KNODE_UFW_SYSCTL_CONF:-/etc/ufw/sysctl.conf}"', just1knode_sh)
         self.assertIn('sed -i -E \'/^[#[:space:]]*net\\/ipv4\\/icmp_echo_ignore_all[[:space:]]*=/d\' "$ufw_conf"', just1knode_sh)
 
@@ -1596,7 +1597,7 @@ run_doctor
 
         # 2. Check just1knode for absence of floating git tarballs / unpinned upgrades / dead commits
         sh_content = ""
-        just1knode_dir = REPO_ROOT / "just1knode"
+        just1knode_dir = NODE_ROOT
         if just1knode_dir.exists():
             for p in just1knode_dir.glob("**/*"):
                 if p.is_file():
@@ -1660,7 +1661,7 @@ run_doctor
 
     def test_node_update_check_silent_when_up_to_date(self):
         """check_node_update_on_entry stays silent when remote VERSION matches."""
-        current = (REPO_ROOT / "just1knode" / "VERSION").read_text(encoding="utf-8").strip()
+        current = (NODE_ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self._create_mock_script("curl", f"#!/bin/sh\necho '{current}'\n")
         res = self._run_shell_snippet("check_node_update_on_entry")
         self.assertEqual(res.returncode, 0)
@@ -2253,7 +2254,7 @@ fi
         )
         (mock_bin / "id").chmod(0o755)
 
-        api_sh = REPO_ROOT / "just1knode" / "modules" / "xray" / "api.sh"
+        api_sh = NODE_ROOT / "modules" / "xray" / "api.sh"
         res = self._run_shell_snippet(f"""
 unset -f ensure_xrayapi_user
 source '{self._bp(api_sh)}'
@@ -2615,7 +2616,7 @@ remove_traffic_watchdog_timer
         self.assertTrue((amnezia_api_dir / "amnezia-api.service").exists(), "amnezia-api.service unit must exist")
         self.assertTrue((amnezia_api_dir / "tests" / "test_api.py").exists(), "test_api.py must exist in amnezia_api/tests")
 
-        amnezia_sh = REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh"
+        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
         self.assertTrue(amnezia_sh.exists(), "just1knode amnezia.sh must exist")
         content = amnezia_sh.read_text(encoding="utf-8")
         self.assertIn("install_amnezia_node", content)
@@ -2630,15 +2631,15 @@ remove_traffic_watchdog_timer
 
     def test_amnezia_antiabuse_persistence_and_doctor_invariants(self):
         """Verify anti-abuse persistence, update_node integration, and doctor auto-heal invariants."""
-        core_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         self.assertIn('elif [[ "$role" == "dual" ]]; then', core_sh)
         self.assertIn('heal_and_update_relay_config\n        apply_amnezia_abuse_protection', core_sh)
         self.assertIn('elif [[ "$role" == "awg" ]]; then\n        apply_amnezia_abuse_protection', core_sh)
 
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"\n        apply_amnezia_abuse_protection', relay_sh)
 
-        main_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("anti-abuse|antiabuse|apply-abuse-protection)", main_sh)
         self.assertNotIn("remove-anti-abuse|remove-antiabuse)", main_sh)
         self.assertIn("Запуск автоматического восстановления (Auto-Heal)...", main_sh)
@@ -2646,13 +2647,13 @@ remove_traffic_watchdog_timer
         self.assertIn("apply_amnezia_abuse_protection", main_sh)
         self.assertIn("failed=$((failed + 1))", main_sh)
 
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertNotIn("iptables-persistent netfilter-persistent", common_sh)
         self.assertNotIn("debconf-set-selections", common_sh)
 
     def test_amnezia_migration_and_rollback_invariants(self):
         """Verify Amnezia node migration path, legacy env discovery, and rollback handling."""
-        amnezia_sh = REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh"
+        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
         content = amnezia_sh.read_text(encoding="utf-8")
         # Configuration discovery (native only, zero legacy artifacts)
         self.assertIn('$AMNEZIA_API_ETC/config.env', content)
@@ -2683,13 +2684,13 @@ remove_traffic_watchdog_timer
         self.assertIn("openapi_url=None", app_content)
 
         # Origin subscription proxy domestic resolvers
-        origin_sh = REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh"
+        origin_sh = NODE_ROOT / "modules" / "xray" / "origin.sh"
         origin_content = origin_sh.read_text(encoding="utf-8")
         self.assertIn('local resolved_servers="77.88.8.8 77.88.8.1 195.208.4.1"', origin_content)
 
     def test_amnezia_dual_mode_nginx_and_certbot_coexistence(self):
         """Verify Amnezia module properly handles port 80 coexistence, protocol detection, and clean renewal hooks."""
-        amnezia_sh = REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh"
+        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
         content = amnezia_sh.read_text(encoding="utf-8")
 
         # 1. Removal of default site to prevent port 80 conflict with Docker proxies (using cp -L to dereference symlink)
@@ -2701,7 +2702,7 @@ remove_traffic_watchdog_timer
         self.assertIn('ufw delete allow 80/tcp', content)
 
         # 3. Dynamic container detection on host port 80 with fail-closed non-interactive mode and trap
-        common_sh = REPO_ROOT / "just1knode" / "lib" / "common.sh"
+        common_sh = NODE_ROOT / "lib" / "common.sh"
         common_content = common_sh.read_text(encoding="utf-8")
         self.assertIn("detect_host_port80_container()", common_content)
         self.assertIn("detect_host_port80_container", content)
@@ -2741,7 +2742,7 @@ remove_traffic_watchdog_timer
         self.assertIn("📦 Docker контейнер:", content)
 
         # 9. Doctor check 3b displays protocol version and container status
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("Docker контейнер:", just1knode_sh)
         self.assertIn("Протокол:", just1knode_sh)
 
@@ -2874,7 +2875,7 @@ remove_traffic_watchdog_timer
 
     def test_origin_nginx_catchall_zero_cert_leak(self):
         """Verify Origin Nginx Catch-All default_server does not contain ssl_certificate when ssl_reject_handshake is supported."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn("ssl_reject_handshake on;", origin_sh)
         self.assertIn("listen 443 ssl default_server;", origin_sh)
         self.assertIn("listen 80 default_server;", origin_sh)
@@ -2887,7 +2888,7 @@ remove_traffic_watchdog_timer
 
     def test_set_bot_ip_supports_origin_awg_and_dual_roles(self):
         """Verify set_origin_bot_ip dynamically adapts target port based on role."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn('target_port="8444"', origin_sh)
         self.assertIn('target_port="$(get_state_val "awg_port" "8443")"', origin_sh)
         self.assertIn('ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp', origin_sh)
@@ -2895,7 +2896,7 @@ remove_traffic_watchdog_timer
 
     def test_heal_and_update_origin_config_cleans_8443_and_ensures_catchall(self):
         """Verify heal_and_update_origin_config removes port 8443 and restores catchall without cert leak."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn('ufw delete allow 8443/tcp', origin_sh)
         self.assertIn('listen 80 default_server', origin_sh)
         self.assertIn('listen 443 ssl default_server', origin_sh)
@@ -2903,7 +2904,7 @@ remove_traffic_watchdog_timer
 
     def test_doctor_ufw_acl_validation_awg_and_dual(self):
         """Verify run_doctor checks awg_port for awg and dual nodes."""
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('awg_p="$(get_state_val "awg_port" "8443")"', just1knode_sh)
         self.assertIn("Порт API AmneziaWG $awg_p открыт для всех", just1knode_sh)
         self.assertIn("Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP", just1knode_sh)
@@ -2940,17 +2941,17 @@ remove_traffic_watchdog_timer
 
     def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
         """Verify uninstall_node and uninstall_amnezia_component remove awg_port and bot_ip from UFW."""
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('st_awg_port="$(get_state_val "awg_port" 2>/dev/null || true)"', just1knode_sh)
         self.assertIn('ufw delete allow from "$st_bot_ip" to any port "$st_awg_port" proto tcp', just1knode_sh)
         self.assertIn('ufw delete allow "${st_awg_port}/tcp"', just1knode_sh)
 
-        amnezia_sh = (REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
+        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
         self.assertIn('ufw delete allow from "$bot_ip" to any port "$pub_port" proto tcp', amnezia_sh)
 
     def test_origin_catchall_dummy_fallback_on_old_nginx(self):
         """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn("dummy_dir=", origin_sh)
         self.assertIn("CN=invalid", origin_sh)
         self.assertIn("ssl_certificate ${dummy_dir}/dummy.crt;", origin_sh)
@@ -2959,7 +2960,7 @@ remove_traffic_watchdog_timer
 
     def test_amnezia_catchall_dummy_fallback_on_old_nginx(self):
         """Verify amnezia fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
-        amnezia_sh = (REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
+        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
         self.assertIn("dummy_dir=", amnezia_sh)
         self.assertIn("CN=invalid", amnezia_sh)
         self.assertIn("ssl_certificate ${dummy_dir}/dummy.crt;", amnezia_sh)
@@ -2967,7 +2968,7 @@ remove_traffic_watchdog_timer
 
     def test_relay_install_strictly_tls_and_validates_dns(self):
         """Verify install_xray_relay_node strictly provisions VLESS TLS and validates DNS A-record."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('local sec_mode="tls"', relay_sh)
         self.assertIn('validate_relay_dns "$dest_server" "$my_ip"', relay_sh)
         self.assertIn('issue_relay_tls_cert "$dest_server"', relay_sh)
@@ -2976,7 +2977,7 @@ remove_traffic_watchdog_timer
 
     def test_relay_tls_cert_permanent_renewal_hooks_and_freshness_check(self):
         """Verify issue_relay_tls_cert cleans up global hooks, scopes pre/post hooks to lineage, and installs deploy hook."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('rm -f "${le_dir}/renewal-hooks/pre/05-just1knode-nginx.sh"', relay_sh)
         self.assertIn('"${le_dir}/renewal-hooks/deploy/20-just1knode-restart-xray.sh"', relay_sh)
         self.assertIn('--pre-hook "$pre_hook_cmd"', relay_sh)
@@ -2995,7 +2996,7 @@ remove_traffic_watchdog_timer
 
     def test_add_relay_node_supports_legacy_and_new_syntax(self):
         """Verify add_relay_node correctly parses legacy positional args and new tls args."""
-        relays_manage_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
         self.assertIn('if [[ "$arg6" == "tls" || "$arg6" == "reality" ]]; then', relays_manage_sh)
         self.assertIn('elif [[ -n "$arg6" && "$arg6" != "-" ]]; then', relays_manage_sh)
         self.assertIn('security_type="reality"', relays_manage_sh)
@@ -3004,7 +3005,7 @@ remove_traffic_watchdog_timer
 
     def test_show_relay_credentials_legacy_state_inspection_and_no_hardcoded_de(self):
         """Verify show_relay_credentials normalizes missing security key in legacy state and avoids hardcoded de."""
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('r_sec="$(get_state_val "security" "")"', just1knode_sh)
         self.assertIn('if [[ -z "$r_sec" ]]; then', just1knode_sh)
         self.assertIn('sec = ib.get(\'streamSettings\', {}).get(\'security\')', just1knode_sh)
@@ -3013,7 +3014,7 @@ remove_traffic_watchdog_timer
 
     def test_heal_and_update_relay_config_auto_migrates_tls_on_cert_found(self):
         """Verify heal_and_update_relay_config validates domain before selecting cert and guards TLS inbound."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn("ai = socket.getaddrinfo(domain, None, socket.AF_INET)", relay_sh)
         self.assertIn("Автоматический перевод входящего туннеля Relay на VLESS + TLS", relay_sh)
         self.assertIn("tls_cert_file = os.path.join(tls_cert_dir, 'fullchain.pem')", relay_sh)
@@ -3023,7 +3024,7 @@ remove_traffic_watchdog_timer
 
     def test_heal_and_update_origin_config_auto_migrates_relay_on_dns_match(self):
         """Verify heal_and_update_origin_config matches multi-IP DNS A-record with TLS probe and upgrades outbounds."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn("Авто-миграция Relay-узлов с REALITY / google.com на VLESS+TLS", origin_sh)
         self.assertIn("addr_infos = socket.getaddrinfo(cand, None, socket.AF_INET)", origin_sh)
         self.assertIn("ctx.wrap_socket(s, server_hostname=cand)", origin_sh)
@@ -3032,8 +3033,8 @@ remove_traffic_watchdog_timer
 
     def test_ensure_xray_config_permissions_and_rollback_invariant(self):
         """Verify state.sh and relays_manage enforce ensure_xray_config_permissions and retain root:xrayapi 640."""
-        state_sh = (REPO_ROOT / "just1knode" / "lib" / "state.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
 
         self.assertIn("ensure_xray_config_permissions()", state_sh)
         self.assertIn("chown root:xrayapi \"$cfg\"", state_sh)
@@ -3046,14 +3047,14 @@ remove_traffic_watchdog_timer
     def test_xray_api_service_unit_has_partof_and_update_node_syncs_it(self):
         """Verify xray-api.service has PartOf=xray.service, start limit resilience, and ensure_xray_api_healthy."""
         service_file = (REPO_ROOT / "scripts" / "xray_api" / "xray-api.service").read_text(encoding="utf-8")
-        core_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        api_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        just1knode_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
-        ssl_sh = (REPO_ROOT / "just1knode" / "lib" / "ssl.sh").read_text(encoding="utf-8")
-        traffic_watchdog_sh = (REPO_ROOT / "just1knode" / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        ssl_sh = (NODE_ROOT / "lib" / "ssl.sh").read_text(encoding="utf-8")
+        traffic_watchdog_sh = (NODE_ROOT / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
 
         self.assertIn("PartOf=xray.service", service_file)
         self.assertIn("StartLimitIntervalSec=30", service_file)
@@ -3087,7 +3088,7 @@ remove_traffic_watchdog_timer
 
     def test_traffic_watchdog_resume_guards_xray_api_start_when_xray_config_invalid(self):
         """Verify watchdog resume does not attempt to start xray-api if xray config test fails."""
-        watchdog_sh = (REPO_ROOT / "just1knode" / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
+        watchdog_sh = (NODE_ROOT / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
         self.assertIn("local xray_started=0", watchdog_sh)
         self.assertIn("xray_started=1", watchdog_sh)
         self.assertIn("if [[ $xray_started -eq 1 ]]; then", watchdog_sh)
@@ -3103,7 +3104,7 @@ remove_traffic_watchdog_timer
 
     def test_origin_nginx_reconciliation_uses_xray_inbound_port(self):
         """Verify origin.sh extracts local inbound port from Xray config and avoids remote 10443 port."""
-        origin_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn("xray_inbound_ports = {}", origin_sh)
         self.assertIn("port = xray_inbound_ports.get(in_tag)", origin_sh)
         self.assertIn("r['inbound_port'] = port", origin_sh)
@@ -3111,13 +3112,13 @@ remove_traffic_watchdog_timer
 
     def test_add_relay_node_records_inbound_port_in_relays_json(self):
         """Verify relays_manage.sh add_relay_node passes and stores next_port as inbound_port."""
-        relays_manage_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
         self.assertIn("'inbound_port': in_port", relays_manage_sh)
         self.assertIn("\"$next_port\"", relays_manage_sh)
 
     def test_relay_cert_detection_orders_by_mtime_descending(self):
         """Verify relay.sh sorts Let's Encrypt live certs newest first and supports interactive resolution."""
-        relay_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn("detect_relay_domain_candidates", relay_sh)
         self.assertIn("select_relay_domain_interactive", relay_sh)
         self.assertIn("candidates.sort(key=lambda x: x[0], reverse=True)", relay_sh)
@@ -3152,8 +3153,8 @@ remove_traffic_watchdog_timer
 
     def test_update_node_post_reexec_invariants(self):
         """Verify update_node re-execs with update-post to eliminate in-memory stale functions."""
-        core_sh = (REPO_ROOT / "just1knode" / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        main_sh = (REPO_ROOT / "just1knode" / "just1knode.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
 
         self.assertIn('exec "$bin_path" update-post "$target"', core_sh)
         self.assertNotIn('export JUST1KNODE_POST_UPDATE', core_sh)
@@ -3329,7 +3330,7 @@ remove_traffic_watchdog_timer
         """Behavioral test: sync_xhttp_upstreams_conf validates relay code with regex and does not block defense-in-depth on unresolvable entries."""
         import re
 
-        common_sh = (REPO_ROOT / "just1knode" / "lib" / "common.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn("import json, os, tempfile, sys, re", common_sh)
         self.assertIn("re.fullmatch(r'^[a-z0-9_-]+$', code_lower)", common_sh)
 
@@ -3469,7 +3470,7 @@ COMMIT
 
     def test_amnezia_status_uses_unified_check(self):
         """Verify show_amnezia_status and check_amnezia_abuse_rules share the exact same check."""
-        amnezia_sh = (REPO_ROOT / "just1knode" / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
+        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
         self.assertIn("if check_amnezia_abuse_rules; then", amnezia_sh)
         self.assertIn('dport 25 -j REJECT --reject-with tcp-reset', amnezia_sh)
         self.assertIn('string \\"BitTorrent protocol\\"', amnezia_sh)

@@ -504,8 +504,8 @@ install_amnezia_node() {
         local tmp_extract
         tmp_extract="$(mktemp -d /tmp/amnezia_extract.XXXXXXXXXX 2>/dev/null || mktemp -d)"
         local tmp_dl="${tmp_extract}/archive.tar.gz"
-        local repo_url="${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1kbot}"
-        local repo_ref="${JUST1KBOT_REF:-main}"
+        local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+        local repo_ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
         local archive_url
         if [[ "$repo_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
             archive_url="${repo_url%.git}/archive/${repo_ref}.tar.gz"

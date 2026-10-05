@@ -46,13 +46,13 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             cp -a /app/scripts/amnezia_api/. "$INSTALL_DIR/scripts/amnezia_api/"
         fi
     else
-        JUST1KBOT_REPO_URL="${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1kbot}"
-        JUST1KBOT_REF="${JUST1KBOT_REF:-main}"
+        JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
         
-        if [[ "$JUST1KBOT_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            archive_url="${JUST1KBOT_REPO_URL}/archive/${JUST1KBOT_REF}.tar.gz"
+        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            archive_url="${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
         else
-            archive_url="${JUST1KBOT_REPO_URL}/archive/refs/heads/${JUST1KBOT_REF}.tar.gz"
+            archive_url="${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
         fi
         
         tmp_tar="$(mktemp /tmp/just1knode_boot.XXXXXX.tar.gz 2>/dev/null || mktemp)"
@@ -79,7 +79,14 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         fi
         
         tar -xzf "$tmp_tar" -C "$tmp_extract" --strip-components=1 --no-same-owner
-        cp -a "$tmp_extract/just1knode/." "$INSTALL_DIR/"
+        if [[ -d "$tmp_extract/just1knode" ]]; then
+            cp -a "$tmp_extract/just1knode/." "$INSTALL_DIR/"
+        else
+            cp -a "$tmp_extract/just1knode.sh" "$INSTALL_DIR/" 2>/dev/null || true
+            cp -a "$tmp_extract/VERSION" "$INSTALL_DIR/" 2>/dev/null || true
+            cp -a "$tmp_extract/lib" "$INSTALL_DIR/" 2>/dev/null || true
+            cp -a "$tmp_extract/modules" "$INSTALL_DIR/" 2>/dev/null || true
+        fi
         if [[ -d "$tmp_extract/scripts/xray_api" ]]; then
             mkdir -p "${XRAY_API_DIR:-/opt/xray-api}"
             cp -a "$tmp_extract/scripts/xray_api/." "${XRAY_API_DIR:-/opt/xray-api}/"
@@ -151,13 +158,13 @@ print_node_version_box_line() {
 # равные, более старые и невалидные значения молча пропускаются.
 check_node_update_on_entry() {
     local repo_url ref remote_ver newest
-    repo_url="${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1kbot}"
-    ref="${JUST1KBOT_REF:-main}"
-    if [[ "$repo_url" != "https://github.com/justik13/just1kbot" || "$ref" != "main" ]]; then
+    repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+    ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
+    if [[ "$repo_url" != "https://github.com/justik13/just1knode" || "$ref" != "main" ]]; then
         return 0
     fi
     command -v curl >/dev/null 2>&1 || return 0
-    remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1kbot/main/just1knode/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
     [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     newest="$(printf '%s\n%s\n' "$JUST1KNODE_VERSION" "$remote_ver" | sort -V | tail -n 1)"

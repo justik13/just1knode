@@ -1,0 +1,34 @@
+[project]
+name = "just1knode"
+version = "2.2.6"
+description = "Modular server node utility and microservices for AmneziaWG and Xray VLESS over XHTTP"
+requires-python = ">=3.12"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    "scripts/xray_api/generated",
+]
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9",
+    "F",
+    "B",
+    "ASYNC",
+    "PLE", "PLW",
+    "RUF100",
+]
+ignore = [
+    "PLW0603",
+    "PLW0108",
+    "ASYNC109",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/xray_api/generated/*" = ["F401", "F821", "E402", "E741", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "scripts/xray_api/tests", "scripts/amnezia_api/tests"]
+norecursedirs = [".git", ".pytest_cache"]
