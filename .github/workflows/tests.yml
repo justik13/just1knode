@@ -19,7 +19,6 @@ jobs:
           ignore_paths: >-
             .git
             docs
-          shellcheck_options: -e SC1091,SC2034,SC2317,SC2155
 
   python-tests:
     runs-on: ubuntu-24.04
