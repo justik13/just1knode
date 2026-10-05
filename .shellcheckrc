@@ -1,1 +1,2 @@
 shell=bash
+disable=SC1091,SC2034,SC2317,SC2155

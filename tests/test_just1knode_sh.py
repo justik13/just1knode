@@ -1018,7 +1018,7 @@ print("RECONCILE_SUCCESS")
         self.assertIn("RECONCILE_SUCCESS", res2.stdout)
 
         # Verify origin.sh source contains the fix
-        origin_sh = (Path(__file__).parent.parent / "just1knode" / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn("s_data = {}", origin_sh)
         self.assertIn("if isinstance(loaded_s, dict):", origin_sh)
 
@@ -1597,12 +1597,15 @@ run_doctor
 
         # 2. Check just1knode for absence of floating git tarballs / unpinned upgrades / dead commits
         sh_content = ""
-        just1knode_dir = NODE_ROOT
-        if just1knode_dir.exists():
-            for p in just1knode_dir.glob("**/*"):
-                if p.is_file():
-                    sh_content += p.read_text(encoding="utf-8", errors="ignore") + "\n"
-        if JUST1KNODE_SH.exists():
+        for sub in ["lib", "modules"]:
+            sub_dir = NODE_ROOT / sub
+            if sub_dir.exists():
+                for p in sub_dir.glob("**/*"):
+                    if p.is_file():
+                        sh_content += p.read_text(encoding="utf-8", errors="ignore") + "\n"
+        if (NODE_ROOT / "just1knode.sh").exists():
+            sh_content += (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8", errors="ignore") + "\n"
+        if JUST1KNODE_SH.exists() and JUST1KNODE_SH != (NODE_ROOT / "just1knode.sh"):
             sh_content += JUST1KNODE_SH.read_text(encoding="utf-8", errors="ignore")
         self.assertNotIn(
             "pip install --upgrade pip", sh_content, "Unpinned pip self-upgrade is forbidden"

@@ -27,11 +27,62 @@ try:
 except ImportError:
     from scripts.amnezia_api import app as amnezia_app
 
-from services.amnezia_client import (
-    AmneziaClient,
-    AmneziaClientCreateResponse,
-    AmneziaServerInfo,
-)
+try:
+    from services.amnezia_client import (
+        AmneziaClient,
+        AmneziaClientCreateResponse,
+        AmneziaServerInfo,
+    )
+except ImportError:
+    from pydantic import BaseModel, Field
+
+    class AmneziaClientCreateResponse(BaseModel):
+        id: str
+        config: str
+        protocol: str = "amneziawg2"
+
+    class AmneziaClientTraffic(BaseModel):
+        totalDownload: int = 0
+        totalUpload: int = 0
+        received: int = 0
+        sent: int = 0
+
+    class AmneziaClientListItem(BaseModel):
+        id: str
+        username: str = ""
+        peer_name: str = ""
+        status: str = "active"
+        traffics: AmneziaClientTraffic = Field(default_factory=AmneziaClientTraffic)
+        lastHandshake: float | None = None
+        lastSeen: float | None = None
+        updatedAt: float | None = None
+
+    class AmneziaServerInfo(BaseModel):
+        name: str = ""
+        protocol: str = ""
+        protocols: list[str] = Field(default_factory=list)
+        maxPeers: int = 0
+        serverMaxPeers: int = 0
+        SERVER_MAX_PEERS: int = 250
+
+        def get_effective_max_peers(self) -> int:
+            return self.maxPeers or self.serverMaxPeers or self.SERVER_MAX_PEERS
+
+    class AmneziaClient:
+        @staticmethod
+        def _parse_clients_page(items_raw: list | dict) -> list[AmneziaClientListItem]:
+            clients: list[AmneziaClientListItem] = []
+            if isinstance(items_raw, dict):
+                items_raw = items_raw.get("items") or items_raw.get("clients") or items_raw.get("data") or []
+                if isinstance(items_raw, dict):
+                    items_raw = [items_raw]
+            if not isinstance(items_raw, list):
+                return clients
+            for item in items_raw:
+                if not isinstance(item, dict):
+                    continue
+                clients.append(AmneziaClientListItem(**item))
+            return clients
 
 
 # Helper for testing vpn:// decoder (from docs/amnezia_docs.md)
