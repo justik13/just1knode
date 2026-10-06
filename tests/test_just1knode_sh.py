@@ -3491,6 +3491,88 @@ COMMIT
         self.assertIn('string \\"BitTorrent protocol\\"', amnezia_sh)
 
 
+class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
+    """Regression shield for node routing rules, fail-closed security, and lock primitives."""
+
+    def test_origin_routing_ru_split_and_order(self):
+        """On Origin node, default inbound routes to just1k-wl-direct, and RU domains route direct."""
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+
+        self.assertIn("def_rule['outboundTag'] = 'just1k-wl-direct'", origin_sh)
+        self.assertIn("r.get('outboundTag') == 'just1k-wl-direct'", origin_sh)
+        self.assertIn("'geosite:category-ru'", origin_sh)
+        self.assertIn("'geosite:tld-ru'", origin_sh)
+        self.assertIn("'outboundTag': 'just1k-wl-direct'", origin_sh)
+        self.assertIn("insert_idx = rules.index(dom_rule) + 1", relays_manage_sh)
+        self.assertIn("'geosite:category-ru'", relays_manage_sh)
+
+    def test_state_and_watchdog_locks_use_o_nofollow_and_fchmod(self):
+        """Invariant: state.sh, traffic_watchdog.sh and traffic_watchdog.py must use O_NOFOLLOW and fd-based fchmod."""
+        targets = [
+            NODE_ROOT / "lib" / "state.sh",
+            NODE_ROOT / "lib" / "traffic_watchdog.sh",
+            NODE_ROOT / "lib" / "traffic_watchdog.py",
+        ]
+        for path in targets:
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("O_NOFOLLOW", content, f"Missing O_NOFOLLOW in {path.name}")
+            self.assertIn("fchmod", content, f"Missing fchmod in {path.name}")
+
+    def test_just1knode_origin_bot_ip_cli_support(self):
+        """Verify set-bot-ip CLI registration and transactional rule ordering in UFW."""
+        just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+
+        self.assertIn("set-bot-ip|bot-ip)", just1knode_sh)
+        self.assertIn("acquire_just1knode_lock", origin_sh)
+        self.assertIn("release_just1knode_lock", origin_sh)
+        self.assertIn("release_just1knode_lock", common_sh)
+        self.assertIn("validate_ipv4", common_sh)
+        self.assertIn('validate_ipv4 "$new_bot_ip"', origin_sh)
+
+        new_allow_pos = origin_sh.find('ufw allow from "$new_bot_ip"')
+        verify_pos = origin_sh.find('Верификация не пройдена', new_allow_pos)
+        del_old_pos = origin_sh.find('ufw delete allow from "$old_bot_ip"', verify_pos)
+        self.assertGreater(new_allow_pos, 0)
+        self.assertGreater(verify_pos, new_allow_pos)
+        self.assertGreater(del_old_pos, verify_pos)
+
+        self.assertIn("heal_node_firewall_and_stealth", origin_sh)
+        self.assertIn(r'8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)', common_sh)
+        self.assertIn('ufw delete allow 8444/tcp', common_sh)
+
+    def test_node_firewall_and_stealth_ssot_invariants(self):
+        """SSOT firewall invariants across node modules."""
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+
+        self.assertIn("heal_node_firewall_and_stealth()", common_sh)
+        self.assertIn("detect_active_sshd_ports()", common_sh)
+        self.assertIn("is_ssh_port()", common_sh)
+        self.assertIn('comment "just1knode ssh access"', common_sh)
+        self.assertNotIn("detected_orig_ip", common_sh)
+        self.assertNotIn('extra_ufw_ports+=("${existing_awg_port}/tcp")', relay_sh)
+        self.assertIn("heal_node_firewall_and_stealth", relay_sh)
+        self.assertIn("heal_node_firewall_and_stealth", core_sh)
+
+    def test_xray_api_fail_closed_tombstone_and_fsync(self):
+        """Verify fail-closed tombstone, namespace filtering, and durable fsync."""
+        app_path = REPO_ROOT / "scripts" / "xray_api" / "app.py"
+        cs_path = REPO_ROOT / "scripts" / "xray_api" / "client_store.py"
+        app_content = app_path.read_text(encoding="utf-8")
+        cs_content = cs_path.read_text(encoding="utf-8")
+
+        self.assertIn("client_store.delete_client", app_content)
+        self.assertIn("HTTPException", app_content)
+        self.assertIn("Failed to persist client tombstone to disk", app_content)
+        self.assertIn("just1k-wl-", app_content)
+        self.assertIn("get_target_inbounds", app_content)
+        self.assertIn("os.fsync", cs_content)
+
+
 if __name__ == "__main__":
     unittest.main()
 

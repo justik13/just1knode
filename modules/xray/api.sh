@@ -42,7 +42,7 @@ deploy_xray_api_sources() {
         log "Копирование исходников xray-api из /app/scripts/xray_api..."
         cp -r /app/scripts/xray_api/* "${XRAY_API_DIR}/"
     else
-        log "Автономная загрузка модулей xray-api (ref: $JUST1KBOT_REF)..."
+        log "Автономная загрузка модулей xray-api (ref: $JUST1KNODE_REF)..."
         local tmp_tar
         tmp_tar="$(mktemp /tmp/just1k_repo.XXXXXX.tar.gz 2>/dev/null || mktemp)"
         local tmp_extracted

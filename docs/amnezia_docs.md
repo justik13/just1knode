@@ -311,4 +311,4 @@ def encode_vpn_uri(config_dict: dict) -> str:
 
 ### Архитектурные валидаторы:
 * [Any-Tech-ARCHITECT (AmneziaWG Parameter Generator)](https://github.com/Vadim-Khristenko/Any-Tech-ARCHITECT)
-* [just1kbot amnezia_api](../scripts/amnezia_api/) — серверный микросервис интеграции проекта.
+* [just1knode amnezia_api](../scripts/amnezia_api/) — серверный микросервис интеграции проекта.
