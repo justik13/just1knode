@@ -2917,7 +2917,7 @@ remove_traffic_watchdog_timer
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("6b. Полный аудит периметра", just1knode_sh)
         self.assertIn("LC_ALL=C ufw status verbose", just1knode_sh)
-        self.assertIn("sed 's/(v6)//g'", just1knode_sh)
+        self.assertIn('clean_line="${rule_line//(v6)/}"', just1knode_sh)
         self.assertIn('grep -E ":${r_port}[[:space:]]"', just1knode_sh)
         self.assertIn("warned_dead_targets", just1knode_sh)
         self.assertIn("warned_public_targets", just1knode_sh)
