@@ -30,7 +30,10 @@ ensure_xrayapi_user() {
 
 deploy_xray_api_sources() {
     mkdir -p "${XRAY_API_DIR}"
-    local project_xray_api="${SCRIPT_DIR}/../scripts/xray_api"
+    local project_xray_api="${SCRIPT_DIR}/scripts/xray_api"
+    if [[ ! -d "$project_xray_api" ]]; then
+        project_xray_api="${SCRIPT_DIR}/../scripts/xray_api"
+    fi
     if [[ ! -d "$project_xray_api" ]]; then
         project_xray_api="${SCRIPT_DIR}/../../scripts/xray_api"
     fi
