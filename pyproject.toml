@@ -1,6 +1,6 @@
 [project]
 name = "just1knode"
-version = "2.2.6"
+version = "2.2.7"
 description = "Modular server node utility and microservices for AmneziaWG and Xray VLESS over XHTTP"
 requires-python = ">=3.12"
 
