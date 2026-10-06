@@ -2912,6 +2912,14 @@ remove_traffic_watchdog_timer
         self.assertIn("Порт API AmneziaWG $awg_p открыт для всех", just1knode_sh)
         self.assertIn("Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP", just1knode_sh)
 
+    def test_doctor_ufw_perimeter_audit(self):
+        """Verify run_doctor audits full UFW perimeter for dead rules and unauthorized anywhere ports."""
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn("6b. Полный аудит периметра", just1knode_sh)
+        self.assertIn("Мёртвое» правило: порт ${r_port}/${r_proto} разрешён в UFW, но служба не запущена", just1knode_sh)
+        self.assertIn("ВНИМАНИЕ: Посторонний порт ${r_port}/${r_proto} (${proc_owner}) открыт для всех (Anywhere)!", just1knode_sh)
+        self.assertIn("ufw delete allow ${norm_target}", just1knode_sh)
+
 
     def test_validate_ip_ipv4_and_ipv6_behaviour(self):
         """Verify validate_ip logic handles both IPv4 and IPv6 properly."""

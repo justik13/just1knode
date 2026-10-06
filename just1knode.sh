@@ -612,6 +612,90 @@ run_doctor() {
                 echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
             fi
         fi
+
+        # 6b. Полный аудит периметра: поиск мёртвых правил и посторонних портов, открытых для всего мира
+        local live_ssh_ports=()
+        while read -r sp; do
+            [[ -n "$sp" ]] && live_ssh_ports+=("$sp")
+        done < <(detect_active_sshd_ports 2>/dev/null || true)
+        [[ ${#live_ssh_ports[@]} -eq 0 ]] && live_ssh_ports=("22")
+
+        local ufw_rules_raw
+        ufw_rules_raw="$(ufw status verbose 2>/dev/null | grep -E '^[0-9]+' || true)"
+
+        if [[ -n "$ufw_rules_raw" ]]; then
+            local checked_targets=()
+            while read -r rule_line; do
+                [[ -z "$rule_line" ]] && continue
+                local raw_target action from_part
+                raw_target=$(echo "$rule_line" | awk '{print $1}')
+                action=$(echo "$rule_line" | awk '{print $2}')
+                from_part=$(echo "$rule_line" | awk '{$1=""; $2=""; print $0}' | sed -E 's/^[[:space:]]*(IN|OUT)[[:space:]]*//' | sed 's/^[[:space:]]*//')
+
+                [[ "$action" != "ALLOW" ]] && continue
+
+                # Нормализация целевого порта (убираем (v6))
+                local norm_target
+                norm_target=$(echo "$raw_target" | sed 's/(v6)//g' | tr -d '[:space:]')
+                local r_port="${norm_target%/*}"
+                local r_proto="${norm_target#*/}"
+                [[ "$r_proto" == "$norm_target" ]] && r_proto="tcp"
+
+                # Дедупликация портов v4 и v6
+                local already_checked=0
+                for ct in "${checked_targets[@]}"; do
+                    if [[ "$ct" == "${r_port}/${r_proto}" ]]; then
+                        already_checked=1
+                        break
+                    fi
+                done
+                [[ $already_checked -eq 1 ]] && continue
+                checked_targets+=("${r_port}/${r_proto}")
+
+                # Проверяем наличие слушающего процесса в системе
+                local proc_owner=""
+                if command -v ss >/dev/null 2>&1; then
+                    if [[ "$r_proto" == "tcp" ]]; then
+                        proc_owner=$(ss -tlnp 2>/dev/null | grep -E "[:\s]${r_port}\b" | awk '{print $NF}' | head -n 1 || true)
+                    else
+                        proc_owner=$(ss -ulnp 2>/dev/null | grep -E "[:\s]${r_port}\b" | awk '{print $NF}' | head -n 1 || true)
+                    fi
+                fi
+
+                local is_public=0
+                if echo "$from_part" | grep -qiE "(Anywhere|Везде|0\.0\.0\.0/0|::/0)"; then
+                    is_public=1
+                fi
+
+                # Если процесс отсутствует — это «мёртвое» правило в UFW
+                if [[ -z "$proc_owner" ]]; then
+                    echo -e "  ${YELLOW}!${NC} «Мёртвое» правило: порт ${r_port}/${r_proto} разрешён в UFW, но служба не запущена"
+                    echo -e "    ${DIM}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
+                elif [[ $is_public -eq 1 ]]; then
+                    # Процесс есть, и порт открыт для всего мира (Anywhere).
+                    # Проверяем, является ли он авторизованным публичным портом.
+                    local is_authorized=0
+                    # 1. Активный порт SSH
+                    for sp in "${live_ssh_ports[@]}"; do
+                        if [[ "$r_port" == "$sp" && "$r_proto" == "tcp" ]]; then
+                            is_authorized=1
+                            break
+                        fi
+                    done
+                    # 2. Легитимные веб-порты 80 и 443
+                    if [[ "$r_port" == "80" || "$r_port" == "443" ]] && [[ "$r_proto" == "tcp" ]]; then
+                        if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]] || command -v nginx >/dev/null 2>&1; then
+                            is_authorized=1
+                        fi
+                    fi
+
+                    if [[ $is_authorized -eq 0 ]]; then
+                        echo -e "  ${YELLOW}!${NC} ВНИМАНИЕ: Посторонний порт ${r_port}/${r_proto} (${proc_owner}) открыт для всех (Anywhere)!"
+                        echo -e "    ${DIM}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
+                    fi
+                fi
+            done <<< "$ufw_rules_raw"
+        fi
     else
         echo -e "  ${YELLOW}!${NC} UFW фаервол не активен"
     fi
