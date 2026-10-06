@@ -410,6 +410,7 @@ print('reality')
 run_doctor() {
     title "КОМПЛЕКСНАЯ САМОДИАГНОСТИКА (DOCTOR)"
     local failed=0
+    local warnings=0
     local role
     role="$(get_state_val "role" "не определена")"
 
@@ -555,10 +556,22 @@ run_doctor() {
     fi
 
     log "6. Проверка UFW фаервола..."
-    if ufw status 2>/dev/null | grep -qi "Status: active"; then
+    if LC_ALL=C ufw status 2>/dev/null | grep -qi "Status: active"; then
         echo -e "  ${GREEN}✔${NC} UFW фаервол активен"
         local ufw_out
-        ufw_out="$(ufw status verbose 2>/dev/null || ufw status 2>/dev/null || true)"
+        ufw_out="$(LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status 2>/dev/null || true)"
+
+        # Проверка политики входящего трафика по умолчанию
+        if echo "$ufw_out" | grep -qi "Default: allow (incoming)"; then
+            echo -e "  ${RED}✗${NC} КРИТИЧЕСКАЯ УЯЗВИМОСТЬ: Входящая политика UFW по умолчанию ALLOW (все порты открыты)!"
+            echo -e "    ${DIM}Рекомендация: sudo ufw default deny incoming${NC}"
+            warnings=$((warnings + 1))
+        fi
+
+        # Снимаем один снимок слушающих сокетов в системе
+        local ss_tcp_listen ss_udp_listen
+        ss_tcp_listen="$(ss -tlnp 2>/dev/null || true)"
+        ss_udp_listen="$(ss -ulnp 2>/dev/null || true)"
 
         if [[ "$role" == "origin" ]]; then
             local bot_ip
@@ -573,6 +586,7 @@ run_doctor() {
                 failed=$((failed + 1))
             else
                 echo -e "  ${YELLOW}!${NC} BOT_IP не настроен в state.json"
+                warnings=$((warnings + 1))
             fi
         elif [[ "$role" == "awg" || "$role" == "dual" ]]; then
             local awg_p bot_ip
@@ -581,6 +595,7 @@ run_doctor() {
 
             if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${YELLOW}!${NC} Порт API AmneziaWG $awg_p открыт для всех (рекомендуется ограничить: just1knode set-bot-ip <IP>)"
+                warnings=$((warnings + 1))
             elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "$awg_p"; then
                 echo -e "  ${GREEN}✔${NC} Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP ($bot_ip)"
             elif [[ -n "$bot_ip" ]]; then
@@ -612,8 +627,146 @@ run_doctor() {
                 echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
             fi
         fi
+
+        # 6b. Полный аудит периметра: поиск мёртвых правил и посторонних портов, открытых для всего мира
+        local live_ssh_ports=()
+        while read -r sp; do
+            [[ -n "$sp" && "$sp" =~ ^[0-9]+$ ]] && live_ssh_ports+=("$sp")
+        done < <(detect_active_sshd_ports 2>/dev/null || true)
+        [[ ${#live_ssh_ports[@]} -eq 0 ]] && live_ssh_ports=("22")
+
+        local ufw_rules_raw
+        ufw_rules_raw="$(echo "$ufw_out" | grep -vE '^(Status:|Logging:|Default:|New profiles:|To[[:space:]]+Action|--+[[:space:]]+--+)' | grep -E '[[:space:]]ALLOW([[:space:]]|$)' || true)"
+
+        if [[ -n "$ufw_rules_raw" ]]; then
+            local warned_dead_targets=()
+            local warned_public_targets=()
+            while read -r rule_line; do
+                [[ -z "$rule_line" ]] && continue
+                # Очищаем (v6) и профили в скобках вида '(Nginx Full)'
+                local clean_line
+                clean_line=$(echo "$rule_line" | sed -E 's/\(v6\)//g' | sed -E 's/\([^\)]+\)//g')
+                clean_line="$(echo "$clean_line" | xargs)"
+                [[ -z "$clean_line" ]] && continue
+
+                local raw_target action direction from_part
+                raw_target=$(echo "$clean_line" | awk '{print $1}')
+                action=$(echo "$clean_line" | awk '{print $2}')
+
+                local token3
+                token3=$(echo "$clean_line" | awk '{print $3}')
+                if [[ "$token3" == "IN" || "$token3" == "OUT" || "$token3" == "FWD" ]]; then
+                    direction="$token3"
+                    from_part=$(echo "$clean_line" | awk '{$1=""; $2=""; $3=""; print $0}' | xargs)
+                else
+                    direction="IN"
+                    from_part=$(echo "$clean_line" | awk '{$1=""; $2=""; print $0}' | xargs)
+                fi
+
+                [[ "$action" != "ALLOW" ]] && continue
+                [[ "$direction" != "IN" ]] && continue
+
+                local is_public=0
+                if echo "$from_part" | grep -qiE "(Anywhere|Везде|0\.0\.0\.0/0|::/0)"; then
+                    is_public=1
+                fi
+
+                # Нормализуем цель: порт/протокол или профиль приложения
+                local norm_target proto ports_to_check=()
+                norm_target="$raw_target"
+                if [[ "$norm_target" == *"/"* ]]; then
+                    proto="${norm_target#*/}"
+                    local raw_ports="${norm_target%/*}"
+                    local old_ifs="$IFS"
+                    IFS=',' read -ra port_arr <<< "$raw_ports"
+                    IFS="$old_ifs"
+                    for p in "${port_arr[@]}"; do
+                        [[ -n "$p" ]] && ports_to_check+=("$p")
+                    done
+                elif [[ "$norm_target" =~ ^[0-9]+$ ]]; then
+                    proto="any"
+                    ports_to_check+=("$norm_target")
+                else
+                    proto="tcp"
+                    case "$norm_target" in
+                        OpenSSH|openssh) ports_to_check+=("22") ;;
+                        "Nginx HTTP") ports_to_check+=("80") ;;
+                        "Nginx HTTPS") ports_to_check+=("443") ;;
+                        "Nginx Full") ports_to_check+=("80" "443") ;;
+                        *) ports_to_check+=("$norm_target") ;;
+                    esac
+                fi
+
+                for r_port in "${ports_to_check[@]}"; do
+                    local target_key="${r_port}/${proto}"
+
+                    local matching_line=""
+                    if [[ "$proto" == "tcp" ]]; then
+                        matching_line=$(echo "$ss_tcp_listen" | grep -E "[:\s]${r_port}[[:space:]]" | head -n 1 || true)
+                    elif [[ "$proto" == "udp" ]]; then
+                        matching_line=$(echo "$ss_udp_listen" | grep -E "[:\s]${r_port}[[:space:]]" | head -n 1 || true)
+                    else
+                        matching_line=$(echo "$ss_tcp_listen" | grep -E "[:\s]${r_port}[[:space:]]" | head -n 1 || true)
+                        [[ -z "$matching_line" ]] && matching_line=$(echo "$ss_udp_listen" | grep -E "[:\s]${r_port}[[:space:]]" | head -n 1 || true)
+                    fi
+
+                    if [[ -z "$matching_line" ]]; then
+                        local already_warned=0
+                        for dt in "${warned_dead_targets[@]}"; do
+                            if [[ "$dt" == "$target_key" ]]; then
+                                already_warned=1
+                                break
+                            fi
+                        done
+                        if [[ $already_warned -eq 0 ]]; then
+                            warned_dead_targets+=("$target_key")
+                            echo -e "  ${YELLOW}!${NC} «Мёртвое» правило: порт ${r_port}/${proto} разрешён в UFW, но служба не запущена"
+                            echo -e "    ${DIM}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
+                            warnings=$((warnings + 1))
+                        fi
+                    elif [[ $is_public -eq 1 ]]; then
+                        # Процесс есть, и порт открыт для всего мира (Anywhere).
+                        # Проверяем, является ли он авторизованным публичным портом.
+                        local is_authorized=0
+                        # 1. Активный порт SSH
+                        for sp in "${live_ssh_ports[@]}"; do
+                            if [[ "$r_port" == "$sp" && ("$proto" == "tcp" || "$proto" == "any") ]]; then
+                                is_authorized=1
+                                break
+                            fi
+                        done
+                        # 2. Легитимные веб-порты 80 и 443
+                        if [[ ("$r_port" == "80" || "$r_port" == "443") && ("$proto" == "tcp" || "$proto" == "any") ]]; then
+                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]] || command -v nginx >/dev/null 2>&1; then
+                                is_authorized=1
+                            fi
+                        fi
+
+                        if [[ $is_authorized -eq 0 ]]; then
+                            local already_warned=0
+                            for pt in "${warned_public_targets[@]}"; do
+                                if [[ "$pt" == "$target_key" ]]; then
+                                    already_warned=1
+                                    break
+                                fi
+                            done
+                            if [[ $already_warned -eq 0 ]]; then
+                                warned_public_targets+=("$target_key")
+                                local proc_name=""
+                                proc_name=$(echo "$matching_line" | sed -E 's/.*users:\(\("([^"]+)".*/\1/' || true)
+                                [[ -z "$proc_name" || "$proc_name" == "$matching_line" ]] && proc_name="не определен"
+                                echo -e "  ${YELLOW}!${NC} ВНИМАНИЕ: Посторонний порт ${r_port}/${proto} (процесс: ${proc_name}) открыт для всех (Anywhere)!"
+                                echo -e "    ${DIM}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
+                                warnings=$((warnings + 1))
+                            fi
+                        fi
+                    fi
+                done
+            done <<< "$ufw_rules_raw"
+        fi
     else
         echo -e "  ${YELLOW}!${NC} UFW фаервол не активен"
+        warnings=$((warnings + 1))
     fi
 
     if [[ "$role" == "origin" && -f "$RELAYS_FILE" ]]; then
@@ -828,10 +981,12 @@ if os.path.exists(rf):
         failed=$((failed + 1))
     fi
 
-    if [[ $failed -eq 0 ]]; then
+    if [[ $failed -eq 0 && $warnings -eq 0 ]]; then
         echo -e "\n${BOLD}${GREEN}Все проверки пройдены успешно! Узел полностью здоров.${NC}\n"
+    elif [[ $failed -eq 0 ]]; then
+        echo -e "\n${BOLD}${YELLOW}Проверки завершены с предупреждениями (предупреждений: ${warnings}).${NC}\n"
     else
-        echo -e "\n${BOLD}${RED}Обнаружено ошибок: ${failed}. Требуется внимание администратора.${NC}\n"
+        echo -e "\n${BOLD}${RED}Обнаружено ошибок: ${failed}, предупреждений: ${warnings}. Требуется внимание администратора.${NC}\n"
     fi
 }
 
