@@ -555,10 +555,10 @@ run_doctor() {
     fi
 
     log "6. Проверка UFW фаервола..."
-    if ufw status 2>/dev/null | grep -qi "Status: active"; then
+    if LC_ALL=C ufw status 2>/dev/null | grep -qi "Status: active"; then
         echo -e "  ${GREEN}✔${NC} UFW фаервол активен"
         local ufw_out
-        ufw_out="$(ufw status verbose 2>/dev/null || ufw status 2>/dev/null || true)"
+        ufw_out="$(LC_ALL=C ufw status verbose 2>/dev/null || LC_ALL=C ufw status 2>/dev/null || true)"
 
         if [[ "$role" == "origin" ]]; then
             local bot_ip
@@ -621,44 +621,45 @@ run_doctor() {
         [[ ${#live_ssh_ports[@]} -eq 0 ]] && live_ssh_ports=("22")
 
         local ufw_rules_raw
-        ufw_rules_raw="$(ufw status verbose 2>/dev/null | grep -E '^[0-9]+' || true)"
+        ufw_rules_raw="$(LC_ALL=C ufw status verbose 2>/dev/null | grep -E '^[0-9]+' || true)"
 
         if [[ -n "$ufw_rules_raw" ]]; then
-            local checked_targets=()
+            local warned_dead_targets=()
+            local warned_public_targets=()
             while read -r rule_line; do
                 [[ -z "$rule_line" ]] && continue
-                local raw_target action from_part
-                raw_target=$(echo "$rule_line" | awk '{print $1}')
-                action=$(echo "$rule_line" | awk '{print $2}')
-                from_part=$(echo "$rule_line" | awk '{$1=""; $2=""; print $0}' | sed -E 's/^[[:space:]]*(IN|OUT)[[:space:]]*//' | sed 's/^[[:space:]]*//')
+                local clean_line raw_target action from_part
+                clean_line=$(echo "$rule_line" | sed 's/(v6)//g')
+                raw_target=$(echo "$clean_line" | awk '{print $1}')
+                action=$(echo "$clean_line" | awk '{print $2}')
+                from_part=$(echo "$clean_line" | awk '{$1=""; $2=""; print $0}' | sed -E 's/^[[:space:]]*(IN|OUT)[[:space:]]*//' | sed 's/^[[:space:]]*//')
 
                 [[ "$action" != "ALLOW" ]] && continue
 
-                # Нормализация целевого порта (убираем (v6))
+                # Нормализация целевого порта
                 local norm_target
-                norm_target=$(echo "$raw_target" | sed 's/(v6)//g' | tr -d '[:space:]')
-                local r_port="${norm_target%/*}"
-                local r_proto="${norm_target#*/}"
-                [[ "$r_proto" == "$norm_target" ]] && r_proto="tcp"
+                norm_target=$(echo "$raw_target" | tr -d '[:space:]')
+                local r_port r_proto
+                if [[ "$norm_target" == *"/"* ]]; then
+                    r_port="${norm_target%/*}"
+                    r_proto="${norm_target#*/}"
+                else
+                    r_port="$norm_target"
+                    r_proto="any"
+                fi
 
-                # Дедупликация портов v4 и v6
-                local already_checked=0
-                for ct in "${checked_targets[@]}"; do
-                    if [[ "$ct" == "${r_port}/${r_proto}" ]]; then
-                        already_checked=1
-                        break
-                    fi
-                done
-                [[ $already_checked -eq 1 ]] && continue
-                checked_targets+=("${r_port}/${r_proto}")
+                local target_key="${r_port}/${r_proto}"
 
                 # Проверяем наличие слушающего процесса в системе
                 local proc_owner=""
                 if command -v ss >/dev/null 2>&1; then
                     if [[ "$r_proto" == "tcp" ]]; then
-                        proc_owner=$(ss -tlnp 2>/dev/null | grep -E "[:\s]${r_port}\b" | awk '{print $NF}' | head -n 1 || true)
+                        proc_owner=$(ss -tlnp 2>/dev/null | grep -E ":${r_port}[[:space:]]" | awk '{print $NF}' | head -n 1 || true)
+                    elif [[ "$r_proto" == "udp" ]]; then
+                        proc_owner=$(ss -ulnp 2>/dev/null | grep -E ":${r_port}[[:space:]]" | awk '{print $NF}' | head -n 1 || true)
                     else
-                        proc_owner=$(ss -ulnp 2>/dev/null | grep -E "[:\s]${r_port}\b" | awk '{print $NF}' | head -n 1 || true)
+                        proc_owner=$(ss -tlnp 2>/dev/null | grep -E ":${r_port}[[:space:]]" | awk '{print $NF}' | head -n 1 || true)
+                        [[ -z "$proc_owner" ]] && proc_owner=$(ss -ulnp 2>/dev/null | grep -E ":${r_port}[[:space:]]" | awk '{print $NF}' | head -n 1 || true)
                     fi
                 fi
 
@@ -669,29 +670,54 @@ run_doctor() {
 
                 # Если процесс отсутствует — это «мёртвое» правило в UFW
                 if [[ -z "$proc_owner" ]]; then
-                    echo -e "  ${YELLOW}!${NC} «Мёртвое» правило: порт ${r_port}/${r_proto} разрешён в UFW, но служба не запущена"
-                    echo -e "    ${DIM}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
+                    local already_warned=0
+                    for dt in "${warned_dead_targets[@]}"; do
+                        if [[ "$dt" == "$target_key" ]]; then
+                            already_warned=1
+                            break
+                        fi
+                    done
+                    if [[ $already_warned -eq 0 ]]; then
+                        warned_dead_targets+=("$target_key")
+                        echo -e "  ${YELLOW}!${NC} «Мёртвое» правило: порт ${r_port}/${r_proto} разрешён в UFW, но служба не запущена"
+                        echo -e "    ${DIM}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
+                    fi
                 elif [[ $is_public -eq 1 ]]; then
                     # Процесс есть, и порт открыт для всего мира (Anywhere).
                     # Проверяем, является ли он авторизованным публичным портом.
                     local is_authorized=0
                     # 1. Активный порт SSH
                     for sp in "${live_ssh_ports[@]}"; do
-                        if [[ "$r_port" == "$sp" && "$r_proto" == "tcp" ]]; then
+                        if [[ "$r_port" == "$sp" && ("$r_proto" == "tcp" || "$r_proto" == "any") ]]; then
                             is_authorized=1
                             break
                         fi
                     done
                     # 2. Легитимные веб-порты 80 и 443
-                    if [[ "$r_port" == "80" || "$r_port" == "443" ]] && [[ "$r_proto" == "tcp" ]]; then
+                    if [[ ("$r_port" == "80" || "$r_port" == "443") && ("$r_proto" == "tcp" || "$r_proto" == "any") ]]; then
                         if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]] || command -v nginx >/dev/null 2>&1; then
                             is_authorized=1
                         fi
                     fi
 
                     if [[ $is_authorized -eq 0 ]]; then
-                        echo -e "  ${YELLOW}!${NC} ВНИМАНИЕ: Посторонний порт ${r_port}/${r_proto} (${proc_owner}) открыт для всех (Anywhere)!"
-                        echo -e "    ${DIM}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
+                        local already_warned=0
+                        for pt in "${warned_public_targets[@]}"; do
+                            if [[ "$pt" == "$target_key" ]]; then
+                                already_warned=1
+                                break
+                            fi
+                        done
+                        if [[ $already_warned -eq 0 ]]; then
+                            warned_public_targets+=("$target_key")
+                            local proc_name=""
+                            if [[ -n "$proc_owner" ]]; then
+                                proc_name=$(echo "$proc_owner" | sed -E 's/.*"([^"]+)".*/\1/')
+                            fi
+                            [[ -z "$proc_name" || "$proc_name" == "-" ]] && proc_name="не определен"
+                            echo -e "  ${YELLOW}!${NC} ВНИМАНИЕ: Посторонний порт ${r_port}/${r_proto} (процесс: ${proc_name}) открыт для всех (Anywhere)!"
+                            echo -e "    ${DIM}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
+                        fi
                     fi
                 fi
             done <<< "$ufw_rules_raw"
