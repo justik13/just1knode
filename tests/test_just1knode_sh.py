@@ -2917,12 +2917,11 @@ remove_traffic_watchdog_timer
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("6b. Полный аудит периметра", just1knode_sh)
         self.assertIn("LC_ALL=C ufw status verbose", just1knode_sh)
-        self.assertIn('clean_line="${rule_line//(v6)/}"', just1knode_sh)
-        self.assertIn('grep -E ":${r_port}[[:space:]]"', just1knode_sh)
+        self.assertIn("Default: allow (incoming)", just1knode_sh)
         self.assertIn("warned_dead_targets", just1knode_sh)
         self.assertIn("warned_public_targets", just1knode_sh)
-        self.assertIn("Мёртвое» правило: порт ${r_port}/${r_proto} разрешён в UFW, но служба не запущена", just1knode_sh)
-        self.assertIn("ВНИМАНИЕ: Посторонний порт ${r_port}/${r_proto} (процесс: ${proc_name}) открыт для всех (Anywhere)!", just1knode_sh)
+        self.assertIn("Мёртвое» правило: порт ${r_port}/${proto} разрешён в UFW, но служба не запущена", just1knode_sh)
+        self.assertIn("ВНИМАНИЕ: Посторонний порт ${r_port}/${proto} (процесс: ${proc_name}) открыт для всех (Anywhere)!", just1knode_sh)
         self.assertIn("ufw delete allow ${norm_target}", just1knode_sh)
 
 
