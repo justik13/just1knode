@@ -393,8 +393,26 @@ print('tls')
         detected_code="relay-01"
     fi
 
+    local detected_country="Зарубежный шлюз"
+    case "$detected_code" in
+        de) detected_country="🇩🇪 Германия" ;;
+        nl) detected_country="🇳🇱 Нидерланды" ;;
+        fi) detected_country="🇫🇮 Финляндия" ;;
+        se) detected_country="🇸🇪 Швеция" ;;
+        us) detected_country="🇺🇸 США" ;;
+        gb|uk) detected_country="🇬🇧 Великобритания" ;;
+        fr) detected_country="🇫🇷 Франция" ;;
+        tr) detected_country="🇹🇷 Турция" ;;
+        kz) detected_country="🇰🇿 Казахстан" ;;
+        pl) detected_country="🇵🇱 Польша" ;;
+        at) detected_country="🇦🇹 Австрия" ;;
+        ch) detected_country="🇨🇭 Швейцария" ;;
+        ee) detected_country="🇪🇪 Эстония" ;;
+        *) detected_country="${detected_code^^}" ;;
+    esac
+
     echo -e "${BOLD}Скопируйте и выполните эту команду на вашем Origin-сервере:${NC}"
-    echo -e "${GREEN}just1knode relay add \"${detected_code^^}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
+    echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
     echo -e "${BOLD}Или, если релей уже был добавлен ранее, обновите SNI на Origin:${NC}"
     echo -e "${CYAN}just1knode relay sni ${detected_code} ${r_sni} tls${NC}\n"
 }
@@ -523,6 +541,9 @@ run_doctor() {
     log "5. Проверка SSL сертификатов Let's Encrypt..."
     local domain
     domain="$(get_state_val "domain")"
+    [[ -z "$domain" ]] && domain="$(get_state_val "sni")"
+    [[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"
+
     if [[ -n "$domain" && -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
         local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
         local exp_date
@@ -548,7 +569,11 @@ run_doctor() {
             failed=$((failed + 1))
         fi
     else
-        echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $domain не найден (нормально для Relay)"
+        if [[ -n "$domain" ]]; then
+            echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $domain не найден (нормально для Relay)"
+        else
+            echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (нормально для Relay)"
+        fi
     fi
 
     log "6. Проверка UFW фаервола..."

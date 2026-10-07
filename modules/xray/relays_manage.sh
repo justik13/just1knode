@@ -193,6 +193,23 @@ add_relay_node() {
         error "Имя, IP/Домен и UUID обязательны для добавления релея."
     fi
 
+    # Автодополнение флага и названия страны для коротких кодов
+    case "${name,,}" in
+        ee|estonia|"эстония"|"ee эстония") name="🇪🇪 Эстония" ;;
+        de|germany|"германия"|"de германия") name="🇩🇪 Германия" ;;
+        nl|netherlands|"нидерланды"|"nl нидерланды") name="🇳🇱 Нидерланды" ;;
+        fi|finland|"финляндия"|"fi финляндия") name="🇫🇮 Финляндия" ;;
+        se|sweden|"швеция"|"se швеция") name="🇸🇪 Швеция" ;;
+        us|usa|"сша"|"us сша") name="🇺🇸 США" ;;
+        gb|uk|britain|"великобритания"|"gb великобритания") name="🇬🇧 Великобритания" ;;
+        fr|france|"франция"|"fr франция") name="🇫🇷 Франция" ;;
+        tr|turkey|"турция"|"tr турция") name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"казахстан"|"kz казахстан") name="🇰🇿 Казахстан" ;;
+        pl|poland|"польша"|"pl польша") name="🇵🇱 Польша" ;;
+        at|austria|"австрия"|"at австрия") name="🇦🇹 Австрия" ;;
+        ch|switzerland|"швейцария"|"ch швейцария") name="🇨🇭 Швейцария" ;;
+    esac
+
     # Валидация параметров безопасности VLESS TLS
     if [[ -z "$sni" ]]; then
         if [[ -t 0 ]]; then
@@ -778,6 +795,23 @@ rename_relay_node() {
     if [[ -z "$target" || -z "$new_name" ]]; then
         error "Использование: just1knode relay rename <код_или_текущее_имя> <новое_название>"
     fi
+
+    # Автодополнение флага и названия страны для коротких кодов
+    case "${new_name,,}" in
+        ee|estonia|"эстония"|"ee эстония") new_name="🇪🇪 Эстония" ;;
+        de|germany|"германия"|"de германия") new_name="🇩🇪 Германия" ;;
+        nl|netherlands|"нидерланды"|"nl нидерланды") new_name="🇳🇱 Нидерланды" ;;
+        fi|finland|"финляндия"|"fi финляндия") new_name="🇫🇮 Финляндия" ;;
+        se|sweden|"швеция"|"se швеция") new_name="🇸🇪 Швеция" ;;
+        us|usa|"сша"|"us сша") new_name="🇺🇸 США" ;;
+        gb|uk|britain|"великобритания"|"gb великобритания") new_name="🇬🇧 Великобритания" ;;
+        fr|france|"франция"|"fr франция") new_name="🇫🇷 Франция" ;;
+        tr|turkey|"турция"|"tr турция") new_name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"казахстан"|"kz казахстан") new_name="🇰🇿 Казахстан" ;;
+        pl|poland|"польша"|"pl польша") new_name="🇵🇱 Польша" ;;
+        at|austria|"австрия"|"at австрия") new_name="🇦🇹 Австрия" ;;
+        ch|switzerland|"швейцария"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
+    esac
 
     local role
     role="$(get_state_val "role")"

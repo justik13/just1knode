@@ -3023,6 +3023,8 @@ remove_traffic_watchdog_timer
         self.assertIn('sec = ib.get(\'streamSettings\', {}).get(\'security\')', just1knode_sh)
         self.assertNotIn('local detected_code="de"', just1knode_sh)
         self.assertIn('detected_code="relay-01"', just1knode_sh)
+        self.assertIn('ee) detected_country="🇪🇪 Эстония" ;;', just1knode_sh)
+        self.assertIn('just1knode relay add \\"${detected_country}\\"', just1knode_sh)
 
     def test_heal_and_update_relay_config_auto_migrates_tls_on_cert_found(self):
         """Verify heal_and_update_relay_config validates domain before selecting cert and guards TLS inbound."""
@@ -3565,6 +3567,25 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("just1k-wl-", app_content)
         self.assertIn("get_target_inbounds", app_content)
         self.assertIn("os.fsync", cs_content)
+
+    def test_relay_country_normalization_and_doctor_fallback(self):
+        """Verify country name normalization with emoji flags and doctor domain fallback."""
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+
+        # Doctor check 5 domain fallback
+        self.assertIn('[[ -z "$domain" ]] && domain="$(get_state_val "sni")"', just1knode_sh)
+        self.assertIn('[[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"', just1knode_sh)
+        self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
+
+        # Relay domain setup emoji flag
+        self.assertIn('ee) detected_country="🇪🇪 Эстония" ;;', relay_sh)
+        self.assertIn('just1knode relay add \\"${detected_country}\\"', relay_sh)
+
+        # add_relay_node and rename_relay_node normalization
+        self.assertIn('ee|estonia|"эстония"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
+        self.assertIn('ee|estonia|"эстония"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
 
 
 if __name__ == "__main__":
