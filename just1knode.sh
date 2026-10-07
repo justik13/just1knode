@@ -351,9 +351,29 @@ show_relay_credentials() {
     r_shortid="$(get_state_val "short_id" "")"
     r_sni="$(get_state_val "sni" "")"
 
-    # Все Relay узлы стандартизированы на VLESS TLS
+    # Определение режима и нормализация для устаревших узлов с fallback на TLS
+    if [[ -z "$r_sec" ]]; then
+        if [[ -f "$XRAY_CONFIG" ]]; then
+            r_sec="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    for ib in cfg.get('inbounds', []):
+        sec = ib.get('streamSettings', {}).get('security')
+        if sec in ('tls', 'reality'):
+            print('tls')
+            sys.exit(0)
+except Exception:
+    pass
+print('tls')
+" "$XRAY_CONFIG" 2>/dev/null || echo "tls")"
+        else
+            r_sec="tls"
+        fi
+        set_state_val "security" "tls" 2>/dev/null || true
+    fi
     r_sec="tls"
-    set_state_val "security" "tls" 2>/dev/null || true
 
     local detected_code=""
     local geo_json

@@ -337,23 +337,23 @@ vnext = [{
     }]
 }]
 
-    stream_settings = {
-        'network': 'tcp',
-        'security': 'tls',
-        'tlsSettings': {
-            'serverName': r_sni if r_sni else r_ip,
-            'fingerprint': 'chrome',
-            'alpn': ['h2', 'http/1.1']
-        }
+stream_settings = {
+    'network': 'tcp',
+    'security': 'tls',
+    'tlsSettings': {
+        'serverName': r_sni if r_sni else r_ip,
+        'fingerprint': 'chrome',
+        'alpn': ['h2', 'http/1.1']
     }
+}
 
-    new_ob = {
-        'tag': out_tag,
-        'protocol': 'vless',
-        'settings': {'vnext': vnext},
-        'streamSettings': stream_settings
-    }
-    cfg['outbounds'].append(new_ob)
+new_ob = {
+    'tag': out_tag,
+    'protocol': 'vless',
+    'settings': {'vnext': vnext},
+    'streamSettings': stream_settings
+}
+cfg['outbounds'].append(new_ob)
 
 # 3. Добавляем inbound этого релея в правила прямого выхода в Рунет (just1k-wl-direct)
 rules = cfg.setdefault('routing', {}).setdefault('rules', [])
