@@ -549,6 +549,29 @@ exit 0
         self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
 
+        # 6. Check gRPC API, stats and user traffic policy invariants
+        self.assertEqual(updated.get("api", {}).get("tag"), "just1k-wl-api")
+        self.assertIn("HandlerService", updated.get("api", {}).get("services", []))
+        self.assertIn("StatsService", updated.get("api", {}).get("services", []))
+        self.assertIn("stats", updated)
+        self.assertTrue(updated.get("policy", {}).get("levels", {}).get("0", {}).get("statsUserUplink"))
+        self.assertTrue(updated.get("policy", {}).get("levels", {}).get("0", {}).get("statsUserDownlink"))
+
+        # 7. Integration validation with real Xray binary if available in runtime environment
+        xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
+        if os.path.exists(xray_bin) and os.access(xray_bin, os.X_OK):
+            test_proc = subprocess.run(
+                [xray_bin, "run", "-test", "-config", str(xray_config_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                test_proc.returncode,
+                0,
+                f"Generated Xray Origin config failed Xray validation: {test_proc.stderr}",
+            )
+
     def test_apply_node_sysctl_hardening_disables_ipv6_and_icmp_echo(self):
         """apply_node_sysctl_hardening must write IPv6 disable and ICMP echo ignore settings to sysctl.d."""
         self._prepare_base_env()
