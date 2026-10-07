@@ -452,9 +452,9 @@ run_doctor() {
         fi
     done
 
-    # API порт проверяется только на Origin узле
+    # gRPC проверяется только на Origin узле
     if [[ "$role" == "origin" ]]; then
-        log "2. Проверка локального API порта Xray (127.0.0.1:10085)..."
+        log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         local grpc_ok=0
         for _ in 1 2 3; do
             if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 10085), timeout=2); s.close()" 2>/dev/null; then
@@ -464,9 +464,9 @@ run_doctor() {
             sleep 0.5
         done
         if [[ $grpc_ok -eq 1 ]]; then
-            echo -e "  ${GREEN}✔${NC} Локальный API порт Xray (10085) отвечает"
+            echo -e "  ${GREEN}✔${NC} gRPC сокет Xray отвечает"
         else
-            echo -e "  ${RED}✗${NC} Локальный API порт Xray (10085) недоступен"
+            echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
             failed=$((failed + 1))
         fi
     elif [[ "$role" == "relay" || "$role" == "dual" ]]; then
