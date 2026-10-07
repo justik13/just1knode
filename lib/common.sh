@@ -503,13 +503,7 @@ heal_node_firewall_and_stealth() {
     local role
     role="$(get_state_val "role" "")"
 
-    # Гарантия базовой политики фаервола: запрет входящих по умолчанию
-    if ! ufw status verbose 2>/dev/null | grep -qi "Default: deny (incoming)"; then
-        ufw default deny incoming >/dev/null 2>&1 || true
-    fi
-    ufw default allow outgoing >/dev/null 2>&1 || true
-
-    # 2. Гарантия защиты SSH (Zero-Lockout стандарт: подтверждаем все активные публичные сокеты SSH)
+    # 1. Гарантия защиты SSH (Zero-Lockout стандарт: подтверждаем все активные публичные сокеты SSH ДО изменения политики)
     # Важно: не расширяем уже существующие restricted-правила (с привязкой к IP) до Anywhere!
     local ssh_live_ports=()
     while read -r sp; do
@@ -526,6 +520,12 @@ heal_node_firewall_and_stealth() {
             log "Фаервол UFW: гарантирован доступ к порту SSH ($sp/tcp)."
         fi
     done
+
+    # 2. Гарантия базовой политики фаервола: запрет входящих по умолчанию (только после подтверждения SSH)
+    if ! ufw status verbose 2>/dev/null | grep -qi "Default: deny (incoming)"; then
+        ufw default deny incoming >/dev/null 2>&1 || true
+    fi
+    ufw default allow outgoing >/dev/null 2>&1 || true
 
     # 3. AmneziaWG API (порты для ролей awg, dual, либо при наличии активного конфига amnezia)
     local is_awg_node=0

@@ -131,10 +131,16 @@ install -d -m 750 -o root -g nogroup "$TARGET_DIR"
 
 if [ -n "${RENEWED_LINEAGE:-}" ] && [ -n "$RELAY_SNI" ]; then
     if [ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]; then
-        if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ]; then
+        if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/fullchain.pem"
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/privkey.pem"
-            systemctl restart xray 2>/dev/null || true
+            if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
+                if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+                    systemctl restart xray 2>/dev/null || true
+                fi
+            else
+                systemctl restart xray 2>/dev/null || true
+            fi
         fi
     fi
 fi
@@ -940,11 +946,29 @@ except Exception:
         fi
     fi
 
+    local detected_country="Зарубежный шлюз"
+    case "$detected_code" in
+        de) detected_country="🇩🇪 Германия" ;;
+        nl) detected_country="🇳🇱 Нидерланды" ;;
+        fi) detected_country="🇫🇮 Финляндия" ;;
+        se) detected_country="🇸🇪 Швеция" ;;
+        us) detected_country="🇺🇸 США" ;;
+        gb|uk) detected_country="🇬🇧 Великобритания" ;;
+        fr) detected_country="🇫🇷 Франция" ;;
+        tr) detected_country="🇹🇷 Турция" ;;
+        kz) detected_country="🇰🇿 Казахстан" ;;
+        pl) detected_country="🇵🇱 Польша" ;;
+        at) detected_country="🇦🇹 Австрия" ;;
+        ch) detected_country="🇨🇭 Швейцария" ;;
+        ee) detected_country="🇪🇪 Эстония" ;;
+        *) detected_country="${detected_code^^}" ;;
+    esac
+
     title "НАСТРОЙКА ДОМЕНА RELAY УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}1. Команда для переключения этого релея на вашем Origin-сервере:${NC}"
     echo -e "${GREEN}just1knode relay sni ${detected_code} ${domain} tls${NC}\n"
     echo -e "${BOLD}2. Если вы настраиваете этот релей на Origin впервые, используйте команду:${NC}"
-    echo -e "${CYAN}just1knode relay add \"${detected_code^^}\" ${my_ip} ${relay_port} ${tunnel_uuid} \"${detected_code}\" \"tls\" \"-\" \"-\" \"${domain}\"${NC}\n"
+    echo -e "${CYAN}just1knode relay add \"${detected_country}\" ${my_ip} ${relay_port} ${tunnel_uuid} \"${detected_code}\" \"tls\" \"-\" \"-\" \"${domain}\"${NC}\n"
 }
 
 heal_and_update_relay_config() {

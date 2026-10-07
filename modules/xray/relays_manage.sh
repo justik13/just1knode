@@ -173,35 +173,11 @@ add_relay_node() {
     local sni=""
     local badge=""
 
-    if [[ "$arg6" == "tls" || "$arg6" == "reality" ]]; then
-        security_type="$arg6"
-        pubkey="$arg7"
-        shortid="$arg8"
-        sni="$arg9"
-        badge="$arg10"
-    elif [[ -n "$arg6" && "$arg6" != "-" ]]; then
-        # Легаси-синтаксис (v2.1.2): 6-й аргумент являлся pubkey для REALITY
-        security_type="reality"
-        pubkey="$arg6"
-        shortid="$arg7"
-        sni="$arg8"
-        badge="$arg9"
-    else
-        # arg6 пустой или "-"
-        if [[ -n "$arg7" || -n "$arg8" ]]; then
-            security_type="reality"
-            pubkey="$arg7"
-            shortid="$arg8"
-            sni="$arg9"
-            badge="$arg10"
-        else
-            security_type="tls"
-            pubkey=""
-            shortid=""
-            sni="$arg9"
-            badge="$arg10"
-        fi
-    fi
+    security_type="tls"
+    sni="$arg9"
+    badge="$arg10"
+    [[ -z "$sni" && -n "$arg8" && "$arg8" != "-" ]] && sni="$arg8"
+    [[ -z "$sni" && -n "$arg6" && "$arg6" != "tls" && "$arg6" != "-" ]] && sni="$arg6"
 
     [[ "$pubkey" == "-" ]] && pubkey=""
     [[ "$shortid" == "-" ]] && shortid=""
@@ -217,32 +193,32 @@ add_relay_node() {
         error "Имя, IP/Домен и UUID обязательны для добавления релея."
     fi
 
-    # Валидация специфичных параметров безопасности
-    if [[ "$security_type" == "tls" ]]; then
-        if [[ -z "$sni" ]]; then
-            if [[ -t 0 ]]; then
-                read -rp "Введите домен / SNI для релея в режиме TLS: " sni_in || true
-                sni="${sni_in:-}"
-            fi
-            if [[ -z "$sni" ]]; then
-                error "Для режима TLS обязательно указание домена (SNI). Укажите домен релея."
-                return 1
-            fi
+    # Автодополнение флага и названия страны для коротких кодов
+    case "${name,,}" in
+        ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;
+        de|germany|"de germany"|"de германия") name="🇩🇪 Германия" ;;
+        nl|netherlands|"nl netherlands"|"nl нидерланды") name="🇳🇱 Нидерланды" ;;
+        fi|finland|"fi finland"|"fi финляндия") name="🇫🇮 Финляндия" ;;
+        se|sweden|"se sweden"|"se швеция") name="🇸🇪 Швеция" ;;
+        us|usa|"us usa"|"us сша") name="🇺🇸 США" ;;
+        gb|uk|britain|"gb britain"|"gb великобритания") name="🇬🇧 Великобритания" ;;
+        fr|france|"fr france"|"fr франция") name="🇫🇷 Франция" ;;
+        tr|turkey|"tr turkey"|"tr турция") name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"kz kazakhstan"|"kz казахстан") name="🇰🇿 Казахстан" ;;
+        pl|poland|"pl poland"|"pl польша") name="🇵🇱 Польша" ;;
+        at|austria|"at austria"|"at австрия") name="🇦🇹 Австрия" ;;
+        ch|switzerland|"ch switzerland"|"ch швейцария") name="🇨🇭 Швейцария" ;;
+    esac
+
+    # Валидация параметров безопасности VLESS TLS
+    if [[ -z "$sni" ]]; then
+        if [[ -t 0 ]]; then
+            read -rp "Введите домен / SNI для релея в режиме TLS: " sni_in || true
+            sni="${sni_in:-}"
         fi
-    elif [[ "$security_type" == "reality" ]]; then
-        if [[ -z "$pubkey" ]]; then
-            error "Для режима REALITY обязательно указание публичного ключа (PublicKey)."
+        if [[ -z "$sni" ]]; then
+            error "Для режима TLS обязательно указание домена (SNI). Укажите домен релея."
             return 1
-        fi
-        if [[ -z "$sni" ]]; then
-            if [[ -t 0 ]]; then
-                read -rp "Введите домен / SNI для маскировки REALITY: " sni_in || true
-                sni="${sni_in:-}"
-            fi
-            if [[ -z "$sni" ]]; then
-                error "Для режима REALITY обязательно указание целевого SNI/домена."
-                return 1
-            fi
         fi
     fi
 
@@ -380,24 +356,13 @@ vnext = [{
 
 stream_settings = {
     'network': 'tcp',
-    'security': r_sec
-}
-
-if r_sec == 'reality':
-    stream_settings['realitySettings'] = {
-        'serverName': r_sni,
-        'fingerprint': 'chrome',
-        'show': False,
-        'publicKey': r_pubkey,
-        'shortId': r_shortid,
-        'spiderX': ''
-    }
-else:
-    stream_settings['tlsSettings'] = {
+    'security': 'tls',
+    'tlsSettings': {
         'serverName': r_sni if r_sni else r_ip,
         'fingerprint': 'chrome',
         'alpn': ['h2', 'http/1.1']
     }
+}
 
 new_ob = {
     'tag': out_tag,
@@ -831,6 +796,23 @@ rename_relay_node() {
         error "Использование: just1knode relay rename <код_или_текущее_имя> <новое_название>"
     fi
 
+    # Автодополнение флага и названия страны для коротких кодов
+    case "${new_name,,}" in
+        ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;
+        de|germany|"de germany"|"de германия") new_name="🇩🇪 Германия" ;;
+        nl|netherlands|"nl netherlands"|"nl нидерланды") new_name="🇳🇱 Нидерланды" ;;
+        fi|finland|"fi finland"|"fi финляндия") new_name="🇫🇮 Финляндия" ;;
+        se|sweden|"se sweden"|"se швеция") new_name="🇸🇪 Швеция" ;;
+        us|usa|"us usa"|"us сша") new_name="🇺🇸 США" ;;
+        gb|uk|britain|"gb britain"|"gb великобритания") new_name="🇬🇧 Великобритания" ;;
+        fr|france|"fr france"|"fr франция") new_name="🇫🇷 Франция" ;;
+        tr|turkey|"tr turkey"|"tr турция") new_name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"kz kazakhstan"|"kz казахстан") new_name="🇰🇿 Казахстан" ;;
+        pl|poland|"pl poland"|"pl польша") new_name="🇵🇱 Польша" ;;
+        at|austria|"at austria"|"at австрия") new_name="🇦🇹 Австрия" ;;
+        ch|switzerland|"ch switzerland"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
+    esac
+
     local role
     role="$(get_state_val "role")"
     if [[ "$role" != "origin" ]]; then
@@ -947,12 +929,7 @@ update_relay_sni() {
             ips+=("$ip")
             snis+=("$sni")
             secs+=("$sec")
-            local warn_badge=""
-            if [[ "$sni" == *"google.com"* || "$sec" == "reality" ]]; then
-                warn_badge=" ${YELLOW}[${sec:-reality} ⚠️]${NC}"
-            else
-                warn_badge=" ${GREEN}[${sec:-tls} ✔]${NC}"
-            fi
+            local warn_badge=" ${GREEN}[${sec:-tls} ✔]${NC}"
             echo -e "  ${BOLD}[$count]${NC} $name (код: ${CYAN}$code${NC}, IP: $ip, SNI: ${sni:-не задан})${warn_badge}"
         done <<< "$list_output"
         echo -e "  ${BOLD}[0]${NC} ⬅️  Отмена\n"
@@ -1001,9 +978,7 @@ cfg_file = sys.argv[1]
 rf = sys.argv[2]
 target = sys.argv[3].strip().lower()
 new_sni = sys.argv[4].strip()
-new_sec = sys.argv[5].strip().lower()
-if new_sec not in ('tls', 'reality'):
-    new_sec = 'tls'
+new_sec = 'tls'
 
 if not os.path.exists(cfg_file):
     print('ERROR: config.json not found')
@@ -1086,29 +1061,13 @@ if new_sec == 'tls' and target_ip and os.environ.get('JUST1KNODE_SKIP_DNS_CHECK'
         print(f'WARN_DNS_ERROR|{target_ip}|{e}')
 
 st = target_ob.setdefault('streamSettings', {})
-st['security'] = new_sec
-
-if new_sec == 'tls':
-    st.pop('realitySettings', None)
-    st['tlsSettings'] = {
-        'serverName': new_sni,
-        'fingerprint': 'chrome',
-        'alpn': ['h2', 'http/1.1']
-    }
-else:
-    st.pop('tlsSettings', None)
-    rs = st.setdefault('realitySettings', {})
-    rs['serverName'] = new_sni
-    rs.setdefault('fingerprint', 'chrome')
-    rs.setdefault('show', False)
-    if not rs.get('publicKey'):
-        # Check if stored in relays.json
-        pub = next((r.get('public_key') or r.get('pubkey') for r in relays if r.get('code') == matched_code and (r.get('public_key') or r.get('pubkey'))), None)
-        if pub and pub != '-':
-            rs['publicKey'] = pub
-        else:
-            print(f'ERROR: Outbound {out_tag} lacks publicKey for REALITY mode')
-            sys.exit(1)
+st['security'] = 'tls'
+st.pop('realitySettings', None)
+st['tlsSettings'] = {
+    'serverName': new_sni,
+    'fingerprint': 'chrome',
+    'alpn': ['h2', 'http/1.1']
+}
 
 # Сохраняем обновленный config.json
 d = os.path.dirname(os.path.abspath(cfg_file))
@@ -1263,26 +1222,20 @@ try:
         tokens = tokens[1:]
     if len(tokens) >= 5:
         name, ip, port, uuid, code = tokens[0], tokens[1], tokens[2], tokens[3], tokens[4]
-        arg5 = tokens[5] if len(tokens) > 5 else ''
-        if arg5 in ('tls', 'reality'):
-            sec = arg5
-            pk = tokens[6] if len(tokens) > 6 and tokens[6] != '-' else ''
-            sid = tokens[7] if len(tokens) > 7 and tokens[7] != '-' else ''
+        sec = 'tls'
+        pk = '-'
+        sid = '-'
+        sni = ''
+        badge = ''
+        if len(tokens) > 5 and tokens[5] == 'tls':
             sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
             badge = tokens[9] if len(tokens) > 9 else ''
-        elif arg5 and arg5 != '-':
-            # Legacy command: 6th token was pubkey for reality
-            sec = 'reality'
-            pk = arg5
-            sid = tokens[6] if len(tokens) > 6 and tokens[6] != '-' else ''
-            sni = tokens[7] if len(tokens) > 7 and tokens[7] != '-' else ''
-            badge = tokens[8] if len(tokens) > 8 else ''
-        else:
-            sec = 'tls'
-            pk = ''
-            sid = ''
+        elif len(tokens) > 5 and tokens[5] == 'reality':
             sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
             badge = tokens[9] if len(tokens) > 9 else ''
+        elif len(tokens) > 5:
+            sni = tokens[5] if tokens[5] != '-' else ''
+            badge = tokens[6] if len(tokens) > 6 else ''
         print(' '.join(shlex.quote(x) for x in [name, ip, port, uuid, code, sec, pk, sid, sni, badge]))
     else:
         sys.exit(1)
@@ -1303,28 +1256,13 @@ except Exception:
                 read -rp "UUID туннеля Relay: " r_uuid
                 read -rp "Код страны (например: de, nl, se) [по умолчанию: de]: " r_code
                 r_code="${r_code:-de}"
-                echo -e "Тип безопасности моста:"
-                echo -e "  [1] TLS (Доменный сертификат Let's Encrypt на личном домене — Рекомендуется)"
-                echo -e "  [2] REALITY (Бессертификатный x25519 по IP)"
-                read -rp "Выберите тип [1/2, по умолчанию 1]: " t_choice
-                t_choice="${t_choice:-1}"
                 local r_sec="tls"
-                local r_pubkey=""
-                local r_shortid=""
+                local r_pubkey="-"
+                local r_shortid="-"
                 local r_sni=""
-                if [[ "$t_choice" == "1" ]]; then
-                    r_sec="tls"
-                    read -rp "TLS Домен / SNI Relay-ноды (например: ${r_code}.yourdomain.com): " r_sni_in
-                    r_sni="$r_sni_in"
-                    if [[ -z "$r_sni" ]]; then error "Домен SNI обязателен для TLS."; return 1; fi
-                else
-                    r_sec="reality"
-                    read -rp "REALITY Public Key: " r_pubkey
-                    read -rp "REALITY Short ID: " r_shortid
-                    read -rp "REALITY SNI: " r_sni_in
-                    r_sni="$r_sni_in"
-                    if [[ -z "$r_sni" ]]; then error "SNI обязателен для REALITY."; return 1; fi
-                fi
+                read -rp "TLS Домен / SNI Relay-ноды (например: ${r_code}.yourdomain.com): " r_sni_in
+                r_sni="$r_sni_in"
+                if [[ -z "$r_sni" ]]; then error "Домен SNI обязателен для TLS."; return 1; fi
                 read -rp "Бейдж узла в INCY (например: ⚡ Зарубежный узел, Enter по умолчанию): " r_badge
                 add_relay_node "$r_name" "$r_ip" "$r_port" "$r_uuid" "$r_code" "$r_sec" "$r_pubkey" "$r_shortid" "$r_sni" "$r_badge"
             fi
