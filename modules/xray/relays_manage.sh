@@ -195,19 +195,19 @@ add_relay_node() {
 
     # Автодополнение флага и названия страны для коротких кодов
     case "${name,,}" in
-        ee|estonia|"эстония"|"ee эстония") name="🇪🇪 Эстония" ;;
-        de|germany|"германия"|"de германия") name="🇩🇪 Германия" ;;
-        nl|netherlands|"нидерланды"|"nl нидерланды") name="🇳🇱 Нидерланды" ;;
-        fi|finland|"финляндия"|"fi финляндия") name="🇫🇮 Финляндия" ;;
-        se|sweden|"швеция"|"se швеция") name="🇸🇪 Швеция" ;;
-        us|usa|"сша"|"us сша") name="🇺🇸 США" ;;
-        gb|uk|britain|"великобритания"|"gb великобритания") name="🇬🇧 Великобритания" ;;
-        fr|france|"франция"|"fr франция") name="🇫🇷 Франция" ;;
-        tr|turkey|"турция"|"tr турция") name="🇹🇷 Турция" ;;
-        kz|kazakhstan|"казахстан"|"kz казахстан") name="🇰🇿 Казахстан" ;;
-        pl|poland|"польша"|"pl польша") name="🇵🇱 Польша" ;;
-        at|austria|"австрия"|"at австрия") name="🇦🇹 Австрия" ;;
-        ch|switzerland|"швейцария"|"ch швейцария") name="🇨🇭 Швейцария" ;;
+        ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;
+        de|germany|"de germany"|"de германия") name="🇩🇪 Германия" ;;
+        nl|netherlands|"nl netherlands"|"nl нидерланды") name="🇳🇱 Нидерланды" ;;
+        fi|finland|"fi finland"|"fi финляндия") name="🇫🇮 Финляндия" ;;
+        se|sweden|"se sweden"|"se швеция") name="🇸🇪 Швеция" ;;
+        us|usa|"us usa"|"us сша") name="🇺🇸 США" ;;
+        gb|uk|britain|"gb britain"|"gb великобритания") name="🇬🇧 Великобритания" ;;
+        fr|france|"fr france"|"fr франция") name="🇫🇷 Франция" ;;
+        tr|turkey|"tr turkey"|"tr турция") name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"kz kazakhstan"|"kz казахстан") name="🇰🇿 Казахстан" ;;
+        pl|poland|"pl poland"|"pl польша") name="🇵🇱 Польша" ;;
+        at|austria|"at austria"|"at австрия") name="🇦🇹 Австрия" ;;
+        ch|switzerland|"ch switzerland"|"ch швейцария") name="🇨🇭 Швейцария" ;;
     esac
 
     # Валидация параметров безопасности VLESS TLS
@@ -798,19 +798,19 @@ rename_relay_node() {
 
     # Автодополнение флага и названия страны для коротких кодов
     case "${new_name,,}" in
-        ee|estonia|"эстония"|"ee эстония") new_name="🇪🇪 Эстония" ;;
-        de|germany|"германия"|"de германия") new_name="🇩🇪 Германия" ;;
-        nl|netherlands|"нидерланды"|"nl нидерланды") new_name="🇳🇱 Нидерланды" ;;
-        fi|finland|"финляндия"|"fi финляндия") new_name="🇫🇮 Финляндия" ;;
-        se|sweden|"швеция"|"se швеция") new_name="🇸🇪 Швеция" ;;
-        us|usa|"сша"|"us сша") new_name="🇺🇸 США" ;;
-        gb|uk|britain|"великобритания"|"gb великобритания") new_name="🇬🇧 Великобритания" ;;
-        fr|france|"франция"|"fr франция") new_name="🇫🇷 Франция" ;;
-        tr|turkey|"турция"|"tr турция") new_name="🇹🇷 Турция" ;;
-        kz|kazakhstan|"казахстан"|"kz казахстан") new_name="🇰🇿 Казахстан" ;;
-        pl|poland|"польша"|"pl польша") new_name="🇵🇱 Польша" ;;
-        at|austria|"австрия"|"at австрия") new_name="🇦🇹 Австрия" ;;
-        ch|switzerland|"швейцария"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
+        ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;
+        de|germany|"de germany"|"de германия") new_name="🇩🇪 Германия" ;;
+        nl|netherlands|"nl netherlands"|"nl нидерланды") new_name="🇳🇱 Нидерланды" ;;
+        fi|finland|"fi finland"|"fi финляндия") new_name="🇫🇮 Финляндия" ;;
+        se|sweden|"se sweden"|"se швеция") new_name="🇸🇪 Швеция" ;;
+        us|usa|"us usa"|"us сша") new_name="🇺🇸 США" ;;
+        gb|uk|britain|"gb britain"|"gb великобритания") new_name="🇬🇧 Великобритания" ;;
+        fr|france|"fr france"|"fr франция") new_name="🇫🇷 Франция" ;;
+        tr|turkey|"tr turkey"|"tr турция") new_name="🇹🇷 Турция" ;;
+        kz|kazakhstan|"kz kazakhstan"|"kz казахстан") new_name="🇰🇿 Казахстан" ;;
+        pl|poland|"pl poland"|"pl польша") new_name="🇵🇱 Польша" ;;
+        at|austria|"at austria"|"at австрия") new_name="🇦🇹 Австрия" ;;
+        ch|switzerland|"ch switzerland"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
     esac
 
     local role

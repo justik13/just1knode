@@ -3584,8 +3584,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('just1knode relay add \\"${detected_country}\\"', relay_sh)
 
         # add_relay_node and rename_relay_node normalization
-        self.assertIn('ee|estonia|"эстония"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
-        self.assertIn('ee|estonia|"эстония"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
+        self.assertIn('ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
+        self.assertIn('ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
 
 
 if __name__ == "__main__":
