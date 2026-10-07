@@ -455,10 +455,18 @@ run_doctor() {
     # gRPC проверяется только на Origin узле
     if [[ "$role" == "origin" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
-        if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 10085), timeout=2); s.close()" 2>/dev/null; then
+        local grpc_ok=0
+        for _ in 1 2 3; do
+            if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 10085), timeout=2); s.close()" 2>/dev/null; then
+                grpc_ok=1
+                break
+            fi
+            sleep 0.5
+        done
+        if [[ $grpc_ok -eq 1 ]]; then
             echo -e "  ${GREEN}✔${NC} gRPC сокет Xray отвечает"
         else
-            echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен"
+            echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
             failed=$((failed + 1))
         fi
     elif [[ "$role" == "relay" || "$role" == "dual" ]]; then
@@ -585,7 +593,7 @@ run_doctor() {
         # Проверка политики входящего трафика по умолчанию
         if echo "$ufw_out" | grep -qi "Default: allow (incoming)"; then
             echo -e "  ${RED}✗${NC} КРИТИЧЕСКАЯ УЯЗВИМОСТЬ: Входящая политика UFW по умолчанию ALLOW (все порты открыты)!"
-            echo -e "    ${DIM}Рекомендация: sudo ufw default deny incoming${NC}"
+            echo -e "    ${DIM:-}Рекомендация: sudo ufw default deny incoming${NC}"
             warnings=$((warnings + 1))
         fi
 
@@ -742,7 +750,7 @@ run_doctor() {
                         if [[ $already_warned -eq 0 ]]; then
                             warned_dead_targets+=("$target_key")
                             echo -e "  ${YELLOW}!${NC} «Мёртвое» правило: порт ${r_port}/${proto} разрешён в UFW, но служба не запущена"
-                            echo -e "    ${DIM}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
+                            echo -e "    ${DIM:-}Рекомендация: если порт не нужен, удалите: ufw delete allow ${norm_target}${NC}"
                             warnings=$((warnings + 1))
                         fi
                     elif [[ $is_public -eq 1 ]]; then
@@ -777,7 +785,7 @@ run_doctor() {
                                 proc_name=$(echo "$matching_line" | sed -E 's/.*users:\(\("([^"]+)".*/\1/' || true)
                                 [[ -z "$proc_name" || "$proc_name" == "$matching_line" ]] && proc_name="не определен"
                                 echo -e "  ${YELLOW}!${NC} ВНИМАНИЕ: Посторонний порт ${r_port}/${proto} (процесс: ${proc_name}) открыт для всех (Anywhere)!"
-                                echo -e "    ${DIM}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
+                                echo -e "    ${DIM:-}Если это сторонний сервис, убедитесь в его необходимости. Для закрытия: ufw delete allow ${norm_target}${NC}"
                                 warnings=$((warnings + 1))
                             fi
                         fi

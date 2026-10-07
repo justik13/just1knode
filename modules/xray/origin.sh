@@ -903,6 +903,19 @@ if os.path.exists(state_file):
         secret_base = '/stream'
         s_data = {}
 
+# 0. API, STATS, POLICY: Гарантия наличия gRPC HandlerService и StatsService
+api_conf = cfg.setdefault('api', {})
+api_conf['tag'] = 'just1k-wl-api'
+api_conf['services'] = list(dict.fromkeys(api_conf.get('services', []) + ['HandlerService', 'StatsService']))
+
+cfg.setdefault('stats', {})
+
+policy_conf = cfg.setdefault('policy', {})
+policy_levels = policy_conf.setdefault('levels', {})
+level_0 = policy_levels.setdefault('0', {})
+level_0['statsUserUplink'] = True
+level_0['statsUserDownlink'] = True
+
 # 1. OUTBOUNDS: гарантия наличия и параметров
 outbounds = cfg.setdefault('outbounds', [])
 
