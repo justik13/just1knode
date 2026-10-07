@@ -51,4 +51,4 @@ jobs:
           python -m pip install -r scripts/xray_api/requirements.txt -r scripts/amnezia_api/requirements.txt
       - name: Run just1knode shell script test suite
         run: |
-          python -m unittest tests/test_just1knode_sh.py -v
+          python -m unittest discover tests/ -v
