@@ -1776,8 +1776,8 @@ run_doctor
         res_init = self._run_shell_snippet(cmd_init)
         self.assertEqual(res_init.returncode, 0, f"install_xray_origin_node failed: {res_init.stderr + res_init.stdout}")
 
-        # Add Relay with REALITY
-        cmd_relay = 'add_relay_node "Germany" "203.0.113.50" "10443" "test-relay-uuid" "de" "reality" "pubkey123" "shortid123" "www.google.com"'
+        # Add Relay with TLS
+        cmd_relay = 'add_relay_node "Germany" "203.0.113.50" "10443" "test-relay-uuid" "de" "tls" "-" "-" "de.example.com"'
         res = self._run_shell_snippet(cmd_relay)
         self.assertEqual(res.returncode, 0, f"add_relay_node failed: {res.stderr + res.stdout}")
 
@@ -1803,9 +1803,8 @@ run_doctor
         outbound_tags = [ob["tag"] for ob in xray_conf["outbounds"]]
         self.assertIn("just1k-wl-outbound-de", outbound_tags)
         de_ob = next(ob for ob in xray_conf["outbounds"] if ob["tag"] == "just1k-wl-outbound-de")
-        self.assertEqual(de_ob["streamSettings"]["security"], "reality")
-        self.assertEqual(de_ob["streamSettings"]["realitySettings"]["publicKey"], "pubkey123")
-        self.assertEqual(de_ob["streamSettings"]["realitySettings"]["serverName"], "www.google.com")
+        self.assertEqual(de_ob["streamSettings"]["security"], "tls")
+        self.assertEqual(de_ob["streamSettings"]["tlsSettings"]["serverName"], "de.example.com")
 
         # Verify default traffic is routed directly through Moscow IP (just1k-wl-direct)
         rules = xray_conf["routing"]["rules"]
@@ -3009,14 +3008,12 @@ remove_traffic_watchdog_timer
         # Ensure deploy hook checks RENEWED_LINEAGE against RELAY_SNI
         self.assertIn('[ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]', relay_sh)
 
-    def test_add_relay_node_supports_legacy_and_new_syntax(self):
-        """Verify add_relay_node correctly parses legacy positional args and new tls args."""
+    def test_add_relay_node_enforces_tls_mode(self):
+        """Verify add_relay_node strictly enforces TLS mode."""
         relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ "$arg6" == "tls" || "$arg6" == "reality" ]]; then', relays_manage_sh)
-        self.assertIn('elif [[ -n "$arg6" && "$arg6" != "-" ]]; then', relays_manage_sh)
-        self.assertIn('security_type="reality"', relays_manage_sh)
+        self.assertIn('security_type="tls"', relays_manage_sh)
         self.assertIn('Для режима TLS обязательно указание домена (SNI)', relays_manage_sh)
-        self.assertIn('Для режима REALITY обязательно указание публичного ключа (PublicKey)', relays_manage_sh)
+        self.assertNotIn('security_type="reality"', relays_manage_sh)
 
     def test_show_relay_credentials_legacy_state_inspection_and_no_hardcoded_de(self):
         """Verify show_relay_credentials normalizes missing security key in legacy state and avoids hardcoded de."""
@@ -3037,14 +3034,11 @@ remove_traffic_watchdog_timer
         self.assertIn("st['security'] = 'tls'", relay_sh)
         self.assertIn("st.pop('realitySettings', None)", relay_sh)
 
-    def test_heal_and_update_origin_config_auto_migrates_relay_on_dns_match(self):
-        """Verify heal_and_update_origin_config matches multi-IP DNS A-record with TLS probe and upgrades outbounds."""
+    def test_heal_and_update_origin_config_enforces_tls_without_legacy_reality_migration(self):
+        """Verify origin.sh no longer contains legacy reality migration and enforces clean TLS."""
         origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn("Авто-миграция Relay-узлов с REALITY / google.com на VLESS+TLS", origin_sh)
-        self.assertIn("addr_infos = socket.getaddrinfo(cand, None, socket.AF_INET)", origin_sh)
-        self.assertIn("ctx.wrap_socket(s, server_hostname=cand)", origin_sh)
-        self.assertIn("st.pop('realitySettings', None)", origin_sh)
-        self.assertIn("r['security'] = 'tls'", origin_sh)
+        self.assertNotIn("Авто-миграция Relay-узлов с REALITY", origin_sh)
+        self.assertNotIn("ctx.wrap_socket(s, server_hostname=cand)", origin_sh)
 
     def test_ensure_xray_config_permissions_and_rollback_invariant(self):
         """Verify state.sh and relays_manage enforce ensure_xray_config_permissions and retain root:xrayapi 640."""

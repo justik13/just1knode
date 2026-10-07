@@ -1134,10 +1134,21 @@ print(json.dumps({
     fi
 
     if [[ -n "$target_file" ]]; then
-        echo "$backup_json" > "$target_file"
+        (
+            umask 077
+            echo "$backup_json" > "$target_file"
+            chmod 600 "$target_file" 2>/dev/null || true
+        )
         log "✔ Резервная копия сохранена в файл: $target_file"
     else
-        echo "$backup_json"
+        local default_bak="/var/backups/amnezia_backup_$(date +%Y%m%d_%H%M%S).json"
+        mkdir -p /var/backups 2>/dev/null || true
+        (
+            umask 077
+            echo "$backup_json" > "$default_bak"
+            chmod 600 "$default_bak" 2>/dev/null || true
+        )
+        log "✔ Резервная копия сохранена в файл: $default_bak"
     fi
     return 0
 }

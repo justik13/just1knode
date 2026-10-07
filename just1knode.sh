@@ -351,33 +351,9 @@ show_relay_credentials() {
     r_shortid="$(get_state_val "short_id" "")"
     r_sni="$(get_state_val "sni" "")"
 
-    # Определение режима и нормализация для узлов v2.1.2 (где security не сохранялось в state.json)
-    if [[ -z "$r_sec" ]]; then
-        if [[ -n "$r_pubkey" && "$r_pubkey" != "-" ]]; then
-            r_sec="reality"
-        elif [[ -f "$XRAY_CONFIG" ]]; then
-            r_sec="$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        cfg = json.load(f)
-    for ib in cfg.get('inbounds', []):
-        sec = ib.get('streamSettings', {}).get('security')
-        if sec in ('tls', 'reality'):
-            print(sec)
-            sys.exit(0)
-except Exception:
-    pass
-print('reality')
-" "$XRAY_CONFIG" 2>/dev/null || echo "reality")"
-        else
-            r_sec="reality"
-        fi
-        set_state_val "security" "$r_sec" 2>/dev/null || true
-    fi
-
-    [[ -z "$r_pubkey" ]] && r_pubkey="-"
-    [[ -z "$r_shortid" ]] && r_shortid="-"
+    # Все Relay узлы стандартизированы на VLESS TLS
+    r_sec="tls"
+    set_state_val "security" "tls" 2>/dev/null || true
 
     local detected_code=""
     local geo_json
@@ -398,13 +374,9 @@ print('reality')
     fi
 
     echo -e "${BOLD}Скопируйте и выполните эту команду на вашем Origin-сервере:${NC}"
-    if [[ "$r_sec" == "tls" ]]; then
-        echo -e "${GREEN}just1knode relay add \"${detected_code^^}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
-        echo -e "${BOLD}Или, если релей уже был добавлен ранее, обновите SNI на Origin:${NC}"
-        echo -e "${CYAN}just1knode relay sni ${detected_code} ${r_sni} tls${NC}\n"
-    else
-        echo -e "${GREEN}just1knode relay add \"${detected_code^^}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"reality\" \"${r_pubkey}\" \"${r_shortid}\" \"${r_sni}\"${NC}\n"
-    fi
+    echo -e "${GREEN}just1knode relay add \"${detected_code^^}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
+    echo -e "${BOLD}Или, если релей уже был добавлен ранее, обновите SNI на Origin:${NC}"
+    echo -e "${CYAN}just1knode relay sni ${detected_code} ${r_sni} tls${NC}\n"
 }
 
 run_doctor() {
@@ -429,12 +401,16 @@ run_doctor() {
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Служба $srv активна"
         else
-            if systemctl is-failed --quiet "$srv" 2>/dev/null; then
+            if [[ "$srv" == "xray" && (-f "/run/just1knode_traffic_cutoff" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true") ]]; then
+                echo -e "  ${YELLOW}!${NC} Служба $srv остановлена системным вотчдогом по исчерпанию лимита трафика хостинга"
+                warnings=$((warnings + 1))
+            elif systemctl is-failed --quiet "$srv" 2>/dev/null; then
                 echo -e "  ${RED}✗${NC} Служба $srv в состоянии FAILED (ошибка запуска или start-limit-hit)"
+                failed=$((failed + 1))
             else
                 echo -e "  ${RED}✗${NC} Служба $srv не активна"
+                failed=$((failed + 1))
             fi
-            failed=$((failed + 1))
         fi
     done
 
@@ -998,6 +974,15 @@ reset_node() {
     if [[ "$confirm" != "yes" ]]; then
         info "Сброс отменен."
         return
+    fi
+
+    # Автоматическое создание аварийной резервной копии перед сбросом
+    local reset_bak="/var/backups/just1knode_reset_$(date +%Y%m%d_%H%M%S).tar.gz"
+    mkdir -p /var/backups 2>/dev/null || true
+    if [[ -d /etc/just1knode ]]; then
+        tar -czf "$reset_bak" -C /etc just1knode 2>/dev/null || true
+        chmod 600 "$reset_bak" 2>/dev/null || true
+        log "✔ Создана резервная копия узла перед сбросом: $reset_bak"
     fi
 
     systemctl stop xray xray-api amnezia-api 2>/dev/null || true
