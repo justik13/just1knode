@@ -1196,6 +1196,9 @@ try:
         if len(tokens) > 5 and tokens[5] == 'tls':
             sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
             badge = tokens[9] if len(tokens) > 9 else ''
+        elif len(tokens) > 5 and tokens[5] == 'reality':
+            sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
+            badge = tokens[9] if len(tokens) > 9 else ''
         elif len(tokens) > 5:
             sni = tokens[5] if tokens[5] != '-' else ''
             badge = tokens[6] if len(tokens) > 6 else ''

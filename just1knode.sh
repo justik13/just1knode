@@ -421,7 +421,7 @@ run_doctor() {
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Служба $srv активна"
         else
-            if [[ "$srv" == "xray" && (-f "/run/just1knode_traffic_cutoff" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true") ]]; then
+            if [[ "$srv" == "xray" && (-f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" || -f "/run/just1knode_traffic_cutoff" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true") ]]; then
                 echo -e "  ${YELLOW}!${NC} Служба $srv остановлена системным вотчдогом по исчерпанию лимита трафика хостинга"
                 warnings=$((warnings + 1))
             elif systemctl is-failed --quiet "$srv" 2>/dev/null; then
@@ -997,12 +997,14 @@ reset_node() {
     fi
 
     # Автоматическое создание аварийной резервной копии перед сбросом
-    local reset_bak="/var/backups/just1knode_reset_$(date +%Y%m%d_%H%M%S).tar.gz"
-    mkdir -p /var/backups 2>/dev/null || true
+    local bak_dir="${BACKUP_DIR:-/var/backups/just1knode}"
+    local reset_bak="${bak_dir}/reset_$(date +%Y%m%d_%H%M%S).tar.gz"
+    mkdir -p "$bak_dir" 2>/dev/null || true
     if [[ -d /etc/just1knode ]]; then
-        tar -czf "$reset_bak" -C /etc just1knode 2>/dev/null || true
-        chmod 600 "$reset_bak" 2>/dev/null || true
-        log "✔ Создана резервная копия узла перед сбросом: $reset_bak"
+        if tar -czf "$reset_bak" -C /etc just1knode 2>/dev/null; then
+            chmod 600 "$reset_bak" 2>/dev/null || true
+            log "✔ Создана резервная копия узла перед сбросом: $reset_bak"
+        fi
     fi
 
     systemctl stop xray xray-api amnezia-api 2>/dev/null || true

@@ -131,8 +131,9 @@ install -d -m 750 -o root -g nogroup "$TARGET_DIR"
 
 if [ -n "${RENEWED_LINEAGE:-}" ] && [ -n "$RELAY_SNI" ]; then
     if [ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]; then
-        if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ]; then
+        if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/fullchain.pem"
+            install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/privkey.pem"
             if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
                 if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
                     systemctl restart xray 2>/dev/null || true
