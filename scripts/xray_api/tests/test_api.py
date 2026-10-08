@@ -815,27 +815,28 @@ def test_sync_client_passes_flow_to_vless_direct():
         return True
 
     with patch.object(grpc_client, "ensure_user_state", side_effect=mock_ensure):
-        with patch("app.get_target_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
-            with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_123"):
-                res = client.post(
-                    "/v1/clients/sync",
-                    headers=VALID_HEADERS,
-                    json={
-                        "client_id": "11111111-2222-3333-4444-555555555555",
-                        "desired_state": "active",
-                    },
-                )
-                assert res.status_code == 200
-                assert len(calls) == 2
-                assert calls[0] == (
-                    "just1k-vless-direct",
-                    "11111111-2222-3333-4444-555555555555",
-                    "active",
-                    "xtls-rprx-vision",
-                )
-                assert calls[1] == (
-                    "just1k-wl-default",
-                    "11111111-2222-3333-4444-555555555555",
-                    "active",
-                    "",
-                )
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            with patch("app.get_target_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
+                with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_123"):
+                    res = client.post(
+                        "/v1/clients/sync",
+                        headers=VALID_HEADERS,
+                        json={
+                            "client_id": "11111111-2222-3333-4444-555555555555",
+                            "desired_state": "active",
+                        },
+                    )
+                    assert res.status_code == 200
+                    assert len(calls) == 2
+                    assert calls[0] == (
+                        "just1k-vless-direct",
+                        "11111111-2222-3333-4444-555555555555",
+                        "active",
+                        "xtls-rprx-vision",
+                    )
+                    assert calls[1] == (
+                        "just1k-wl-default",
+                        "11111111-2222-3333-4444-555555555555",
+                        "active",
+                        "",
+                    )
