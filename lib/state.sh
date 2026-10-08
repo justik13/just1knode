@@ -181,8 +181,25 @@ get_node_status() {
         dual)
             echo "dual"
             ;;
+        vless)
+            echo "vless"
+            ;;
         *)
-            echo "unconfigured"
+            local has_a has_v has_r
+            has_a="$(get_state_val "has_awg" "0")"
+            has_v="$(get_state_val "has_vless" "0")"
+            has_r="$(get_state_val "has_relay" "0")"
+            if [[ ("$has_a" == "1" && "$has_v" == "1") || ("$has_a" == "1" && "$has_r" == "1") || ("$has_v" == "1" && "$has_r" == "1") ]]; then
+                echo "dual"
+            elif [[ "$has_a" == "1" ]]; then
+                echo "awg"
+            elif [[ "$has_v" == "1" ]]; then
+                echo "vless"
+            elif [[ "$has_r" == "1" ]]; then
+                echo "relay"
+            else
+                echo "unconfigured"
+            fi
             ;;
     esac
 }

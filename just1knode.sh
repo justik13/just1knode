@@ -1469,18 +1469,20 @@ main_menu() {
         if [[ "$status" == "unconfigured" ]]; then
             echo -e "  Статус текущего сервера: ${BOLD}${YELLOW}⚪ НЕ НАСТРОЕН${NC}\n"
             echo -e "  ${BOLD}[1]${NC} 🌐 Установить Origin узел (Белый Интернет — Входной шлюз в РФ)"
-            echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход VLESS TLS)"
+            echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход)"
             echo -e "  ${BOLD}[3]${NC} ⚡ Настроить AmneziaWG узел (Зарубежный выход AmneziaWG API)"
-            echo -e "  ${BOLD}[4]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[4]${NC} 🚀 Настроить VLESS TLS узел (Зарубежный выход для Sub-ссылки)"
+            echo -e "  ${BOLD}[5]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-4]: " choice
+            read -rp "Выберите действие [0-5]: " choice
 
             case "$choice" in
                 1) install_xray_origin_node; read -rp "Нажмите Enter для продолжения...";;
                 2) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
                 3) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                4) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                4) install_vless_direct_node; read -rp "Нажмите Enter для продолжения...";;
+                5) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1530,34 +1532,76 @@ main_menu() {
             r_sni="$(get_state_val "sni" "-")"
             r_sec="$(get_state_val "security" "tls")"
 
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🛡️ RELAY (Зарубежный выход)${NC}"
+            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🛡️ RELAY (Зарубежный выход Белого Интернета)${NC}"
             echo -e "  Порт: ${CYAN}${r_port}${NC} (${r_sec^^})  |  Origin IP: ${CYAN}${r_orig}${NC}  |  SNI: ${CYAN}${r_sni}${NC}\n"
 
             echo -e "  ${BOLD}[1]${NC} 📋 Показать данные подключения (команда для Origin)"
             echo -e "  ${BOLD}[2]${NC} 🔐 Настроить персональный домен Relay (VLESS+TLS)"
-            echo -e "  ${BOLD}[3]${NC} 📊 Статус туннеля и сетевой трафик"
-            echo -e "  ${BOLD}[4]${NC} ⚡ Добавить AmneziaWG на этот сервер (Режим Dual)"
-            echo -e "  ${BOLD}[5]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[3]${NC} 🚀 Добавить VLESS TLS на этот сервер (для Sub-ссылки)"
+            echo -e "  ${BOLD}[4]${NC} ⚡ Добавить AmneziaWG на этот сервер"
+            echo -e "  ${BOLD}[5]${NC} 🗑️  Удалить службу Relay с этого сервера"
+            echo -e "  ${BOLD}[6]${NC} 📊 Статус туннеля и сетевой трафик"
+            echo -e "  ${BOLD}[7]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[8]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[9]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[10]${NC} ⚡ Обновить ядро Xray-core"
+            echo -e "  ${BOLD}[11]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[12]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-10]: " choice
+            read -rp "Выберите действие [0-12]: " choice
 
             case "$choice" in
                 1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
                 2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
-                3) show_status; read -rp "Нажмите Enter для продолжения...";;
+                3) install_vless_direct_node; read -rp "Нажмите Enter для продолжения...";;
                 4) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                5) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                5) uninstall_relay_component; read -rp "Нажмите Enter для продолжения...";;
+                6) show_status; read -rp "Нажмите Enter для продолжения...";;
+                7) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                8) run_doctor; read -rp "Нажмите Enter для продолжения...";;
+                9) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
+                10) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                11) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                12) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
+                *) warn "Неверный выбор."; sleep 1;;
+            esac
+
+        elif [[ "$status" == "vless" ]]; then
+            local v_dom
+            v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "-")")"
+
+            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🚀 VLESS TLS (Зарубежный выход для Sub-ссылки)${NC}"
+            echo -e "  Домен: ${CYAN}${v_dom}${NC}  |  Порт: ${CYAN}443 (TLS XTLS-Vision)${NC}\n"
+
+            echo -e "  ${BOLD}[1]${NC} 🔑 Показать данные VLESS TLS для Telegram-бота (/admin)"
+            echo -e "  ${BOLD}[2]${NC} ⚡ Добавить AmneziaWG на этот сервер"
+            echo -e "  ${BOLD}[3]${NC} 🛡️  Добавить Relay на этот сервер (Белый Интернет)"
+            echo -e "  ${BOLD}[4]${NC} 🗑️  Удалить службу VLESS TLS с этого сервера"
+            echo -e "  ${BOLD}[5]${NC} 📊 Статус узла и активные клиенты"
+            echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[7]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[8]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[9]${NC} ⚡ Обновить ядро Xray-core"
+            echo -e "  ${BOLD}[10]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[11]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
+            echo ""
+            read -rp "Выберите действие [0-11]: " choice
+
+            case "$choice" in
+                1) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                2) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
+                3) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
+                4) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
+                5) show_status; read -rp "Нажмите Enter для продолжения...";;
+                6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                7) run_doctor; read -rp "Нажмите Enter для продолжения...";;
+                8) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
+                9) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                10) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                11) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1571,50 +1615,13 @@ main_menu() {
 
             echo -e "  ${BOLD}[1]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
             echo -e "  ${BOLD}[2]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[3]${NC} 📊 Статус узла и активные клиенты"
-            echo -e "  ${BOLD}[4]${NC} 🛡️  Добавить Relay на этот сервер (Режим Dual)"
-            echo -e "  ${BOLD}[5]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
-            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-            echo ""
-            read -rp "Выберите действие [0-9]: " choice
-
-            case "$choice" in
-                1) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                2) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
-                3) show_status; read -rp "Нажмите Enter для продолжения...";;
-                4) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
-                5) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
-                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
-                *) warn "Неверный выбор."; sleep 1;;
-            esac
-
-        elif [[ "$status" == "dual" ]]; then
-            local r_port a_url r_sni r_sec
-            r_port="$(get_state_val "relay_port" "10443")"
-            a_url="$(get_state_val "awg_api_url" "-")"
-            r_sni="$(get_state_val "sni" "-")"
-            r_sec="$(get_state_val "security" "tls")"
-
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}⚡🛡️ DUAL (Relay + AmneziaWG)${NC}"
-            echo -e "  Relay: ${CYAN}${r_port}${NC} (${r_sec^^}, SNI: ${r_sni})  |  Amnezia API: ${CYAN}${a_url}${NC}\n"
-
-            echo -e "  ${BOLD}[1]${NC} 📋 Показать данные подключения Relay (для Origin)"
-            echo -e "  ${BOLD}[2]${NC} 🔐 Настроить персональный домен Relay (VLESS+TLS)"
-            echo -e "  ${BOLD}[3]${NC} 🔑 Показать данные AmneziaWG для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и сетевой трафик"
-            echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[7]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[8]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[9]${NC} ⚡ Обновить ядро Xray-core"
+            echo -e "  ${BOLD}[3]${NC} 🚀 Добавить VLESS TLS на этот сервер (для Sub-ссылки)"
+            echo -e "  ${BOLD}[4]${NC} 🛡️  Добавить Relay на этот сервер (Белый Интернет)"
+            echo -e "  ${BOLD}[5]${NC} 🗑️  Удалить AmneziaWG с этого сервера"
+            echo -e "  ${BOLD}[6]${NC} 📊 Статус узла и активные клиенты"
+            echo -e "  ${BOLD}[7]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[8]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[9]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
             echo -e "  ${BOLD}[10]${NC} ⚠️ Сбросить / переустановить узел"
             echo -e "  ${BOLD}[11]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
@@ -1622,17 +1629,85 @@ main_menu() {
             read -rp "Выберите действие [0-11]: " choice
 
             case "$choice" in
-                1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
-                2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
-                3) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                4) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
-                5) show_status; read -rp "Нажмите Enter для продолжения...";;
-                6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                7) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                8) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                9) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                1) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                2) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
+                3) install_vless_direct_node; read -rp "Нажмите Enter для продолжения...";;
+                4) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
+                5) uninstall_amnezia_component; read -rp "Нажмите Enter для продолжения...";;
+                6) show_status; read -rp "Нажмите Enter для продолжения...";;
+                7) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                8) run_doctor; read -rp "Нажмите Enter для продолжения...";;
+                9) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
                 10) reset_node; read -rp "Нажмите Enter для продолжения...";;
                 11) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
+                *) warn "Неверный выбор."; sleep 1;;
+            esac
+
+        elif [[ "$status" == "dual" ]]; then
+            local r_port a_url r_sni r_sec v_dom
+            r_port="$(get_state_val "relay_port" "10443")"
+            a_url="$(get_state_val "awg_api_url" "-")"
+            r_sni="$(get_state_val "sni" "-")"
+            r_sec="$(get_state_val "security" "tls")"
+            v_dom="$(get_state_val "vless_domain" "$r_sni")"
+
+            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}⚡🛡️ МУЛЬТИ-УЗЕЛ (AmneziaWG / VLESS / Relay)${NC}"
+            echo -e "  Relay порт: ${CYAN}${r_port}${NC}  |  VLESS домен: ${CYAN}${v_dom}${NC}  |  Amnezia API: ${CYAN}${a_url}${NC}\n"
+
+            echo -e "  ${BOLD}[1]${NC} 📋 Показать данные подключения Relay (для Origin)"
+            echo -e "  ${BOLD}[2]${NC} 🔑 Показать данные AmneziaWG для бота (/admin)"
+            echo -e "  ${BOLD}[3]${NC} 🚀 Показать данные VLESS TLS для бота (/admin)"
+            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
+            echo -e "  ${BOLD}[5]${NC} ➕ Добавить недостающую службу на сервер"
+            echo -e "  ${BOLD}[6]${NC} 🗑️  Удалить одну из служб (AmneziaWG / VLESS / Relay)"
+            echo -e "  ${BOLD}[7]${NC} 📊 Статус всех служб и сетевой трафик"
+            echo -e "  ${BOLD}[8]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[9]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[10]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[11]${NC} ⚡ Обновить ядро Xray-core"
+            echo -e "  ${BOLD}[12]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[13]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
+            echo ""
+            read -rp "Выберите действие [0-13]: " choice
+
+            case "$choice" in
+                1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
+                2) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                3) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                4) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
+                5)
+                    echo -e "\nКакую службу установить?"
+                    echo "[1] AmneziaWG"
+                    echo "[2] VLESS TLS"
+                    echo "[3] Relay (Белый Интернет)"
+                    read -rp "Выбор [1-3]: " sub_choice
+                    case "$sub_choice" in
+                        1) install_amnezia_node;;
+                        2) install_vless_direct_node;;
+                        3) install_xray_relay_node;;
+                    esac
+                    read -rp "Нажмите Enter для продолжения...";;
+                6)
+                    echo -e "\nКакую службу удалить?"
+                    echo "[1] AmneziaWG"
+                    echo "[2] VLESS TLS"
+                    echo "[3] Relay (Белый Интернет)"
+                    read -rp "Выбор [1-3]: " sub_choice
+                    case "$sub_choice" in
+                        1) uninstall_amnezia_component;;
+                        2) uninstall_vless_component;;
+                        3) uninstall_relay_component;;
+                    esac
+                    read -rp "Нажмите Enter для продолжения...";;
+                7) show_status; read -rp "Нажмите Enter для продолжения...";;
+                8) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                9) run_doctor; read -rp "Нажмите Enter для продолжения...";;
+                10) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
+                11) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                12) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                13) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac

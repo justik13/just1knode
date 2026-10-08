@@ -467,7 +467,9 @@ install_xray_relay_node() {
   }"
 
     local direct_inbound_json=""
-    if [[ "$sec_mode" == "tls" ]]; then
+    local cur_has_vless
+    cur_has_vless="$(get_state_val "has_vless" "0")"
+    if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
         direct_inbound_json=",
     {
       \"tag\": \"just1k-vless-direct\",
@@ -609,7 +611,7 @@ EOF
 
     # Защита портов через UFW (строго без открытия Amnezia API всему миру)
     local extra_ufw_ports=()
-    if [[ "$sec_mode" == "tls" ]]; then
+    if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
         extra_ufw_ports+=("443/tcp")
     fi
     configure_safe_ufw "${extra_ufw_ports[@]}"
@@ -624,7 +626,7 @@ EOF
             warn "Предупреждение: Не удалось добавить правило UFW для порта туннеля ${relay_port}/tcp от ${origin_ip}."
         fi
     fi
-    if [[ "$sec_mode" == "tls" ]]; then
+    if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
         if ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1; then
             log "Фаервол UFW: разрешен публичный доступ к VLESS Direct (443/tcp)."
         fi
@@ -633,6 +635,7 @@ EOF
     deploy_xray_systemd_service
     systemctl restart xray
 
+    set_state_val "has_relay" "1"
     set_state_val "relay_port" "$relay_port"
     set_state_val "origin_ip" "$origin_ip"
     set_state_val "tunnel_uuid" "$tunnel_uuid"
@@ -641,11 +644,15 @@ EOF
     set_state_val "short_id" "-"
     set_state_val "sni" "$dest_server"
 
-    if [[ "$prev_role" == "awg" || "$prev_role" == "dual" ]]; then
+    if [[ "$prev_role" == "awg" || "$prev_role" == "dual" || "$cur_has_vless" == "1" ]]; then
         set_state_val "role" "dual"
-        log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"
-        apply_amnezia_abuse_protection
-        setup_dual_xray_api
+        log "Режим узла обновлен до: DUAL"
+        if [[ "$prev_role" == "awg" || "$prev_role" == "dual" ]]; then
+            apply_amnezia_abuse_protection
+        fi
+        if [[ "$cur_has_vless" == "1" ]]; then
+            setup_dual_xray_api
+        fi
     else
         set_state_val "role" "relay"
     fi
@@ -1102,8 +1109,8 @@ heal_and_update_relay_config() {
 
     local role
     role="$(get_state_val "role")"
-    if [[ "$role" != "relay" && "$role" != "dual" ]]; then
-        error "Функция доступна только на Relay-узле (текущая роль: ${role:-не установлена})."
+    if [[ "$role" != "relay" && "$role" != "dual" && "$role" != "vless" ]]; then
+        error "Функция доступна только на Relay или VLESS узле (текущая роль: ${role:-не установлена})."
     fi
 
     log "Проверка и исправление параметров ядра Xray Relay..."
@@ -1360,4 +1367,335 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
     fi
 
     log "Оптимизация и обновление конфигурации Relay завершены успешно!"
+}
+
+# =============================================================================
+# МОДУЛЬНАЯ УСТАНОВКА И УПРАВЛЕНИЕ VLESS TLS (ДЛЯ ОБЫЧНОЙ SUB-ССЫЛКИ)
+# =============================================================================
+
+install_vless_direct_node() {
+    title "НАСТРОЙКА VLESS TLS УЗЛА (ДЛЯ SUB-ССЫЛКИ)"
+    check_root
+    init_state_dir
+
+    local prev_role
+    prev_role="$(get_node_status)"
+    if [[ "$prev_role" == "origin" ]]; then
+        error "Узел уже настроен как Origin. Установка VLESS на Origin запрещена (Origin строго изолирован под Белый Интернет)."
+        return 1
+    fi
+
+    install_base_deps
+    apply_node_sysctl_hardening
+
+    local dest_server="${1:-}"
+    local my_ip
+    my_ip="$(get_public_ipv4 || true)"
+
+    if [[ -z "$dest_server" ]]; then
+        local auto_domain=""
+        local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+        local cert_dirs=("${le_dir}"/live/*)
+        for c_dir in "${cert_dirs[@]}"; do
+            if [[ -f "${c_dir}/fullchain.pem" ]]; then
+                local cand
+                cand="$(basename "$c_dir")"
+                if [[ "$cand" != "README" && "$cand" != "*" ]]; then
+                    auto_domain="$cand"
+                    break
+                fi
+            fi
+        done
+
+        echo -e "\n${BOLD}=== НАСТРОЙКА ДОМЕНА ДЛЯ VLESS TLS (ПОРТ 443) ===${NC}"
+        echo -e "Для клиентских подключений VLESS TLS требуется персональный домен."
+        if [[ -n "$auto_domain" ]]; then
+            echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
+            read -rp "Использовать этот домен [Enter = ${auto_domain}]: " dest_in || true
+            dest_server="${dest_in:-$auto_domain}"
+        else
+            echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-vless.yourdomain.com ➔ ${my_ip}${NC}\n"
+            read -rp "Введите домен VLESS (например: your-vless.yourdomain.com): " dest_in || true
+            dest_server="${dest_in:-}"
+        fi
+    fi
+
+    if [[ -z "$dest_server" ]]; then
+        error "Домен обязателен для настройки VLESS TLS."
+        return 1
+    fi
+
+    if ! validate_relay_dns "$dest_server" "$my_ip"; then
+        return 1
+    fi
+
+    if ! issue_relay_tls_cert "$dest_server"; then
+        return 1
+    fi
+
+    install_xray_binaries
+    create_backup "$XRAY_CONFIG"
+
+    local tls_cert_dir="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}"
+    local tls_cert_file="${tls_cert_dir}/fullchain.pem"
+    local tls_key_file="${tls_cert_dir}/privkey.pem"
+
+    python3 -c "
+import json, os, sys
+cfg_file, cert_f, key_f = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = {}
+if os.path.exists(cfg_file):
+    try:
+        with open(cfg_file, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+
+if not cfg:
+    cfg = {
+        'log': {'loglevel': 'warning'},
+        'api': {'tag': 'api', 'services': ['HandlerService', 'LoggerService', 'StatsService']},
+        'stats': {},
+        'policy': {
+            'levels': {'0': {'statsUserUplink': True, 'statsUserDownlink': True}},
+            'system': {'statsInboundUplink': True, 'statsInboundDownlink': True}
+        },
+        'inbounds': [],
+        'outbounds': [
+            {'tag': 'direct', 'protocol': 'freedom', 'settings': {'domainStrategy': 'UseIPv4'}},
+            {'tag': 'block', 'protocol': 'blackhole'},
+            {'tag': 'api', 'protocol': 'blackhole'}
+        ],
+        'routing': {
+            'domainStrategy': 'IPIfNonMatch',
+            'rules': [
+                {'type': 'field', 'inboundTag': ['just1k-wl-api-grpc'], 'outboundTag': 'api'},
+                {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
+                {'type': 'field', 'port': '25', 'outboundTag': 'block'}
+            ]
+        },
+        'dns': {'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'], 'queryStrategy': 'UseIPv4'}
+    }
+
+inbounds = cfg.setdefault('inbounds', [])
+if not any(ib.get('tag') == 'just1k-wl-api-grpc' for ib in inbounds):
+    inbounds.insert(0, {
+        'tag': 'just1k-wl-api-grpc',
+        'listen': '127.0.0.1',
+        'port': 10085,
+        'protocol': 'dokodemo-door',
+        'settings': {'address': '127.0.0.1'}
+    })
+
+stream_settings = {
+    'network': 'tcp',
+    'security': 'tls',
+    'tlsSettings': {
+        'alpn': ['h2', 'http/1.1'],
+        'certificates': [{'certificateFile': cert_f, 'keyFile': key_f}]
+    }
+}
+
+direct_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
+if not direct_ib:
+    inbounds.append({
+        'tag': 'just1k-vless-direct',
+        'port': 443,
+        'protocol': 'vless',
+        'settings': {'clients': [], 'decryption': 'none'},
+        'streamSettings': stream_settings,
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False}
+    })
+else:
+    direct_ib['streamSettings'] = stream_settings
+
+with open(cfg_file, 'w', encoding='utf-8') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+" "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file"
+
+    chown root:root "$XRAY_CONFIG"
+    chmod 640 "$XRAY_CONFIG"
+
+    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
+        error "Ошибка валидации конфигурации Xray для VLESS. Изменения не применены."
+        return 1
+    fi
+
+    ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+
+    deploy_xray_systemd_service
+    systemctl restart xray
+
+    setup_dual_xray_api
+
+    set_state_val "has_vless" "1"
+    set_state_val "vless_domain" "$dest_server"
+
+    local cur_has_a cur_has_r
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$cur_has_a" == "1" || "$cur_has_r" == "1" ]]; then
+        set_state_val "role" "dual"
+    else
+        set_state_val "role" "vless"
+    fi
+
+    log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
+    echo ""
+    show_vless_bot_credentials
+}
+
+show_vless_bot_credentials() {
+    title "ДАННЫЕ VLESS TLS ДЛЯ TELEGRAM-БОТА (/admin)"
+    check_root
+    init_state_dir
+
+    local v_dom x_key a_url
+    v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "")")"
+    x_key="$(get_state_val "xray_api_key" "$(get_state_val "awg_api_key" "")")"
+    a_url="$(get_state_val "awg_api_url" "")"
+
+    local api_endpoint
+    if [[ -n "$a_url" ]]; then
+        api_endpoint="${a_url}"
+    elif [[ -n "$v_dom" ]]; then
+        api_endpoint="https://${v_dom}:8444"
+    else
+        local my_ip
+        my_ip="$(get_public_ipv4 || true)"
+        api_endpoint="https://${my_ip}:8444"
+    fi
+
+    echo -e "  Домен VLESS:     ${BOLD}${CYAN}${v_dom:-не настроен}${NC}"
+    echo -e "  Клиентский порт: ${BOLD}${GREEN}443 (TLS XTLS-Vision)${NC}"
+    echo -e "  API URL (бот):   ${BOLD}${CYAN}${api_endpoint}${NC}"
+    echo -e "  API Key / Токен: ${BOLD}${YELLOW}${x_key:-не сгенерирован}${NC}"
+    echo ""
+    echo -e "Для добавления в бот перейдите в: ${BOLD}/admin ➔ Серверы ➔ Добавить сервер${NC}"
+}
+
+uninstall_vless_component() {
+    title "УДАЛЕНИЕ КОМПОНЕНТА VLESS TLS"
+    check_root
+    init_state_dir
+
+    read -rp "Вы действительно хотите удалить службу VLESS TLS с этого сервера? [y/N]: " confirm_del || true
+    if [[ "$confirm_del" != [yY] && "$confirm_del" != [yY][eE][sS] && "$confirm_del" != "да" && "$confirm_del" != "Да" ]]; then
+        log "Удаление отменено."
+        return 0
+    fi
+
+    systemctl stop xray-api 2>/dev/null || true
+    systemctl disable xray-api 2>/dev/null || true
+    rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+
+    rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
+
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        python3 -c "
+import json, os, sys
+cfg_file = sys.argv[1]
+if os.path.exists(cfg_file):
+    try:
+        with open(cfg_file, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if ib.get('tag') != 'just1k-vless-direct']
+        with open(cfg_file, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+" "$XRAY_CONFIG" 2>/dev/null || true
+    fi
+
+    ufw delete allow 443/tcp >/dev/null 2>&1 || true
+    ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+
+    set_state_val "has_vless" "0"
+
+    local cur_has_a cur_has_r
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$cur_has_a" == "1" && "$cur_has_r" == "1" ]]; then
+        set_state_val "role" "dual"
+    elif [[ "$cur_has_a" == "1" ]]; then
+        set_state_val "role" "awg"
+    elif [[ "$cur_has_r" == "1" ]]; then
+        set_state_val "role" "relay"
+    else
+        set_state_val "role" "unconfigured"
+    fi
+
+    if [[ "$cur_has_r" == "1" ]]; then
+        if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
+            systemctl restart xray 2>/dev/null || true
+        fi
+    else
+        systemctl stop xray 2>/dev/null || true
+        systemctl disable xray 2>/dev/null || true
+    fi
+
+    log "✔ Компонент VLESS TLS успешно удален с сервера."
+}
+
+uninstall_relay_component() {
+    title "УДАЛЕНИЕ КОМПОНЕНТА RELAY (БЕЛЫЙ ИНТЕРНЕТ)"
+    check_root
+    init_state_dir
+
+    read -rp "Вы действительно хотите удалить службу Relay с этого сервера? [y/N]: " confirm_del || true
+    if [[ "$confirm_del" != [yY] && "$confirm_del" != [yY][eE][sS] && "$confirm_del" != "да" && "$confirm_del" != "Да" ]]; then
+        log "Удаление отменено."
+        return 0
+    fi
+
+    local relay_port
+    relay_port="$(get_state_val "relay_port" "10443")"
+
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        python3 -c "
+import json, os, sys
+cfg_file = sys.argv[1]
+if os.path.exists(cfg_file):
+    try:
+        with open(cfg_file, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if ib.get('tag') not in ('inbound-tls', 'inbound-reality', 'from-origin')]
+        with open(cfg_file, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+" "$XRAY_CONFIG" 2>/dev/null || true
+    fi
+
+    ufw delete allow "$relay_port"/tcp >/dev/null 2>&1 || true
+
+    set_state_val "has_relay" "0"
+
+    local cur_has_a cur_has_v
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    if [[ "$cur_has_a" == "1" && "$cur_has_v" == "1" ]]; then
+        set_state_val "role" "dual"
+    elif [[ "$cur_has_a" == "1" ]]; then
+        set_state_val "role" "awg"
+    elif [[ "$cur_has_v" == "1" ]]; then
+        set_state_val "role" "vless"
+    else
+        set_state_val "role" "unconfigured"
+    fi
+
+    if [[ "$cur_has_v" == "1" ]]; then
+        if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
+            systemctl restart xray 2>/dev/null || true
+        fi
+    else
+        systemctl stop xray 2>/dev/null || true
+        systemctl disable xray 2>/dev/null || true
+    fi
+
+    log "✔ Компонент Relay успешно удален с сервера."
 }

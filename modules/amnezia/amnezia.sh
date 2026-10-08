@@ -1008,6 +1008,7 @@ EOF
     set_state_val "awg_domain" "$api_domain"
     set_state_val "awg_port" "$public_port"
     set_state_val "awg_installed" "true"
+    set_state_val "has_awg" "1"
     if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
         set_state_val "bot_ip" "$bot_ip"
     fi
@@ -1319,7 +1320,17 @@ uninstall_amnezia_component() {
 
     local prev_role
     prev_role="$(get_node_status)"
-    if [[ "$prev_role" == "dual" ]]; then
+    set_state_val "has_awg" "0"
+    local cur_has_v cur_has_r
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$cur_has_v" == "1" && "$cur_has_r" == "1" ]]; then
+        set_state_val "role" "dual"
+        log "Режим узла переключен на: DUAL (VLESS + Relay)"
+    elif [[ "$cur_has_v" == "1" ]]; then
+        set_state_val "role" "vless"
+        log "Режим узла переключен на: VLESS"
+    elif [[ "$prev_role" == "dual" || "$cur_has_r" == "1" ]]; then
         set_state_val "role" "relay"
         log "Режим узла переключен обратно на: RELAY"
     else
