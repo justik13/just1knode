@@ -646,10 +646,8 @@ EOF
 
     if [[ "$prev_role" == "awg" || "$prev_role" == "dual" || "$cur_has_vless" == "1" ]]; then
         set_state_val "role" "dual"
-        log "Режим узла обновлен до: DUAL"
-        if [[ "$prev_role" == "awg" || "$prev_role" == "dual" ]]; then
-            apply_amnezia_abuse_protection
-        fi
+        log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"
+        apply_amnezia_abuse_protection
         if [[ "$cur_has_vless" == "1" ]]; then
             setup_dual_xray_api
         fi
