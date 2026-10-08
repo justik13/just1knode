@@ -423,6 +423,10 @@ run_doctor() {
     local warnings=0
     local role
     role="$(get_state_val "role" "не определена")"
+    local cur_has_a cur_has_v cur_has_r
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
 
     log "1. Проверка системных служб..."
     local services_to_check=()
@@ -430,10 +434,25 @@ run_doctor() {
         services_to_check+=("xray" "nginx" "xray-api")
     elif [[ "$role" == "relay" ]]; then
         services_to_check+=("xray")
+    elif [[ "$role" == "vless" ]]; then
+        services_to_check+=("xray" "xray-api")
+        if systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]; then
+            services_to_check+=("nginx")
+        fi
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
     elif [[ "$role" == "dual" ]]; then
-        services_to_check+=("xray" "amnezia-api" "nginx" "xray-api")
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
+            services_to_check+=("xray")
+        fi
+        if [[ "$cur_has_v" == "1" ]]; then
+            services_to_check+=("xray-api")
+        fi
+        if [[ "$cur_has_a" == "1" || ("$cur_has_r" == "0" && "$cur_has_v" == "0") ]]; then
+            services_to_check+=("amnezia-api" "nginx")
+        elif [[ "$cur_has_v" == "1" ]] && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]); then
+            services_to_check+=("nginx")
+        fi
     fi
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
@@ -452,8 +471,8 @@ run_doctor() {
         fi
     done
 
-    # gRPC проверяется на Origin и Dual узлах
-    if [[ "$role" == "origin" || "$role" == "dual" ]]; then
+    # gRPC проверяется на Origin, VLESS и Dual узлах
+    if [[ "$role" == "origin" || "$role" == "dual" || "$role" == "vless" || "$cur_has_v" == "1" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         local grpc_ok=0
         for _ in 1 2 3; do
@@ -471,7 +490,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "relay" || "$role" == "dual" ]]; then
+    if [[ "$role" == "relay" || "$cur_has_r" == "1" || ("$role" == "dual" && "$cur_has_r" == "1") ]]; then
         log "2a. Проверка Relay инбаунд порта..."
         local r_port
         r_port="$(get_state_val "relay_port" "10443")"
@@ -482,7 +501,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" || ("$role" == "dual" && "$cur_has_a" == "1") ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
         if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
@@ -492,7 +511,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]]; then
+    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "dual" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
@@ -502,7 +521,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" || ("$role" == "dual" && "$cur_has_a" == "1") ]]; then
         log "3b. Проверка контейнера и конфигурации AmneziaWG..."
         local c_doc
         c_doc="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
@@ -538,7 +557,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" || "$role" == "vless" || "$cur_has_v" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"

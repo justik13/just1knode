@@ -287,6 +287,13 @@ except Exception:
         return 1
     fi
 
+    local target_prefix="${2:-}"
+    if [[ -n "$target_prefix" ]]; then
+        install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
+        install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem"
+        chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+    fi
+
     install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
     install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
     chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
@@ -341,6 +348,61 @@ if 'location / {' in content:
             systemctl reload nginx 2>/dev/null || true
             log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
         fi
+    elif [[ ! -f "$amnezia_nginx" ]]; then
+        local v_dom
+        v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "")")"
+        local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+        local cert_file="${le_dir}/live/${v_dom}/fullchain.pem"
+        local key_file="${le_dir}/live/${v_dom}/privkey.pem"
+        if [[ ! -f "$cert_file" ]]; then
+            cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_fullchain.pem"
+            key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_privkey.pem"
+        fi
+        if [[ ! -f "$cert_file" ]]; then
+            cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/fullchain.pem"
+            key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/privkey.pem"
+        fi
+
+        local vless_api_nginx="/etc/nginx/sites-available/just1k-vless-api.conf"
+        if [[ -f "$cert_file" && -f "$key_file" && -n "$v_dom" ]]; then
+            mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+            cat > "$vless_api_nginx" <<EOF
+server {
+    listen 8444 ssl http2;
+    listen [::]:8444 ssl http2;
+    server_name ${v_dom};
+    server_tokens off;
+
+    ssl_certificate ${cert_file};
+    ssl_certificate_key ${key_file};
+
+    location / {
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+}
+EOF
+            ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
+            if nginx -t >/dev/null 2>&1; then
+                systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+                log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
+            fi
+        fi
+    fi
+
+    local bot_ip
+    bot_ip="$(get_state_val "bot_ip" "")"
+    if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
+        ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+    else
+        ufw allow 8444/tcp comment "just1knode xray-api" >/dev/null 2>&1 || true
     fi
 }
 
@@ -466,6 +528,41 @@ install_xray_relay_node() {
     }
   }"
 
+    local existing_vless_clients_json="[]"
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        existing_vless_clients_json="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    for ib in cfg.get('inbounds', []):
+        if ib.get('tag') == 'just1k-vless-direct':
+            clients = ib.get('settings', {}).get('clients', [])
+            print(json.dumps(clients))
+            sys.exit(0)
+except Exception:
+    pass
+print('[]')
+" "$XRAY_CONFIG" 2>/dev/null || echo "[]")"
+    fi
+
+    local vless_stream_settings_json="$stream_settings_json"
+    if [[ -f "/usr/local/etc/xray/tls/vless_fullchain.pem" ]]; then
+        vless_stream_settings_json="{
+    \"network\": \"tcp\",
+    \"security\": \"tls\",
+    \"tlsSettings\": {
+      \"alpn\": [\"h2\", \"http/1.1\"],
+      \"certificates\": [
+        {
+          \"certificateFile\": \"/usr/local/etc/xray/tls/vless_fullchain.pem\",
+          \"keyFile\": \"/usr/local/etc/xray/tls/vless_privkey.pem\"
+        }
+      ]
+    }
+  }"
+    fi
+
     local direct_inbound_json=""
     local cur_has_vless
     cur_has_vless="$(get_state_val "has_vless" "0")"
@@ -476,10 +573,10 @@ install_xray_relay_node() {
       \"port\": 443,
       \"protocol\": \"vless\",
       \"settings\": {
-        \"clients\": [],
+        \"clients\": ${existing_vless_clients_json},
         \"decryption\": \"none\"
       },
-      \"streamSettings\": ${stream_settings_json},
+      \"streamSettings\": ${vless_stream_settings_json},
       \"sniffing\": {
         \"enabled\": true,
         \"destOverride\": [\"tls\", \"http\", \"quic\"],
@@ -1160,6 +1257,9 @@ heal_and_update_relay_config() {
         current_sec="$(get_state_val "security" "")"
     fi
 
+    local cur_has_vless
+    cur_has_vless="$(get_state_val "has_vless" "0")"
+
     if ! python3 -c "
 import json, os, sys, tempfile
 cfg_file = sys.argv[1]
@@ -1191,46 +1291,51 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
             }
             break
 
+    has_vless_flag = sys.argv[3] if len(sys.argv) > 3 else '0'
     direct_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
-    if not direct_ib:
-        direct_ib = {
-            'tag': 'just1k-vless-direct',
-            'port': 443,
-            'protocol': 'vless',
-            'settings': {'clients': [], 'decryption': 'none'},
-            'streamSettings': {
-                'network': 'tcp',
-                'security': 'tls',
-                'tlsSettings': {
-                    'alpn': ['h2', 'http/1.1'],
-                    'certificates': [
-                        {
-                            'certificateFile': tls_cert_file,
-                            'keyFile': tls_key_file
-                        }
-                    ]
+    if has_vless_flag == '1':
+        if not direct_ib:
+            direct_ib = {
+                'tag': 'just1k-vless-direct',
+                'port': 443,
+                'protocol': 'vless',
+                'settings': {'clients': [], 'decryption': 'none'},
+                'streamSettings': {
+                    'network': 'tcp',
+                    'security': 'tls',
+                    'tlsSettings': {
+                        'alpn': ['h2', 'http/1.1'],
+                        'certificates': [
+                            {
+                                'certificateFile': tls_cert_file,
+                                'keyFile': tls_key_file
+                            }
+                        ]
+                    }
+                },
+                'sniffing': {
+                    'enabled': True,
+                    'destOverride': ['tls', 'http', 'quic'],
+                    'metadataOnly': False
                 }
-            },
-            'sniffing': {
-                'enabled': True,
-                'destOverride': ['tls', 'http', 'quic'],
-                'metadataOnly': False
             }
-        }
-        inbounds.append(direct_ib)
+            inbounds.append(direct_ib)
+        else:
+            st = direct_ib.setdefault('streamSettings', {})
+            st['network'] = 'tcp'
+            st['security'] = 'tls'
+            st['tlsSettings'] = {
+                'alpn': ['h2', 'http/1.1'],
+                'certificates': [
+                    {
+                        'certificateFile': tls_cert_file,
+                        'keyFile': tls_key_file
+                    }
+                ]
+            }
     else:
-        st = direct_ib.setdefault('streamSettings', {})
-        st['network'] = 'tcp'
-        st['security'] = 'tls'
-        st['tlsSettings'] = {
-            'alpn': ['h2', 'http/1.1'],
-            'certificates': [
-                {
-                    'certificateFile': tls_cert_file,
-                    'keyFile': tls_key_file
-                }
-            ]
-        }
+        if direct_ib:
+            inbounds.remove(direct_ib)
 
     grpc_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-wl-api-grpc'), None)
     if not grpc_ib:
@@ -1320,7 +1425,7 @@ except Exception:
     pass
 
 print('[+] Xray Relay config успешно оптимизирован (UseIPv4 + Независимый DNS + VLESS TLS)')
-" "$XRAY_CONFIG" "$current_sec"; then
+" "$XRAY_CONFIG" "$current_sec" "$cur_has_vless"; then
         manifest_rollback
         error "Ошибка выполнения Python-скрипта реконсиляции Relay."
     fi
@@ -1356,7 +1461,7 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
 
     heal_node_firewall_and_stealth
 
-    if [[ "$current_sec" == "tls" ]]; then
+    if [[ "$cur_has_vless" == "1" ]]; then
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
     fi
 
@@ -1427,7 +1532,7 @@ install_vless_direct_node() {
         return 1
     fi
 
-    if ! issue_relay_tls_cert "$dest_server"; then
+    if ! issue_relay_tls_cert "$dest_server" "vless"; then
         return 1
     fi
 
@@ -1435,8 +1540,12 @@ install_vless_direct_node() {
     create_backup "$XRAY_CONFIG"
 
     local tls_cert_dir="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}"
-    local tls_cert_file="${tls_cert_dir}/fullchain.pem"
-    local tls_key_file="${tls_cert_dir}/privkey.pem"
+    local tls_cert_file="${tls_cert_dir}/vless_fullchain.pem"
+    local tls_key_file="${tls_cert_dir}/vless_privkey.pem"
+    if [[ ! -f "$tls_cert_file" ]]; then
+        tls_cert_file="${tls_cert_dir}/fullchain.pem"
+        tls_key_file="${tls_cert_dir}/privkey.pem"
+    fi
 
     python3 -c "
 import json, os, sys
