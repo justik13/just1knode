@@ -413,6 +413,13 @@ node_sync_state: Dict[str, Any] = {
 }
 
 
+def get_inbound_flow(tag: str) -> str:
+    """Returns protocol flow for given inbound tag. Direct VLESS TLS requires xtls-rprx-vision."""
+    if tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
+        return "xtls-rprx-vision"
+    return ""
+
+
 def restore_persisted_clients_to_xray() -> int:
     """Restores active persisted clients from disk into Xray RAM as temporary crash-recovery hint.
 
@@ -428,7 +435,7 @@ def restore_persisted_clients_to_xray() -> int:
     for client_uuid in active_clients:
         for tag in target_inbounds:
             try:
-                grpc_client.add_user(tag, client_uuid)
+                grpc_client.add_user(tag, client_uuid, flow=get_inbound_flow(tag))
                 restored += 1
             except Exception as e:
                 logger.warning(
@@ -976,7 +983,9 @@ async def _sync_client_internal(
     failed_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
-            grpc_client.ensure_user_state(tag, client_uuid, desired_state=desired_state)
+            grpc_client.ensure_user_state(
+                tag, client_uuid, desired_state=desired_state, flow=get_inbound_flow(tag)
+            )
             succeeded_inbounds.append(tag)
         except Exception as e:
             logger.error(
@@ -989,7 +998,9 @@ async def _sync_client_internal(
         for rb_tag in succeeded_inbounds:
             try:
                 rollback_state = "disabled" if desired_state == "active" else "active"
-                grpc_client.ensure_user_state(rb_tag, client_uuid, desired_state=rollback_state)
+                grpc_client.ensure_user_state(
+                    rb_tag, client_uuid, desired_state=rollback_state, flow=get_inbound_flow(rb_tag)
+                )
             except Exception as rb_exc:
                 logger.error(
                     "Rollback failed for user %s on inbound %s: %s",

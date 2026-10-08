@@ -815,6 +815,28 @@ except Exception:
 }"
         fi
 
+        local xray_v1_block=""
+        local current_role
+        current_role="$(get_state_val "role" "")"
+        if [[ "$current_role" == "dual" || "$current_role" == "relay" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+            xray_v1_block="
+    location /v1/ {
+        limit_req zone=just1k_amnezia_api burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+"
+        fi
+
         cat > "$nginx_conf" <<EOF
 # 0. Catch-All: мгновенный сброс прямых сканирований по IP и неизвестным SNI
 ${catchall_ssl_block}
@@ -843,7 +865,7 @@ server {
         default_type text/plain;
         return 404 "Not Found\n";
     }
-
+${xray_v1_block}
     location / {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
         limit_req_status 429;
@@ -861,6 +883,28 @@ server {
 }
 EOF
     else
+        local xray_v1_block=""
+        local current_role
+        current_role="$(get_state_val "role" "")"
+        if [[ "$current_role" == "dual" || "$current_role" == "relay" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+            xray_v1_block="
+    location /v1/ {
+        limit_req zone=just1k_amnezia_api burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+"
+        fi
+
         cat > "$nginx_conf" <<EOF
 # JUST1KNODE: AmneziaWG API Reverse Proxy
 server {
@@ -886,7 +930,7 @@ server {
         default_type text/plain;
         return 404 "Not Found\n";
     }
-
+${xray_v1_block}
     location / {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
         limit_req_status 429;

@@ -795,6 +795,47 @@ def test_xray_api_idempotency_inflight_lock_eviction():
 
     asyncio.run(_test())
 
+def test_get_inbound_flow_logic():
+    """get_inbound_flow returns xtls-rprx-vision for VLESS direct and empty for other inbounds."""
+    from app import get_inbound_flow
+
+    assert get_inbound_flow("just1k-vless-direct") == "xtls-rprx-vision"
+    assert get_inbound_flow("just1k-vless-custom") == "xtls-rprx-vision"
+    assert get_inbound_flow("just1k-wl-default") == ""
+    assert get_inbound_flow("inbound-tls") == ""
+    assert get_inbound_flow("inbound-reality") == ""
 
 
+def test_sync_client_passes_flow_to_vless_direct():
+    """Client sync passes flow='xtls-rprx-vision' for just1k-vless-direct inbound."""
+    calls = []
 
+    def mock_ensure(tag, uid, desired_state="active", flow=""):
+        calls.append((tag, uid, desired_state, flow))
+        return True
+
+    with patch.object(grpc_client, "ensure_user_state", side_effect=mock_ensure):
+        with patch("app.get_target_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
+            with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_123"):
+                res = client.post(
+                    "/v1/clients/sync",
+                    headers=VALID_HEADERS,
+                    json={
+                        "client_id": "11111111-2222-3333-4444-555555555555",
+                        "desired_state": "active",
+                    },
+                )
+                assert res.status_code == 200
+                assert len(calls) == 2
+                assert calls[0] == (
+                    "just1k-vless-direct",
+                    "11111111-2222-3333-4444-555555555555",
+                    "active",
+                    "xtls-rprx-vision",
+                )
+                assert calls[1] == (
+                    "just1k-wl-default",
+                    "11111111-2222-3333-4444-555555555555",
+                    "active",
+                    "",
+                )

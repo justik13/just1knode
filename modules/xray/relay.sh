@@ -1313,6 +1313,41 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
         set_state_val "xray_api_key" "$x_api_key"
         deploy_xray_api_service "$x_api_key" ""
         systemctl enable --now xray-api 2>/dev/null || true
+
+        # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx на порту 8444
+        local amnezia_nginx="/etc/nginx/sites-available/amnezia-api.conf"
+        if [[ -f "$amnezia_nginx" ]] && ! grep -q "location /v1/" "$amnezia_nginx"; then
+            python3 -c "
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    content = f.read()
+v1_block = '''    location /v1/ {
+        limit_req zone=just1k_amnezia_api burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+
+    location / {'''
+if 'location / {' in content:
+    new_content = content.replace('location / {', v1_block, 1)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+" "$amnezia_nginx" 2>/dev/null || true
+            if nginx -t >/dev/null 2>&1; then
+                systemctl reload nginx 2>/dev/null || true
+                log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) на порту 8444."
+            fi
+        fi
     fi
 
     log "Оптимизация и обновление конфигурации Relay завершены успешно!"
