@@ -433,7 +433,7 @@ run_doctor() {
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
     elif [[ "$role" == "dual" ]]; then
-        services_to_check+=("xray" "amnezia-api" "nginx")
+        services_to_check+=("xray" "amnezia-api" "nginx" "xray-api")
     fi
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
@@ -452,8 +452,8 @@ run_doctor() {
         fi
     done
 
-    # gRPC проверяется только на Origin узле
-    if [[ "$role" == "origin" ]]; then
+    # gRPC проверяется на Origin и Dual узлах
+    if [[ "$role" == "origin" || "$role" == "dual" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         local grpc_ok=0
         for _ in 1 2 3; do
@@ -469,8 +469,10 @@ run_doctor() {
             echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
             failed=$((failed + 1))
         fi
-    elif [[ "$role" == "relay" || "$role" == "dual" ]]; then
-        log "2. Проверка Relay инбаунд порта..."
+    fi
+
+    if [[ "$role" == "relay" || "$role" == "dual" ]]; then
+        log "2a. Проверка Relay инбаунд порта..."
         local r_port
         r_port="$(get_state_val "relay_port" "10443")"
         if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then

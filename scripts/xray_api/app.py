@@ -327,7 +327,7 @@ def get_target_inbounds() -> List[str]:
                 if isinstance(data, list):
                     for r in data:
                         t = r.get("inbound_tag")
-                        if t and t.startswith("just1k-wl-"):
+                        if t and (t.startswith("just1k-wl-") or t.startswith("just1k-vless-")):
                             relay_tags.append(t)
         except Exception as e:
             logger.warning("Could not load relays from %s: %s", RELAYS_FILE_PATH, e)
@@ -341,10 +341,11 @@ def get_target_inbounds() -> List[str]:
                 for ib in cfg.get("inbounds", []):
                     protocol = ib.get("protocol", "").lower()
                     tag = ib.get("tag", "")
-                    # Match managed VLESS/VMESS inbounds strictly by just1k-wl- namespace
+                    # Match managed VLESS/VMESS inbounds strictly by just1k-wl- and just1k-vless- namespaces
                     if protocol in ("vless", "vmess") and (
                         tag.startswith("just1k-wl-")
-                        or tag in ("just1k-wl-default", "inbound-default")
+                        or tag.startswith("just1k-vless-")
+                        or tag in ("just1k-wl-default", "inbound-default", "just1k-vless-direct")
                     ):
                         config_tags.append(tag)
         except Exception as e:

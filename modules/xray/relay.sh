@@ -413,11 +413,52 @@ install_xray_relay_node() {
     }
   }"
 
+    local direct_inbound_json=""
+    if [[ "$sec_mode" == "tls" ]]; then
+        direct_inbound_json=",
+    {
+      \"tag\": \"just1k-vless-direct\",
+      \"port\": 443,
+      \"protocol\": \"vless\",
+      \"settings\": {
+        \"clients\": [],
+        \"decryption\": \"none\"
+      },
+      \"streamSettings\": ${stream_settings_json},
+      \"sniffing\": {
+        \"enabled\": true,
+        \"destOverride\": [\"tls\", \"http\", \"quic\"],
+        \"metadataOnly\": false
+      }
+    }"
+    fi
+
     log "Формирование конфигурации Relay ноды (VLESS ${sec_mode^^})..."
     cat > "$XRAY_CONFIG" <<EOF
 {
   "log": {
     "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "LoggerService",
+      "StatsService"
+    ]
+  },
+  "stats": {},
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true
+    }
   },
   "inbounds": [
     {
@@ -439,11 +480,27 @@ install_xray_relay_node() {
         "destOverride": ["tls", "http", "quic"],
         "metadataOnly": false
       }
+    }${direct_inbound_json},
+    {
+      "tag": "just1k-wl-api-grpc",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      }
     }
   ],
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "just1k-wl-api-grpc"
+        ],
+        "outboundTag": "api"
+      },
       {
         "type": "field",
         "protocol": [
@@ -468,6 +525,10 @@ install_xray_relay_node() {
     },
     {
       "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "api",
       "protocol": "blackhole"
     }
   ],
@@ -495,6 +556,9 @@ EOF
 
     # Защита портов через UFW (строго без открытия Amnezia API всему миру)
     local extra_ufw_ports=()
+    if [[ "$sec_mode" == "tls" ]]; then
+        extra_ufw_ports+=("443/tcp")
+    fi
     configure_safe_ufw "${extra_ufw_ports[@]}"
     heal_node_firewall_and_stealth
     if ufw allow from "$origin_ip" to any port "$relay_port" proto tcp >/dev/null 2>&1; then
@@ -505,6 +569,11 @@ EOF
             return 1
         else
             warn "Предупреждение: Не удалось добавить правило UFW для порта туннеля ${relay_port}/tcp от ${origin_ip}."
+        fi
+    fi
+    if [[ "$sec_mode" == "tls" ]]; then
+        if ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1; then
+            log "Фаервол UFW: разрешен публичный доступ к VLESS Direct (443/tcp)."
         fi
     fi
 
@@ -1044,8 +1113,9 @@ tls_cert_dir = os.environ.get('XRAY_TLS_DIR', '/usr/local/etc/xray/tls')
 tls_cert_file = os.path.join(tls_cert_dir, 'fullchain.pem')
 tls_key_file = os.path.join(tls_cert_dir, 'privkey.pem')
 if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_key_file):
-    for ib in cfg.get('inbounds', []):
-        if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443, 443):
+    inbounds = cfg.setdefault('inbounds', [])
+    for ib in inbounds:
+        if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443,):
             ib['tag'] = 'inbound-tls'
             st = ib.setdefault('streamSettings', {})
             st['network'] = 'tcp'
@@ -1061,6 +1131,82 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 ]
             }
             break
+
+    direct_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
+    if not direct_ib:
+        direct_ib = {
+            'tag': 'just1k-vless-direct',
+            'port': 443,
+            'protocol': 'vless',
+            'settings': {'clients': [], 'decryption': 'none'},
+            'streamSettings': {
+                'network': 'tcp',
+                'security': 'tls',
+                'tlsSettings': {
+                    'alpn': ['h2', 'http/1.1'],
+                    'certificates': [
+                        {
+                            'certificateFile': tls_cert_file,
+                            'keyFile': tls_key_file
+                        }
+                    ]
+                }
+            },
+            'sniffing': {
+                'enabled': True,
+                'destOverride': ['tls', 'http', 'quic'],
+                'metadataOnly': False
+            }
+        }
+        inbounds.append(direct_ib)
+    else:
+        st = direct_ib.setdefault('streamSettings', {})
+        st['network'] = 'tcp'
+        st['security'] = 'tls'
+        st['tlsSettings'] = {
+            'alpn': ['h2', 'http/1.1'],
+            'certificates': [
+                {
+                    'certificateFile': tls_cert_file,
+                    'keyFile': tls_key_file
+                }
+            ]
+        }
+
+    grpc_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-wl-api-grpc'), None)
+    if not grpc_ib:
+        inbounds.insert(0, {
+            'tag': 'just1k-wl-api-grpc',
+            'listen': '127.0.0.1',
+            'port': 10085,
+            'protocol': 'dokodemo-door',
+            'settings': {'address': '127.0.0.1'}
+        })
+
+    cfg['api'] = {
+        'tag': 'api',
+        'services': ['HandlerService', 'LoggerService', 'StatsService']
+    }
+    cfg.setdefault('stats', {})
+    policy_conf = cfg.setdefault('policy', {})
+    policy_levels = policy_conf.setdefault('levels', {})
+    level_0 = policy_levels.setdefault('0', {})
+    level_0['statsUserUplink'] = True
+    level_0['statsUserDownlink'] = True
+
+    if not any(ob.get('tag') == 'api' for ob in cfg.get('outbounds', [])):
+        cfg.setdefault('outbounds', []).append({
+            'tag': 'api',
+            'protocol': 'blackhole'
+        })
+
+    rules = cfg.setdefault('routing', {}).setdefault('rules', [])
+    if not any(r.get('outboundTag') == 'api' for r in rules):
+        rules.insert(0, {
+            'type': 'field',
+            'inboundTag': ['just1k-wl-api-grpc'],
+            'outboundTag': 'api'
+        })
 
 for ob in cfg.get('outbounds', []):
     if ob.get('tag') == 'direct' or ob.get('protocol') == 'freedom':
@@ -1150,6 +1296,24 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
     fi
 
     heal_node_firewall_and_stealth
+
+    if [[ "$current_sec" == "tls" ]]; then
+        ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$role" == "dual" ]]; then
+        local x_api_key
+        x_api_key="$(get_state_val "xray_api_key" "")"
+        if [[ -z "$x_api_key" ]]; then
+            x_api_key="$(get_state_val "awg_api_key" "")"
+        fi
+        if [[ -z "$x_api_key" ]]; then
+            x_api_key="$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
+        fi
+        set_state_val "xray_api_key" "$x_api_key"
+        deploy_xray_api_service "$x_api_key" ""
+        systemctl enable --now xray-api 2>/dev/null || true
+    fi
 
     log "Оптимизация и обновление конфигурации Relay завершены успешно!"
 }
