@@ -133,15 +133,14 @@ install -d -m 750 -o root -g nogroup "$TARGET_DIR"
 
 restarted=0
 if [ -n "${RENEWED_LINEAGE:-}" ]; then
-    lineage_name=$(basename "$RENEWED_LINEAGE")
-    if [ -n "$RELAY_SNI" ] && [ "$lineage_name" = "$RELAY_SNI" ]; then
+    if [ -n "$RELAY_SNI" ] && [ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]; then
         if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/fullchain.pem"
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/privkey.pem"
             restarted=1
         fi
     fi
-    if [ -n "$VLESS_DOMAIN" ] && [ "$lineage_name" = "$VLESS_DOMAIN" ]; then
+    if [ -n "$VLESS_DOMAIN" ] && [ "$(basename "$RENEWED_LINEAGE")" = "$VLESS_DOMAIN" ]; then
         if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/vless_fullchain.pem"
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/vless_privkey.pem"
