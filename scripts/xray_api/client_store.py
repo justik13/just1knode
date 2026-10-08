@@ -167,6 +167,7 @@ class ClientStore:
         client_uuid: str,
         version: Optional[int] = None,
         email: Optional[str] = None,
+        service: Optional[str] = None,
     ) -> None:
         self._ensure_dir()
         lock_fd = self._acquire_lock()
@@ -181,6 +182,10 @@ class ClientStore:
                 "version": new_ver,
                 "updated_at": time.time(),
             }
+            if service:
+                entry["service"] = service
+            elif client_uuid in entries and "service" in entries[client_uuid]:
+                entry["service"] = entries[client_uuid]["service"]
             if email:
                 entry["email"] = email
             entries[client_uuid] = entry
@@ -198,11 +203,14 @@ class ClientStore:
                 entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
             )
             new_ver = version if version is not None else max(curr_ver + 1, 1)
-            entries[client_uuid] = {
+            entry: Dict[str, Any] = {
                 "is_active": False,
                 "version": new_ver,
                 "updated_at": time.time(),
             }
+            if client_uuid in entries and "service" in entries[client_uuid]:
+                entry["service"] = entries[client_uuid]["service"]
+            entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deactivation to disk: {client_uuid}")
         finally:

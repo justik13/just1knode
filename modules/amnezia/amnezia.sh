@@ -993,8 +993,10 @@ EOF
     apply_amnezia_abuse_protection
     set_state_val "abuse_protection" "enabled"
 
-    # 11. Обновление состояния и определение мультироли (Coexistence)
-    if [[ "$prev_role" == "relay" || "$prev_role" == "dual" ]]; then
+    local cur_has_v cur_has_r
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$prev_role" == "relay" || "$prev_role" == "dual" || "$prev_role" == "vless" || "$cur_has_v" == "1" || "$cur_has_r" == "1" ]]; then
         set_state_val "role" "dual"
         log "Режим узла обновлен: DUAL (Совмещенный Relay + AmneziaWG)"
     else
@@ -1327,9 +1329,11 @@ uninstall_amnezia_component() {
     if [[ "$cur_has_v" == "1" && "$cur_has_r" == "1" ]]; then
         set_state_val "role" "dual"
         log "Режим узла переключен на: DUAL (VLESS + Relay)"
+        setup_dual_xray_api 2>/dev/null || true
     elif [[ "$cur_has_v" == "1" ]]; then
         set_state_val "role" "vless"
         log "Режим узла переключен на: VLESS"
+        setup_dual_xray_api 2>/dev/null || true
     elif [[ "$prev_role" == "dual" || "$cur_has_r" == "1" ]]; then
         set_state_val "role" "relay"
         log "Режим узла переключен обратно на: RELAY"

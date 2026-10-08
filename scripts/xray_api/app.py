@@ -430,28 +430,36 @@ def restore_persisted_clients_to_xray() -> int:
 
     The node remains in 'unsynchronized' state until Central DB reconciliation runs.
     """
-    active_clients = client_store.load_clients()
-    if not active_clients:
+    entries = client_store.load_client_entries()
+    if not entries:
         logger.info("No active persisted clients to restore.")
         return 0
 
-    target_inbounds = get_target_inbounds()
-    restored = 0
-    for client_uuid in active_clients:
+    restored_unique = 0
+    restored_registrations = 0
+    for client_uuid, meta in entries.items():
+        if not meta.get("is_active", True) or meta.get("tombstone", False):
+            continue
+        svc = meta.get("service")
+        target_inbounds = get_target_inbounds(service=svc)
+        user_restored = False
         for tag in target_inbounds:
             try:
                 grpc_client.add_user(tag, client_uuid, flow=get_inbound_flow(tag))
-                restored += 1
+                restored_registrations += 1
+                user_restored = True
             except Exception as e:
                 logger.warning(
                     "Failed to restore client %s on inbound %s: %s", _mask_uuid(client_uuid), tag, e
                 )
+        if user_restored or not target_inbounds:
+            restored_unique += 1
+
     logger.info(
-        "Restored %d active client registrations across inbounds %s as ephemeral hints.",
-        restored,
-        target_inbounds,
+        "Restored %d active client registrations across services as ephemeral hints.",
+        restored_registrations,
     )
-    return len(active_clients)
+    return restored_unique
 
 
 @asynccontextmanager
@@ -1068,7 +1076,9 @@ async def _sync_client_internal(
     # Update local persistent client store with monotonic version
     try:
         if desired_state == "active":
-            client_store.add_client(client_uuid, version=req.version, email=req.email)
+            client_store.add_client(
+                client_uuid, version=req.version, email=req.email, service=req.service
+            )
         else:
             client_store.remove_client(client_uuid, version=req.version)
     except Exception as e:

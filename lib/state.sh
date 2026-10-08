@@ -167,41 +167,30 @@ get_node_status() {
 
     local role
     role="$(get_state_val "role" "unconfigured")"
+    if [[ "$role" == "origin" ]] || [[ "$(get_state_val "is_origin" "0")" == "1" ]]; then
+        echo "origin"
+        return
+    fi
 
-    case "$role" in
-        origin)
-            echo "origin"
-            ;;
-        relay)
-            echo "relay"
-            ;;
-        awg)
-            echo "awg"
-            ;;
-        dual)
-            echo "dual"
-            ;;
-        vless)
-            echo "vless"
-            ;;
-        *)
-            local has_a has_v has_r
-            has_a="$(get_state_val "has_awg" "0")"
-            has_v="$(get_state_val "has_vless" "0")"
-            has_r="$(get_state_val "has_relay" "0")"
-            if [[ ("$has_a" == "1" && "$has_v" == "1") || ("$has_a" == "1" && "$has_r" == "1") || ("$has_v" == "1" && "$has_r" == "1") ]]; then
-                echo "dual"
-            elif [[ "$has_a" == "1" ]]; then
-                echo "awg"
-            elif [[ "$has_v" == "1" ]]; then
-                echo "vless"
-            elif [[ "$has_r" == "1" ]]; then
-                echo "relay"
-            else
-                echo "unconfigured"
-            fi
-            ;;
-    esac
+    local has_a has_v has_r
+    has_a="$(get_state_val "has_awg" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+    has_r="$(get_state_val "has_relay" "0")"
+
+    # Multi-component coexistence (Dual/Multi role derived from SSOT component flags)
+    if [[ ("$has_a" == "1" && "$has_v" == "1") || ("$has_a" == "1" && "$has_r" == "1") || ("$has_v" == "1" && "$has_r" == "1") ]]; then
+        echo "dual"
+    elif [[ "$has_a" == "1" ]]; then
+        echo "awg"
+    elif [[ "$has_v" == "1" ]]; then
+        echo "vless"
+    elif [[ "$has_r" == "1" ]]; then
+        echo "relay"
+    elif [[ "$role" =~ ^(awg|vless|relay|dual)$ ]]; then
+        echo "$role"
+    else
+        echo "unconfigured"
+    fi
 }
 
 # Транзакционный манифест

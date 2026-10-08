@@ -122,26 +122,41 @@ issue_relay_tls_cert() {
 set -eu
 STATE_FILE="/etc/just1knode/state.json"
 RELAY_SNI=""
+VLESS_DOMAIN=""
 if [ -f "$STATE_FILE" ]; then
     RELAY_SNI=$(grep -o '"sni": *"[^"]*"' "$STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
+    VLESS_DOMAIN=$(grep -o '"vless_domain": *"[^"]*"' "$STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
 fi
 
 TARGET_DIR="/usr/local/etc/xray/tls"
 install -d -m 750 -o root -g nogroup "$TARGET_DIR"
 
-if [ -n "${RENEWED_LINEAGE:-}" ] && [ -n "$RELAY_SNI" ]; then
-    if [ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]; then
+restarted=0
+if [ -n "${RENEWED_LINEAGE:-}" ]; then
+    lineage_name=$(basename "$RENEWED_LINEAGE")
+    if [ -n "$RELAY_SNI" ] && [ "$lineage_name" = "$RELAY_SNI" ]; then
         if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/fullchain.pem"
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/privkey.pem"
-            if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
-                if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
-                    systemctl restart xray 2>/dev/null || true
-                fi
-            else
-                systemctl restart xray 2>/dev/null || true
-            fi
+            restarted=1
         fi
+    fi
+    if [ -n "$VLESS_DOMAIN" ] && [ "$lineage_name" = "$VLESS_DOMAIN" ]; then
+        if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
+            install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/vless_fullchain.pem"
+            install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/vless_privkey.pem"
+            restarted=1
+        fi
+    fi
+fi
+
+if [ "$restarted" = "1" ]; then
+    if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
+        if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+            systemctl restart xray 2>/dev/null || true
+        fi
+    else
+        systemctl restart xray 2>/dev/null || true
     fi
 fi
 EOF
@@ -294,9 +309,15 @@ except Exception:
         chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
     fi
 
-    install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
-    install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
-    chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+    if [[ "$target_prefix" != "vless" ]]; then
+        install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
+        install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
+        chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+    elif [[ ! -f "${xray_tls_dir}/fullchain.pem" ]]; then
+        install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
+        install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
+        chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+    fi
 
     log "SSL-сертификат Let's Encrypt успешно получен и привязан к Xray (автообновление настроено)."
     return 0
