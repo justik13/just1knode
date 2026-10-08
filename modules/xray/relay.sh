@@ -1314,8 +1314,8 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
         deploy_xray_api_service "$x_api_key" ""
         systemctl enable --now xray-api 2>/dev/null || true
 
-        # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx на порту 8444
-        local amnezia_nginx="/etc/nginx/sites-available/amnezia-api.conf"
+        # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx Amnezia
+        local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
         if [[ -f "$amnezia_nginx" ]] && ! grep -q "location /v1/" "$amnezia_nginx"; then
             python3 -c "
 import sys
@@ -1345,7 +1345,7 @@ if 'location / {' in content:
 " "$amnezia_nginx" 2>/dev/null || true
             if nginx -t >/dev/null 2>&1; then
                 systemctl reload nginx 2>/dev/null || true
-                log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) на порту 8444."
+                log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
             fi
         fi
     fi
