@@ -314,7 +314,7 @@ def get_sub_path_prefix() -> Optional[str]:
     return "/sub/wl"
 
 
-def get_target_inbounds() -> List[str]:
+def get_target_inbounds(service: Optional[str] = None) -> List[str]:
     """Dynamically discover all configured Just1k VLESS inbounds strictly filtering by managed namespaces."""
     discovered_tags: List[str] = []
 
@@ -382,7 +382,12 @@ def get_target_inbounds() -> List[str]:
         if raw:
             tags = [t.strip() for t in raw.split(",") if t.strip()]
             if tags:
-                return tags
+                discovered_tags = tags
+
+    if service == "vless":
+        return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
+    if service in ("white_internet", "wl"):
+        return [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
 
     return discovered_tags
 
@@ -518,6 +523,9 @@ class ClientSyncRequest(BaseModel):
     expected_node_epoch: Optional[str] = Field(None, description="Optional node epoch fencing")
     idempotency_key: Optional[str] = Field(
         None, description="Optional idempotency key for durable retry"
+    )
+    service: Optional[str] = Field(
+        None, description="Optional service filter: 'vless' or 'white_internet'"
     )
 
     @model_validator(mode="before")
@@ -863,7 +871,7 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
 async def _sync_client_internal(
     req: ClientSyncRequest, client_uuid: str, desired_state: str
 ) -> Dict[str, Any]:
-    target_inbounds = get_target_inbounds()
+    target_inbounds = get_target_inbounds(service=req.service)
     if not target_inbounds:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
