@@ -1779,7 +1779,6 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                         elif [[ "$role" == "vless" ]]; then
                             heal_and_update_relay_config
                         elif [[ "$role" == "node" ]]; then
-                            local has_v has_r has_a
                             has_v="$(get_state_val "has_vless" "0")"
                             has_r="$(get_state_val "has_relay" "0")"
                             has_a="$(get_state_val "has_awg" "0")"
