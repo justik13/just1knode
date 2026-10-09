@@ -164,7 +164,7 @@ update_node() {
     tmp_dir="$(mktemp -d /tmp/just1knode_update_dir.XXXXXX 2>/dev/null || mktemp -d)"
 
     local archive_url
-    if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
         archive_url="${repo_url}/archive/${ref}.tar.gz"
     else
         archive_url="${repo_url}/archive/refs/heads/${ref}.tar.gz"
