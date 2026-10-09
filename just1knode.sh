@@ -434,7 +434,7 @@ run_doctor() {
         fi
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
-    elif [[ "$role" == "dual" ]]; then
+    elif [[ "$role" == "dual" || "$role" == "node" ]]; then
         if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray")
         fi
@@ -558,7 +558,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" || "$role" == "vless" || "$cur_has_v" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
+    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" || "$cur_has_a" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"
@@ -976,7 +976,7 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$role" == "dual" || "$cur_has_a" == "1" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
         if check_amnezia_abuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
