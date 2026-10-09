@@ -1373,12 +1373,16 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'tag': 'just1k-vless-direct',
                 'port': 443,
                 'protocol': 'vless',
-                'settings': {'clients': [], 'decryption': 'none'},
+                'settings': {
+                    'clients': [],
+                    'decryption': 'none',
+                    'fallbacks': [{'dest': 80}]
+                },
                 'streamSettings': {
                     'network': 'tcp',
                     'security': 'tls',
                     'tlsSettings': {
-                        'alpn': ['h2', 'http/1.1'],
+                        'alpn': ['http/1.1'],
                         'certificates': [
                             {
                                 'certificateFile': target_vless_cert,
@@ -1391,18 +1395,21 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                     'enabled': True,
                     'destOverride': ['tls', 'http', 'quic'],
                     'metadataOnly': False
-                },
-                'fallbacks': [
-                    {'dest': 80}
-                ]
+                }
             }
             inbounds.append(direct_ib)
         else:
+            settings = direct_ib.setdefault('settings', {})
+            settings.setdefault('clients', [])
+            settings['decryption'] = 'none'
+            settings['fallbacks'] = [{'dest': 80}]
+            if 'fallbacks' in direct_ib:
+                del direct_ib['fallbacks']
             st = direct_ib.setdefault('streamSettings', {})
             st['network'] = 'tcp'
             st['security'] = 'tls'
             st['tlsSettings'] = {
-                'alpn': ['h2', 'http/1.1'],
+                'alpn': ['http/1.1'],
                 'certificates': [
                     {
                         'certificateFile': target_vless_cert,
@@ -1410,7 +1417,6 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                     }
                 ]
             }
-            direct_ib.setdefault('fallbacks', [{'dest': 80}])
     else:
         if direct_ib:
             inbounds.remove(direct_ib)
@@ -1540,10 +1546,8 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
     heal_node_firewall_and_stealth
 
     if [[ "$cur_has_vless" == "1" ]]; then
+        deploy_vless_fallback_nginx
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
-    fi
-
-    if [[ "$role" == "dual" && "$cur_has_vless" == "1" ]]; then
         setup_dual_xray_api
     fi
 
@@ -1722,15 +1726,7 @@ with open(cfg_file, 'w', encoding='utf-8') as f:
 
     set_state_val "has_vless" "1"
     set_state_val "vless_domain" "$dest_server"
-
-    local cur_has_a cur_has_r
-    cur_has_a="$(get_state_val "has_awg" "0")"
-    cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$prev_role" == "dual" || "$prev_role" == "awg" || "$prev_role" == "relay" || "$cur_has_a" == "1" || "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "dual"
-    else
-        set_state_val "role" "vless"
-    fi
+    set_state_val "role" "node"
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
     echo ""
@@ -1828,14 +1824,10 @@ if os.path.exists(cfg_file):
     local cur_has_a cur_has_r
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$cur_has_a" == "1" && "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "dual"
-    elif [[ "$cur_has_a" == "1" ]]; then
-        set_state_val "role" "awg"
-    elif [[ "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "relay"
-    else
+    if [[ "$cur_has_a" == "0" && "$cur_has_r" == "0" ]]; then
         set_state_val "role" "unconfigured"
+    else
+        set_state_val "role" "node"
     fi
 
     if [[ "$cur_has_r" == "1" ]]; then
@@ -1887,14 +1879,10 @@ if os.path.exists(cfg_file):
     local cur_has_a cur_has_v
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$cur_has_a" == "1" && "$cur_has_v" == "1" ]]; then
-        set_state_val "role" "dual"
-    elif [[ "$cur_has_a" == "1" ]]; then
-        set_state_val "role" "awg"
-    elif [[ "$cur_has_v" == "1" ]]; then
-        set_state_val "role" "vless"
-    else
+    if [[ "$cur_has_a" == "0" && "$cur_has_v" == "0" ]]; then
         set_state_val "role" "unconfigured"
+    else
+        set_state_val "role" "node"
     fi
 
     if [[ "$cur_has_v" == "1" ]]; then

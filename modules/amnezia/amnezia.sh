@@ -1320,26 +1320,20 @@ uninstall_amnezia_component() {
 
     remove_amnezia_abuse_protection
 
-    local prev_role
-    prev_role="$(get_node_status)"
     set_state_val "has_awg" "0"
+    set_state_val "awg_installed" "false"
     local cur_has_v cur_has_r
     cur_has_v="$(get_state_val "has_vless" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$cur_has_v" == "1" && "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "dual"
-        log "Режим узла переключен на: DUAL (VLESS + Relay)"
+    if [[ "$cur_has_v" == "1" ]]; then
         setup_dual_xray_api 2>/dev/null || true
-    elif [[ "$cur_has_v" == "1" ]]; then
-        set_state_val "role" "vless"
-        log "Режим узла переключен на: VLESS"
-        setup_dual_xray_api 2>/dev/null || true
-    elif [[ "$prev_role" == "dual" || "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "relay"
-        log "Режим узла переключен обратно на: RELAY"
-    else
+    fi
+    if [[ "$cur_has_v" == "0" && "$cur_has_r" == "0" ]]; then
         set_state_val "role" "unconfigured"
         log "Режим узла сброшен в: НЕ НАСТРОЕН"
+    else
+        set_state_val "role" "node"
+        log "Компонент AmneziaWG удален. Оставшиеся службы активны на узле."
     fi
 
     set_state_val "awg_installed" "false"

@@ -746,15 +746,24 @@ set_origin_bot_ip() {
     local target_port="8444"
     local role_descr="Origin API (порт 8444)"
 
+    local has_a has_v
+    has_a="$(get_state_val "has_awg" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+
     if [[ "$role" == "origin" ]]; then
         target_port="8444"
         role_descr="Origin API (порт 8444)"
-    elif [[ "$role" == "awg" || "$role" == "dual" ]]; then
-        target_port="$(get_state_val "awg_port" "8443")"
-        role_descr="AmneziaWG API (порт ${target_port})"
+    elif [[ "$role" == "awg" || "$role" == "dual" || "$role" == "node" || "$has_a" == "1" || "$has_v" == "1" || "$role" == "vless" ]]; then
+        if [[ "$has_a" == "1" || "$role" == "awg" ]]; then
+            target_port="$(get_state_val "awg_port" "8443")"
+            role_descr="AmneziaWG API (порт ${target_port})"
+        else
+            target_port="8444"
+            role_descr="Xray API (порт 8444)"
+        fi
     else
         release_just1knode_lock
-        error "Функция доступна только на узлах с ролью Origin, AmneziaWG или Dual (текущая роль: ${role:-не установлена})."
+        error "Функция доступна только на настроенных узлах (Origin, AmneziaWG или VLESS)."
         return 1
     fi
 

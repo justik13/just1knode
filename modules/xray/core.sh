@@ -535,8 +535,21 @@ update_node_post() {
     local role
     role="$(get_state_val "role")"
 
+    local cur_a cur_r cur_v
+    cur_a="$(get_state_val "has_awg" "0")"
+    cur_r="$(get_state_val "has_relay" "0")"
+    cur_v="$(get_state_val "has_vless" "0")"
+
     if [[ "$role" == "origin" ]]; then
         heal_and_update_origin_config
+    elif [[ "$role" == "node" ]]; then
+        if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
+            heal_and_update_relay_config
+        fi
+        if [[ "$cur_a" == "1" ]]; then
+            apply_amnezia_abuse_protection
+            heal_node_firewall_and_stealth
+        fi
     elif [[ "$role" == "relay" ]]; then
         heal_and_update_relay_config
     elif [[ "$role" == "vless" ]]; then
@@ -552,7 +565,7 @@ update_node_post() {
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi
 
-    if [[ "$target" == "all" && "$role" != "awg" ]]; then
+    if [[ "$target" == "all" && ("$role" != "awg" || "$cur_r" == "1" || "$cur_v" == "1") && "$role" != "unconfigured" ]]; then
         update_xray_core
     fi
 

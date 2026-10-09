@@ -220,9 +220,8 @@ try:
     has_a = data.get('has_awg') == '1'
     has_r = data.get('has_relay') == '1'
     has_v = data.get('has_vless') == '1'
-    multi_count = sum([has_a, has_r, has_v])
-    if multi_count >= 2 and data.get('role') != 'dual':
-        data['role'] = 'dual'
+    if role != 'origin' and (has_a or has_r or has_v) and data.get('role') != 'node':
+        data['role'] = 'node'
         changed = True
 
     if not data.get('xray_api_key') and data.get('awg_api_key'):
@@ -269,17 +268,9 @@ get_node_status() {
     has_v="$(get_state_val "has_vless" "0")"
     has_r="$(get_state_val "has_relay" "0")"
 
-    # Multi-component coexistence (Dual/Multi role derived from SSOT component flags)
-    if [[ ("$has_a" == "1" && "$has_v" == "1") || ("$has_a" == "1" && "$has_r" == "1") || ("$has_v" == "1" && "$has_r" == "1") ]]; then
-        echo "dual"
-    elif [[ "$has_a" == "1" ]]; then
-        echo "awg"
-    elif [[ "$has_v" == "1" ]]; then
-        echo "vless"
-    elif [[ "$has_r" == "1" ]]; then
-        echo "relay"
-    elif [[ "$role" =~ ^(awg|vless|relay|dual)$ ]]; then
-        echo "$role"
+    # Модульный зарубежный узел (TLS / AWG / Relay)
+    if [[ "$has_a" == "1" || "$has_v" == "1" || "$has_r" == "1" || "$role" == "node" || "$role" =~ ^(awg|vless|relay|dual)$ ]]; then
+        echo "node"
     else
         echo "unconfigured"
     fi
