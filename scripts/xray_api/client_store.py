@@ -177,15 +177,23 @@ class ClientStore:
                 entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
             )
             new_ver = version if version is not None else max(curr_ver + 1, 1)
+            existing_services = entries.get(client_uuid, {}).get("services") or []
+            if not isinstance(existing_services, list):
+                existing_services = [existing_services] if existing_services else []
+            if "service" in entries.get(client_uuid, {}) and entries[client_uuid]["service"] not in existing_services:
+                existing_services.append(entries[client_uuid]["service"])
+
+            if service and service not in existing_services:
+                existing_services.append(service)
+
             entry: Dict[str, Any] = {
                 "is_active": True,
                 "version": new_ver,
                 "updated_at": time.time(),
             }
-            if service:
-                entry["service"] = service
-            elif client_uuid in entries and "service" in entries[client_uuid]:
-                entry["service"] = entries[client_uuid]["service"]
+            if existing_services:
+                entry["services"] = existing_services
+                entry["service"] = existing_services[-1]
             if email:
                 entry["email"] = email
             entries[client_uuid] = entry
@@ -203,13 +211,20 @@ class ClientStore:
                 entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
             )
             new_ver = version if version is not None else max(curr_ver + 1, 1)
+            existing_services = entries.get(client_uuid, {}).get("services") or []
+            if not isinstance(existing_services, list):
+                existing_services = [existing_services] if existing_services else []
+            if "service" in entries.get(client_uuid, {}) and entries[client_uuid]["service"] not in existing_services:
+                existing_services.append(entries[client_uuid]["service"])
+
             entry: Dict[str, Any] = {
                 "is_active": False,
                 "version": new_ver,
                 "updated_at": time.time(),
             }
-            if client_uuid in entries and "service" in entries[client_uuid]:
-                entry["service"] = entries[client_uuid]["service"]
+            if existing_services:
+                entry["services"] = existing_services
+                entry["service"] = existing_services[-1]
             entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deactivation to disk: {client_uuid}")

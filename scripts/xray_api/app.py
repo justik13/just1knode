@@ -389,6 +389,12 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
     if service in ("white_internet", "wl"):
         return [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
 
+    # If service is unspecified, do not mix namespaces:
+    # If white_internet inbounds exist, default to white_internet to prevent accidental leakage into vless-direct.
+    wl_inbounds = [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
+    if wl_inbounds:
+        return wl_inbounds
+
     return discovered_tags
 
 
@@ -440,8 +446,17 @@ def restore_persisted_clients_to_xray() -> int:
     for client_uuid, meta in entries.items():
         if not meta.get("is_active", True) or meta.get("tombstone", False):
             continue
-        svc = meta.get("service")
-        target_inbounds = get_target_inbounds(service=svc)
+        services = meta.get("services")
+        if not services:
+            svc = meta.get("service")
+            services = [svc] if svc else [None]
+
+        target_inbounds: List[str] = []
+        for s in services:
+            for tag in get_target_inbounds(service=s):
+                if tag not in target_inbounds:
+                    target_inbounds.append(tag)
+
         user_restored = False
         for tag in target_inbounds:
             try:

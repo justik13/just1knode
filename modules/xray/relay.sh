@@ -1806,14 +1806,19 @@ uninstall_vless_component() {
         return 0
     fi
 
-    systemctl stop xray-api 2>/dev/null || true
-    systemctl disable xray-api 2>/dev/null || true
-    rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
+    local cur_has_r_init
+    cur_has_r_init="$(get_state_val "has_relay" "0")"
+
+    if [[ "$cur_has_r_init" != "1" ]]; then
+        systemctl stop xray-api 2>/dev/null || true
+        systemctl disable xray-api 2>/dev/null || true
+        rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
 
     rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
-    if [[ -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
+    if [[ "$cur_has_r_init" != "1" && -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
         python3 -c "
 import re, sys
 p = sys.argv[1]
@@ -1849,7 +1854,9 @@ if os.path.exists(cfg_file):
     fi
 
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
-    ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+    if [[ "$cur_has_r_init" != "1" ]]; then
+        ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+    fi
 
     set_state_val "has_vless" "0"
 

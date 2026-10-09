@@ -528,9 +528,9 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. AmneziaWG API (порты для ролей awg, dual, node, либо при наличии активного конфига amnezia)
+    # 3. AmneziaWG API (порты для ролей awg, dual, либо при наличии has_awg/активного конфига amnezia)
     local is_awg_node=0
-    if [[ "$role" == "awg" || "$role" == "dual" || "$role" == "node" || "$(get_state_val "has_awg" "0")" == "1" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+    if [[ "$role" == "awg" || "$role" == "dual" || "$(get_state_val "has_awg" "0")" == "1" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
         is_awg_node=1
     fi
 
@@ -596,8 +596,8 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 5. Relay туннель (роль relay, dual, node или has_relay)
-    if [[ "$role" == "relay" || "$role" == "dual" || "$role" == "node" || "$(get_state_val "has_relay" "0")" == "1" ]]; then
+    # 5. Relay туннель (роль relay, dual или has_relay)
+    if [[ "$role" == "relay" || "$role" == "dual" || "$(get_state_val "has_relay" "0")" == "1" ]]; then
         local relay_port origin_ip
         relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
         origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
@@ -622,10 +622,10 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 6. VLESS Direct и API (роль vless, dual, node, либо при наличии has_vless)
+    # 6. VLESS Direct и API (роль vless, dual, либо при наличии has_vless)
     local cur_has_vless
     cur_has_vless="$(get_state_val "has_vless" "0")"
-    if [[ "$role" == "vless" || "$role" == "node" || "$cur_has_vless" == "1" ]]; then
+    if [[ "$role" == "vless" || "$role" == "dual" || "$cur_has_vless" == "1" ]]; then
         # Клиентский вход VLESS TLS на порту 443
         if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW" -q; then
             ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
