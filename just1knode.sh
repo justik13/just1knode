@@ -327,10 +327,11 @@ show_bot_credentials() {
 
 show_relay_credentials() {
     title "ДАННЫЕ ПОДКЛЮЧЕНИЯ RELAY (КОМАНДА ДЛЯ ORIGIN)"
-    local role
+    local role cur_has_r
     role="$(get_state_val "role")"
-    if [[ "$role" != "relay" && "$role" != "dual" ]]; then
-        warn "Данные доступны только на сервере с ролью Relay или Dual."
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$role" != "relay" && "$role" != "dual" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
+        warn "Данные доступны только на сервере с настроенным компонентом Relay."
         return
     fi
 

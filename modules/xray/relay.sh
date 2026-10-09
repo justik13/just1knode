@@ -810,15 +810,14 @@ EOF
     set_state_val "short_id" "-"
     set_state_val "sni" "$dest_server"
 
+    set_state_val "has_relay" "1"
+    set_state_val "role" "node"
     if [[ "$prev_role" == "awg" || "$prev_role" == "dual" || "$cur_has_vless" == "1" ]]; then
-        set_state_val "role" "dual"
         log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"
         apply_amnezia_abuse_protection
         if [[ "$cur_has_vless" == "1" ]]; then
             setup_dual_xray_api
         fi
-    else
-        set_state_val "role" "relay"
     fi
 
     local detected_country="Зарубежный шлюз"
@@ -1045,10 +1044,11 @@ setup_relay_domain() {
     init_state_dir
     acquire_just1knode_lock
 
-    local role
+    local role cur_has_r
     role="$(get_state_val "role")"
-    if [[ "$role" != "relay" && "$role" != "dual" ]]; then
-        error "Команда 'setup-domain' предназначена для Relay/Dual узлов (текущая роль: ${role:-не настроен})."
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$role" != "relay" && "$role" != "dual" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
+        error "Команда 'setup-domain' предназначена для Relay узлов (текущая роль: ${role:-не настроен})."
         return 1
     fi
 
@@ -1271,10 +1271,12 @@ heal_and_update_relay_config() {
     init_state_dir
     acquire_just1knode_lock
 
-    local role
+    local role cur_has_r cur_has_v
     role="$(get_state_val "role")"
-    if [[ "$role" != "relay" && "$role" != "dual" && "$role" != "vless" ]]; then
-        error "Функция доступна только на Relay или VLESS узле (текущая роль: ${role:-не установлена})."
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    if [[ "$role" != "relay" && "$role" != "dual" && "$role" != "vless" && ( "$role" != "node" || ( "$cur_has_r" != "1" && "$cur_has_v" != "1" ) ) ]]; then
+        error "Функция доступна только на узле с компонентами Relay или VLESS (текущая роль: ${role:-не установлена})."
     fi
 
     log "Проверка и исправление параметров ядра Xray Relay..."

@@ -993,16 +993,9 @@ EOF
     apply_amnezia_abuse_protection
     set_state_val "abuse_protection" "enabled"
 
-    local cur_has_v cur_has_r
-    cur_has_v="$(get_state_val "has_vless" "0")"
-    cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$prev_role" == "relay" || "$prev_role" == "dual" || "$prev_role" == "vless" || "$cur_has_v" == "1" || "$cur_has_r" == "1" ]]; then
-        set_state_val "role" "dual"
-        log "Режим узла обновлен: DUAL (Совмещенный Relay + AmneziaWG)"
-    else
-        set_state_val "role" "awg"
-        log "Режим узла установлен: AMNEZIAWG"
-    fi
+    set_state_val "has_awg" "1"
+    set_state_val "role" "node"
+    log "Компонент AmneziaWG успешно установлен (роль: Модульный узел)."
 
     local final_api_url="https://${api_domain}:${public_port}"
     set_state_val "awg_api_url" "$final_api_url"
