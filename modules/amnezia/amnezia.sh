@@ -275,6 +275,52 @@ remove_amnezia_abuse_protection() {
     set_state_val "abuse_protection" "disabled"
 }
 
+ensure_amnezia_api_service_and_env() {
+    local cur_has_a
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    [[ "$cur_has_a" == "1" ]] || return 0
+
+    local etc_dir="${AMNEZIA_API_ETC:-/etc/amnezia-api}"
+    local app_dir="${AMNEZIA_API_DIR:-/opt/amnezia-api}"
+    local api_key="$(get_state_val "awg_api_key" "")"
+    local domain="$(get_state_val "awg_domain" "")"
+    local container
+    container="$(detect_amnezia_container || echo "amnezia-awg2")"
+
+    if [[ ! -f "${etc_dir}/config.env" && -n "$api_key" ]]; then
+        mkdir -p "$etc_dir"
+        cat > "${etc_dir}/config.env" <<EOF
+AMNEZIA_API_KEY=${api_key}
+FASTIFY_API_KEY=${api_key}
+AWG_DIR=${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}
+AWG_CONF_PATH=/opt/amnezia/awg/awg0.conf
+AWG_CONTAINER_NAME=${container}
+SERVER_HOST_NAME=${domain}
+SERVER_PUBLIC_HOST=${domain}
+SERVER_DNS1=8.8.8.8
+SERVER_DNS2=8.8.4.4
+EOF
+        chmod 600 "${etc_dir}/config.env"
+        log "✔ Конфигурация ${etc_dir}/config.env успешно восстановлена из state.json"
+    fi
+
+    if [[ ! -f /etc/systemd/system/amnezia-api.service ]]; then
+        if [[ -f "${app_dir}/amnezia-api.service" ]]; then
+            cp "${app_dir}/amnezia-api.service" /etc/systemd/system/amnezia-api.service
+            systemctl daemon-reload
+            systemctl enable amnezia-api.service 2>/dev/null || true
+        elif [[ -f "${INSTALL_DIR:-/opt/just1knode}/scripts/amnezia_api/amnezia-api.service" ]]; then
+            cp "${INSTALL_DIR:-/opt/just1knode}/scripts/amnezia_api/amnezia-api.service" /etc/systemd/system/amnezia-api.service
+            systemctl daemon-reload
+            systemctl enable amnezia-api.service 2>/dev/null || true
+        fi
+    fi
+
+    if ! systemctl is-active --quiet amnezia-api 2>/dev/null; then
+        systemctl restart amnezia-api 2>/dev/null || true
+    fi
+}
+
 deploy_amnezia_certbot_renewal_hook() {
     local base_hook_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks"
     mkdir -p "${base_hook_dir}/deploy"

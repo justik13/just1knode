@@ -487,6 +487,10 @@ run_doctor() {
         log "2a. Проверка Relay инбаунд порта..."
         local r_port
         r_port="$(get_state_val "relay_port" "10443")"
+        if ! ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" && ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then
+            heal_and_update_relay_config >/dev/null 2>&1 || true
+            sleep 1
+        fi
         if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
         else
@@ -496,6 +500,10 @@ run_doctor() {
 
     if [[ "$role" == "awg" || "$cur_has_a" == "1" || ("$role" == "dual" && "$cur_has_a" == "1") ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
+        if ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
+            ensure_amnezia_api_service_and_env >/dev/null 2>&1 || true
+            sleep 1
+        fi
         if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
         else
@@ -1786,6 +1794,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                                 heal_and_update_relay_config
                             fi
                             if [[ "$has_a" == "1" ]]; then
+                                ensure_amnezia_api_service_and_env
                                 apply_amnezia_abuse_protection
                             fi
                             heal_node_firewall_and_stealth

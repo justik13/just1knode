@@ -547,6 +547,7 @@ update_node_post() {
             heal_and_update_relay_config
         fi
         if [[ "$cur_a" == "1" ]]; then
+            ensure_amnezia_api_service_and_env
             apply_amnezia_abuse_protection
             heal_node_firewall_and_stealth
         fi

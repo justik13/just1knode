@@ -1328,8 +1328,11 @@ heal_and_update_relay_config() {
         current_sec="$(get_state_val "security" "")"
     fi
 
-    local cur_has_vless
+    local cur_has_vless cur_has_relay cur_relay_port cur_tunnel_uuid
     cur_has_vless="$(get_state_val "has_vless" "0")"
+    cur_has_relay="$(get_state_val "has_relay" "0")"
+    cur_relay_port="$(get_state_val "relay_port" "10443")"
+    cur_tunnel_uuid="$(get_state_val "tunnel_uuid" "")"
 
     if ! python3 -c "
 import json, os, sys, tempfile
@@ -1342,25 +1345,47 @@ with open(cfg_file, 'r', encoding='utf-8') as f:
 tls_cert_dir = os.environ.get('XRAY_TLS_DIR', '/usr/local/etc/xray/tls')
 tls_cert_file = os.path.join(tls_cert_dir, 'fullchain.pem')
 tls_key_file = os.path.join(tls_cert_dir, 'privkey.pem')
-if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_key_file):
-    inbounds = cfg.setdefault('inbounds', [])
-    for ib in inbounds:
-        if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443,):
-            ib['tag'] = 'inbound-tls'
-            st = ib.setdefault('streamSettings', {})
-            st['network'] = 'tcp'
-            st['security'] = 'tls'
-            st.pop('realitySettings', None)
-            st['tlsSettings'] = {
+has_relay_flag = sys.argv[4] if len(sys.argv) > 4 else '0'
+relay_port = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].isdigit() else 10443
+tunnel_uuid = sys.argv[6] if len(sys.argv) > 6 else ''
+
+inbounds = cfg.setdefault('inbounds', [])
+relay_ib = next((ib for ib in inbounds if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443, relay_port)), None)
+
+if has_relay_flag == '1' and not relay_ib and tunnel_uuid:
+    relay_ib = {
+        'tag': 'inbound-tls',
+        'port': relay_port,
+        'protocol': 'vless',
+        'settings': {
+            'clients': [{'id': tunnel_uuid, 'flow': ''}],
+            'decryption': 'none'
+        },
+        'streamSettings': {
+            'network': 'tcp',
+            'security': 'tls',
+            'tlsSettings': {
                 'alpn': ['h2', 'http/1.1'],
-                'certificates': [
-                    {
-                        'certificateFile': tls_cert_file,
-                        'keyFile': tls_key_file
-                    }
-                ]
+                'certificates': [{'certificateFile': tls_cert_file, 'keyFile': tls_key_file}]
             }
-            break
+        }
+    }
+    inbounds.insert(0, relay_ib)
+elif relay_ib and sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_key_file):
+    relay_ib['tag'] = 'inbound-tls'
+    st = relay_ib.setdefault('streamSettings', {})
+    st['network'] = 'tcp'
+    st['security'] = 'tls'
+    st.pop('realitySettings', None)
+    st['tlsSettings'] = {
+        'alpn': ['h2', 'http/1.1'],
+        'certificates': [
+            {
+                'certificateFile': tls_cert_file,
+                'keyFile': tls_key_file
+            }
+        ]
+    }
 
     has_vless_flag = sys.argv[3] if len(sys.argv) > 3 else '0'
     direct_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
@@ -1511,7 +1536,7 @@ except Exception:
     pass
 
 print('[+] Xray Relay config успешно оптимизирован (UseIPv4 + Независимый DNS + VLESS TLS)')
-" "$XRAY_CONFIG" "$current_sec" "$cur_has_vless"; then
+" "$XRAY_CONFIG" "$current_sec" "$cur_has_vless" "$cur_has_relay" "$cur_relay_port" "$cur_tunnel_uuid"; then
         manifest_rollback
         error "Ошибка выполнения Python-скрипта реконсиляции Relay."
     fi
