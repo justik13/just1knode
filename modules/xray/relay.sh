@@ -1769,7 +1769,12 @@ uninstall_vless_component() {
     check_root
     init_state_dir
 
-    read -rp "Вы действительно хотите удалить службу VLESS TLS с этого сервера? [y/N]: " confirm_del || true
+    local confirm_del=""
+    if [[ "${1:-}" == "--yes" || "${1:-}" == "-y" || "${FORCE:-}" == "1" ]]; then
+        confirm_del="y"
+    else
+        read -rp "Вы действительно хотите удалить службу VLESS TLS с этого сервера? [y/N]: " confirm_del || true
+    fi
     if [[ "$confirm_del" != [yY] && "$confirm_del" != [yY][eE][sS] && "$confirm_del" != "да" && "$confirm_del" != "Да" ]]; then
         log "Удаление отменено."
         return 0
@@ -1849,7 +1854,12 @@ uninstall_relay_component() {
     check_root
     init_state_dir
 
-    read -rp "Вы действительно хотите удалить службу Relay с этого сервера? [y/N]: " confirm_del || true
+    local confirm_del=""
+    if [[ "${1:-}" == "--yes" || "${1:-}" == "-y" || "${FORCE:-}" == "1" ]]; then
+        confirm_del="y"
+    else
+        read -rp "Вы действительно хотите удалить службу Relay с этого сервера? [y/N]: " confirm_del || true
+    fi
     if [[ "$confirm_del" != [yY] && "$confirm_del" != [yY][eE][sS] && "$confirm_del" != "да" && "$confirm_del" != "Да" ]]; then
         log "Удаление отменено."
         return 0

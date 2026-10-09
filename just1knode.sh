@@ -1685,11 +1685,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 esac
                 ;;
             install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
-            uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component ;;
+            uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
             install-amnezia|install-awg|add-amnezia) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
-            uninstall-amnezia|uninstall-awg|remove-amnezia) uninstall_amnezia_component ;;
+            uninstall-amnezia|uninstall-awg|remove-amnezia) uninstall_amnezia_component "${2:-}" ;;
             install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
-            uninstall-relay|remove-relay) uninstall_relay_component ;;
+            uninstall-relay|remove-relay) uninstall_relay_component "${2:-}" ;;
             setup-domain|relay-domain|setup_domain)
                 setup_relay_domain "${2:-}"
                 ;;
@@ -1699,7 +1699,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     status) show_status ;;
                     creds|bot) show_vless_bot_credentials ;;
                     bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
-                    uninstall|remove|del) uninstall_vless_component ;;
+                    uninstall|remove|del) uninstall_vless_component "${3:-}" ;;
                     *) install_vless_direct_node "${2:-}" ;;
                 esac
                 ;;
@@ -1707,7 +1707,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 case "${2:-}" in
                     install|setup) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
                     creds|info) show_relay_credentials ;;
-                    uninstall|remove|del) uninstall_relay_component ;;
+                    uninstall|remove|del) uninstall_relay_component "${3:-}" ;;
                     add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-de}" "${8:-tls}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
                     remove-origin|del-origin) remove_relay_node "${3:-}" ;;
                     rename) rename_relay_node "${3:-}" "${4:-}" ;;
