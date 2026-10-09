@@ -538,6 +538,8 @@ update_node_post() {
         heal_and_update_origin_config
     elif [[ "$role" == "relay" ]]; then
         heal_and_update_relay_config
+    elif [[ "$role" == "vless" ]]; then
+        heal_and_update_relay_config
     elif [[ "$role" == "dual" ]]; then
         heal_and_update_relay_config
         apply_amnezia_abuse_protection

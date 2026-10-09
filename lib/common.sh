@@ -621,6 +621,25 @@ heal_node_firewall_and_stealth() {
             fi
         fi
     fi
+
+    # 6. VLESS Direct и API (роль vless, dual, либо при наличии has_vless)
+    local cur_has_vless
+    cur_has_vless="$(get_state_val "has_vless" "0")"
+    if [[ "$role" == "vless" || "$cur_has_vless" == "1" ]]; then
+        # Клиентский вход VLESS TLS на порту 443
+        if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW" -q; then
+            ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+        fi
+
+        # Защита xray-api (порт 8444)
+        local v_bot_ip
+        v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+        if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
+            if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
+                ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
 }
 
 sync_xhttp_upstreams_conf() {

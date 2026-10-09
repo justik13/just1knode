@@ -99,6 +99,7 @@ except Exception as e:
 
 issue_relay_tls_cert() {
     local domain="$1"
+    local target_prefix="${2:-}"
     if [[ -z "$domain" ]]; then
         error "Домен обязателен для выпуска сертификата."
         return 1
@@ -168,9 +169,20 @@ EOF
     if [[ -f "${le_dir}/live/${domain}/fullchain.pem" && -f "${le_dir}/live/${domain}/privkey.pem" ]]; then
         if openssl x509 -checkend 86400 -noout -in "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null; then
             log "✔ Обнаружен действующий сертификат Let's Encrypt для '$domain'!"
-            install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
-            install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
-            chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+            if [[ -n "$target_prefix" ]]; then
+                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
+                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem"
+                chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+            fi
+            if [[ "$target_prefix" != "vless" ]]; then
+                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
+                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
+                chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+            elif [[ ! -f "${xray_tls_dir}/fullchain.pem" ]]; then
+                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
+                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
+                chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+            fi
             local ren_conf="${le_dir}/renewal/${domain}.conf"
             if [[ -f "$ren_conf" ]]; then
                 python3 -c "
@@ -1314,6 +1326,11 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
     has_vless_flag = sys.argv[3] if len(sys.argv) > 3 else '0'
     direct_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
     if has_vless_flag == '1':
+        vless_cert_cand = os.path.join(tls_cert_dir, 'vless_fullchain.pem')
+        vless_key_cand = os.path.join(tls_cert_dir, 'vless_privkey.pem')
+        target_vless_cert = vless_cert_cand if (os.path.exists(vless_cert_cand) and os.path.exists(vless_key_cand)) else tls_cert_file
+        target_vless_key = vless_key_cand if (os.path.exists(vless_cert_cand) and os.path.exists(vless_key_cand)) else tls_key_file
+
         if not direct_ib:
             direct_ib = {
                 'tag': 'just1k-vless-direct',
@@ -1327,8 +1344,8 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                         'alpn': ['h2', 'http/1.1'],
                         'certificates': [
                             {
-                                'certificateFile': tls_cert_file,
-                                'keyFile': tls_key_file
+                                'certificateFile': target_vless_cert,
+                                'keyFile': target_vless_key
                             }
                         ]
                     }
@@ -1337,7 +1354,10 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                     'enabled': True,
                     'destOverride': ['tls', 'http', 'quic'],
                     'metadataOnly': False
-                }
+                },
+                'fallbacks': [
+                    {'dest': 80}
+                ]
             }
             inbounds.append(direct_ib)
         else:
@@ -1348,11 +1368,12 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'alpn': ['h2', 'http/1.1'],
                 'certificates': [
                     {
-                        'certificateFile': tls_cert_file,
-                        'keyFile': tls_key_file
+                        'certificateFile': target_vless_cert,
+                        'keyFile': target_vless_key
                     }
                 ]
             }
+            direct_ib.setdefault('fallbacks', [{'dest': 80}])
     else:
         if direct_ib:
             inbounds.remove(direct_ib)
@@ -1631,10 +1652,12 @@ if not direct_ib:
         'protocol': 'vless',
         'settings': {'clients': [], 'decryption': 'none'},
         'streamSettings': stream_settings,
-        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False}
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False},
+        'fallbacks': [{'dest': 80}]
     })
 else:
     direct_ib['streamSettings'] = stream_settings
+    direct_ib.setdefault('fallbacks', [{'dest': 80}])
 
 with open(cfg_file, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
@@ -1718,6 +1741,21 @@ uninstall_vless_component() {
     systemctl daemon-reload 2>/dev/null || true
 
     rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+    local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
+    if [[ -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
+        python3 -c "
+import re, sys
+p = sys.argv[1]
+try:
+    with open(p, 'r', encoding='utf-8') as f:
+        c = f.read()
+    c = re.sub(r'[ \t]*location\s+/v1/\s*\{[^}]*\}\n?', '', c)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write(c)
+except Exception:
+    pass
+" "$amnezia_nginx" 2>/dev/null || true
+    fi
     if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || true
     fi

@@ -269,28 +269,61 @@ show_status() {
         systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
         systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
     elif [[ "$role" == "dual" ]]; then
-        local r_port r_orig r_sni a_url a_port r_sec
-        r_port="$(get_state_val "relay_port" "-")"
-        r_orig="$(get_state_val "origin_ip" "-")"
-        r_sni="$(get_state_val "sni" "-")"
-        r_sec="$(get_state_val "security" "tls")"
-        a_url="$(get_state_val "awg_api_url" "-")"
-        a_port="$(get_state_val "awg_port" "8443")"
+        local cur_has_a cur_has_r cur_has_v
+        cur_has_a="$(get_state_val "has_awg" "0")"
+        cur_has_r="$(get_state_val "has_relay" "0")"
+        cur_has_v="$(get_state_val "has_vless" "0")"
 
-        echo -e "  [Relay] Порт туннеля: ${CYAN}${r_port}${NC} (${r_sec^^}, Origin: ${r_orig}, SNI: ${r_sni})"
-        echo -e "  [AWG]   API URL:      ${CYAN}${a_url}${NC} (HTTPS Порт: ${a_port})"
+        if [[ "$cur_has_r" == "1" ]]; then
+            local r_port r_orig r_sni r_sec
+            r_port="$(get_state_val "relay_port" "-")"
+            r_orig="$(get_state_val "origin_ip" "-")"
+            r_sni="$(get_state_val "sni" "-")"
+            r_sec="$(get_state_val "security" "tls")"
+            echo -e "  [Relay] Порт туннеля: ${CYAN}${r_port}${NC} (${r_sec^^}, Origin: ${r_orig}, SNI: ${r_sni})"
+        fi
+        if [[ "$cur_has_v" == "1" ]]; then
+            local v_dom
+            v_dom="$(get_state_val "vless_domain" "-")"
+            echo -e "  [VLESS] Домен:        ${CYAN}${v_dom}${NC} (Порт: 443 TLS XTLS-Vision)"
+        fi
+        if [[ "$cur_has_a" == "1" ]]; then
+            local a_url a_port
+            a_url="$(get_state_val "awg_api_url" "-")"
+            a_port="$(get_state_val "awg_port" "8443")"
+            echo -e "  [AWG]   API URL:      ${CYAN}${a_url}${NC} (HTTPS Порт: ${a_port})"
+        fi
 
         echo -e "\n  Службы:"
-        systemctl is-active --quiet xray && echo -e "    Xray Relay:           ${GREEN}● Активен${NC}" || echo -e "    Xray Relay:           ${RED}○ Не работает${NC}"
-        local c_name_dual
-        c_name_dual="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
-        if is_amnezia_container_running 2>/dev/null; then
-            echo -e "    Docker (${c_name_dual}): ${GREEN}● Активен${NC}"
-        else
-            echo -e "    Docker (${c_name_dual}): ${RED}○ Не запущен${NC}"
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
+            systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         fi
-        systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
-        systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
+        if [[ "$cur_has_v" == "1" ]]; then
+            systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
+        fi
+        if [[ "$cur_has_a" == "1" ]]; then
+            local c_name_dual
+            c_name_dual="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
+            if is_amnezia_container_running 2>/dev/null; then
+                echo -e "    Docker (${c_name_dual}): ${GREEN}● Активен${NC}"
+            else
+                echo -e "    Docker (${c_name_dual}): ${RED}○ Не запущен${NC}"
+            fi
+            systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
+            systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
+        fi
+    elif [[ "$role" == "vless" ]]; then
+        local v_dom
+        v_dom="$(get_state_val "vless_domain" "-")"
+        echo -e "  VLESS Домен:          ${CYAN}${v_dom}${NC}"
+        echo -e "  Клиентский порт:      ${CYAN}443 (TLS XTLS-Vision)${NC}"
+
+        echo -e "\n  Службы:"
+        systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
+        systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
+        if systemctl is-active --quiet nginx 2>/dev/null; then
+            echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}"
+        fi
     fi
 
     local t_status
@@ -571,6 +604,7 @@ run_doctor() {
     local domain
     domain="$(get_state_val "domain")"
     [[ -z "$domain" ]] && domain="$(get_state_val "sni")"
+    [[ -z "$domain" ]] && domain="$(get_state_val "vless_domain")"
     [[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"
 
     if [[ -n "$domain" && -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
@@ -654,9 +688,16 @@ run_doctor() {
             fi
 
             if [[ "$role" == "dual" ]]; then
-                local relay_port origin_ip
+                local relay_port origin_ip cur_has_v
                 relay_port="$(get_state_val "relay_port" "10443")"
                 origin_ip="$(get_state_val "origin_ip")"
+                cur_has_v="$(get_state_val "has_vless" "0")"
+
+                if [[ "$cur_has_v" == "1" ]]; then
+                    if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW" -q; then
+                        echo -e "  ${GREEN}✔${NC} Порт VLESS 443 открыт для клиентских подключений"
+                    fi
+                fi
 
                 if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                     echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
@@ -664,6 +705,21 @@ run_doctor() {
                 elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then
                     echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
                 fi
+            fi
+        elif [[ "$role" == "vless" ]]; then
+            if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                echo -e "  ${GREEN}✔${NC} Порт VLESS 443 открыт для клиентских подключений"
+            else
+                echo -e "  ${YELLOW}!${NC} Порт VLESS 443 не найден среди разрешенных в UFW"
+                warnings=$((warnings + 1))
+            fi
+            local bot_ip
+            bot_ip="$(get_state_val "bot_ip")"
+            if [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
+                echo -e "  ${GREEN}✔${NC} Порт 8444 защищен и доступен только с BOT_IP ($bot_ip)"
+            elif [[ -n "$bot_ip" ]]; then
+                echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт 8444 не найдено в UFW"
+                failed=$((failed + 1))
             fi
         elif [[ "$role" == "relay" ]]; then
             local relay_port origin_ip
@@ -1820,6 +1876,8 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                         if [[ "$role" == "origin" ]]; then
                             heal_and_update_origin_config
                         elif [[ "$role" == "relay" ]]; then
+                            heal_and_update_relay_config
+                        elif [[ "$role" == "vless" ]]; then
                             heal_and_update_relay_config
                         elif [[ "$role" == "dual" ]]; then
                             heal_and_update_relay_config
