@@ -334,6 +334,32 @@ except Exception:
     return 0
 }
 
+deploy_vless_fallback_nginx() {
+    if ! command -v nginx >/dev/null 2>&1; then
+        return 0
+    fi
+    local fb_conf="/etc/nginx/sites-available/just1k-fallback80.conf"
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html
+    if [[ ! -f /var/www/html/index.html ]]; then
+        echo '<html><head><title>Welcome</title></head><body><h1>Welcome to nginx!</h1></body></html>' > /var/www/html/index.html
+    fi
+    cat > "$fb_conf" <<'EOF'
+server {
+    listen 127.0.0.1:80 default_server;
+    server_name _;
+    root /var/www/html;
+    index index.html index.nginx-debian.html;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+    ln -sf "$fb_conf" /etc/nginx/sites-enabled/just1k-fallback80.conf 2>/dev/null || true
+    if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    fi
+}
+
 setup_dual_xray_api() {
     local x_api_key
     x_api_key="$(get_state_val "xray_api_key" "")"
@@ -429,12 +455,24 @@ EOF
         fi
     fi
 
-    local bot_ip
-    bot_ip="$(get_state_val "bot_ip" "")"
-    if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
-        ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
-    else
-        ufw allow 8444/tcp comment "just1knode xray-api" >/dev/null 2>&1 || true
+    if [[ -f "$amnezia_nginx" ]]; then
+        local dead_bot_ip
+        dead_bot_ip="$(get_state_val "bot_ip" "")"
+        if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+            if [[ -n "$dead_bot_ip" ]]; then
+                ufw delete allow from "$dead_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8444 >/dev/null 2>&1 || true
+        fi
+    elif [[ -f /etc/nginx/sites-enabled/just1k-vless-api.conf ]]; then
+        local bot_ip
+        bot_ip="$(get_state_val "bot_ip" "")"
+        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
+            ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+        else
+            ufw allow 8444/tcp comment "just1knode xray-api" >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -728,8 +766,7 @@ print('[]')
 }
 EOF
 
-    chown root:root "$XRAY_CONFIG"
-    chmod 640 "$XRAY_CONFIG"
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     apply_node_sysctl_hardening
 
@@ -1506,7 +1543,7 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
     fi
 
-    if [[ "$role" == "dual" ]]; then
+    if [[ "$role" == "dual" && "$cur_has_vless" == "1" ]]; then
         setup_dual_xray_api
     fi
 
@@ -1639,7 +1676,7 @@ stream_settings = {
     'network': 'tcp',
     'security': 'tls',
     'tlsSettings': {
-        'alpn': ['h2', 'http/1.1'],
+        'alpn': ['http/1.1'],
         'certificates': [{'certificateFile': cert_f, 'keyFile': key_f}]
     }
 }
@@ -1650,21 +1687,25 @@ if not direct_ib:
         'tag': 'just1k-vless-direct',
         'port': 443,
         'protocol': 'vless',
-        'settings': {'clients': [], 'decryption': 'none'},
+        'settings': {
+            'clients': [],
+            'decryption': 'none',
+            'fallbacks': [{'dest': 80}]
+        },
         'streamSettings': stream_settings,
-        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False},
-        'fallbacks': [{'dest': 80}]
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False}
     })
 else:
     direct_ib['streamSettings'] = stream_settings
-    direct_ib.setdefault('fallbacks', [{'dest': 80}])
+    st = direct_ib.setdefault('settings', {})
+    st.setdefault('fallbacks', [{'dest': 80}])
+    direct_ib.pop('fallbacks', None)
 
 with open(cfg_file, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 " "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file"
 
-    chown root:root "$XRAY_CONFIG"
-    chmod 640 "$XRAY_CONFIG"
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
         error "Ошибка валидации конфигурации Xray для VLESS. Изменения не применены."
@@ -1676,6 +1717,7 @@ with open(cfg_file, 'w', encoding='utf-8') as f:
     deploy_xray_systemd_service
     systemctl restart xray
 
+    deploy_vless_fallback_nginx
     setup_dual_xray_api
 
     set_state_val "has_vless" "1"
@@ -1684,7 +1726,7 @@ with open(cfg_file, 'w', encoding='utf-8') as f:
     local cur_has_a cur_has_r
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$cur_has_a" == "1" || "$cur_has_r" == "1" ]]; then
+    if [[ "$prev_role" == "dual" || "$prev_role" == "awg" || "$prev_role" == "relay" || "$cur_has_a" == "1" || "$cur_has_r" == "1" ]]; then
         set_state_val "role" "dual"
     else
         set_state_val "role" "vless"
@@ -1740,7 +1782,7 @@ uninstall_vless_component() {
     rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
-    rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
     if [[ -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
         python3 -c "
@@ -1774,6 +1816,7 @@ if os.path.exists(cfg_file):
     except Exception:
         pass
 " "$XRAY_CONFIG" 2>/dev/null || true
+        ensure_xray_config_permissions "$XRAY_CONFIG"
     fi
 
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
@@ -1781,6 +1824,7 @@ if os.path.exists(cfg_file):
 
     set_state_val "has_vless" "0"
 
+    migrate_legacy_state
     local cur_has_a cur_has_r
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"

@@ -528,6 +528,7 @@ update_node_post() {
     acquire_just1knode_lock
     trap release_just1knode_lock RETURN EXIT
 
+    migrate_legacy_state
     heal_node_firewall_and_stealth
 
     # Автоматическая оптимизация конфигурации в зависимости от роли сервера

@@ -33,6 +33,94 @@ init_state_dir() {
     chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
+    migrate_legacy_state
+}
+
+migrate_legacy_state() {
+    if [[ ! -f "$STATE_FILE" ]] || ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    python3 -c "
+import sys, json, os, tempfile
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+f = sys.argv[1]
+if not os.path.exists(f) or os.path.getsize(f) == 0:
+    sys.exit(0)
+
+lock_file = f + '.lock'
+open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+lock_fd = os.open(lock_file, open_flags, 0o660)
+if fcntl:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    if not isinstance(data, dict):
+        sys.exit(0)
+
+    changed = False
+    role = str(data.get('role', '')).lower()
+
+    if 'has_awg' not in data:
+        if role in ('awg', 'dual') or str(data.get('awg_installed', '')).lower() == 'true' or bool(data.get('awg_api_url')):
+            data['has_awg'] = '1'
+            changed = True
+        else:
+            data['has_awg'] = '0'
+            changed = True
+
+    if 'has_relay' not in data:
+        relay_p = str(data.get('relay_port', '')).strip()
+        if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
+            data['has_relay'] = '1'
+            changed = True
+        else:
+            data['has_relay'] = '0'
+            changed = True
+
+    if 'has_vless' not in data:
+        v_dom = str(data.get('vless_domain', '')).strip()
+        if role == 'vless' or (v_dom and v_dom != '-'):
+            data['has_vless'] = '1'
+            changed = True
+        else:
+            data['has_vless'] = '0'
+            changed = True
+
+    has_a = data.get('has_awg') == '1'
+    has_r = data.get('has_relay') == '1'
+    has_v = data.get('has_vless') == '1'
+    multi_count = sum([has_a, has_r, has_v])
+    if multi_count >= 2 and data.get('role') != 'dual':
+        data['role'] = 'dual'
+        changed = True
+
+    if not data.get('xray_api_key') and data.get('awg_api_key'):
+        data['xray_api_key'] = data['awg_api_key']
+        changed = True
+
+    if changed:
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
+        try:
+            import grp
+            gid = grp.getgrnam('xrayapi').gr_gid
+            os.fchown(tmp_fd, 0, gid)
+            os.fchmod(tmp_fd, 0o660)
+        except Exception:
+            pass
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:
+            json.dump(data, fp, indent=2, ensure_ascii=False)
+            fp.flush()
+        os.replace(tmp_path, f)
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+" "$STATE_FILE" 2>/dev/null || true
 }
 
 set_state_val() {
@@ -164,6 +252,7 @@ get_node_status() {
         echo "unconfigured"
         return
     fi
+    migrate_legacy_state
 
     local role
     role="$(get_state_val "role" "unconfigured")"

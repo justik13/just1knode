@@ -631,12 +631,25 @@ heal_node_firewall_and_stealth() {
             ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         fi
 
-        # Защита xray-api (порт 8444)
-        local v_bot_ip
-        v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
-            if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
-                ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+        # Защита xray-api (порт 8444 активен только если поднят автономный virtual host 8444 и нет Amnezia reverse proxy)
+        if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || ("$role" == "vless" && ! -f "/etc/nginx/sites-enabled/just1k-amnezia.conf") ]]; then
+            local v_bot_ip
+            v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
+                if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
+                    ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+                fi
+            fi
+        elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+            # На совмещенных узлах с Amnezia API слушается на 8443 (/v1/), удаляем мертвое правило 8444
+            if ! is_ssh_port "8444"; then
+                local v_bot_ip
+                v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+                if [[ -n "$v_bot_ip" ]]; then
+                    ufw delete allow from "$v_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+                fi
+                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+                ufw delete allow 8444 >/dev/null 2>&1 || true
             fi
         fi
     fi

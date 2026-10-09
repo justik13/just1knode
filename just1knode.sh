@@ -660,7 +660,7 @@ run_doctor() {
         if [[ "$role" == "origin" ]]; then
             local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
-            if echo "$ufw_out" | grep -E "8444(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            if echo "$ufw_out" | grep -E "8444(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт 8444 открыт для всех (0.0.0.0/0)!"
                 failed=$((failed + 1))
             elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
@@ -677,7 +677,7 @@ run_doctor() {
             awg_p="$(get_state_val "awg_port" "8443")"
             bot_ip="$(get_state_val "bot_ip")"
 
-            if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${YELLOW}!${NC} Порт API AmneziaWG $awg_p открыт для всех (рекомендуется ограничить: just1knode set-bot-ip <IP>)"
                 warnings=$((warnings + 1))
             elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "$awg_p"; then
@@ -699,7 +699,7 @@ run_doctor() {
                     fi
                 fi
 
-                if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                     echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
                     failed=$((failed + 1))
                 elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then
@@ -707,7 +707,7 @@ run_doctor() {
                 fi
             fi
         elif [[ "$role" == "vless" ]]; then
-            if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${GREEN}✔${NC} Порт VLESS 443 открыт для клиентских подключений"
             else
                 echo -e "  ${YELLOW}!${NC} Порт VLESS 443 не найден среди разрешенных в UFW"
@@ -726,7 +726,7 @@ run_doctor() {
             relay_port="$(get_state_val "relay_port" "10443")"
             origin_ip="$(get_state_val "origin_ip")"
 
-            if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
                 failed=$((failed + 1))
             elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then

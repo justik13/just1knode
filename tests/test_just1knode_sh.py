@@ -3610,6 +3610,33 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
 
+    def test_migrate_legacy_state_and_vless_invariants(self):
+        """Verify legacy state migration, root:xrayapi permissions, and anti-probing fallbacks."""
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+
+        # 1. State migration invariants
+        self.assertIn("migrate_legacy_state()", state_sh)
+        self.assertIn("migrate_legacy_state", core_sh)
+        self.assertIn("get_node_status()", state_sh)
+
+        # 2. Xray config permission invariants
+        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
+        self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
+
+        # 3. Fallback and anti-probing invariants
+        self.assertIn("deploy_vless_fallback_nginx", relay_sh)
+        self.assertIn("'alpn': ['http/1.1']", relay_sh)
+        self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
+
+        # 4. Doctor and firewall UFW regex invariants
+        self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
+        self.assertIn("just1k-vless-api.conf", common_sh)
+        self.assertIn("just1k-amnezia.conf", common_sh)
+
 
 if __name__ == "__main__":
     unittest.main()
