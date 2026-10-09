@@ -1777,6 +1777,19 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                             heal_and_update_relay_config
                         elif [[ "$role" == "vless" ]]; then
                             heal_and_update_relay_config
+                        elif [[ "$role" == "node" ]]; then
+                            local has_v has_r has_a
+                            has_v="$(get_state_val "has_vless" "0")"
+                            has_r="$(get_state_val "has_relay" "0")"
+                            has_a="$(get_state_val "has_awg" "0")"
+                            if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
+                                heal_and_update_relay_config
+                            fi
+                            if [[ "$has_a" == "1" ]]; then
+                                apply_amnezia_abuse_protection
+                            fi
+                            heal_node_firewall_and_stealth
+                            log "Конфигурация модульного узла актуализирована."
                         elif [[ "$role" == "dual" ]]; then
                             heal_and_update_relay_config
                             apply_amnezia_abuse_protection
