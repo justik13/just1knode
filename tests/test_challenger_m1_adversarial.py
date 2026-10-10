@@ -388,6 +388,7 @@ class TestXrayApiAdversarial(unittest.TestCase):
         """Rollback must restore each inbound's exact initial state rather than blindly inverting."""
         client_uuid = "22222222-2222-2222-2222-222222222222"
         inbounds = ["just1k-wl-default", "just1k-vless-direct"]
+        self.epoch_mgr.save_state("adv-epoch-fixture", 100, 1000, "boot-test")
 
         # Initial state: inbounds[0] was disabled (False), inbounds[1] was active (True)
         ensure_calls = []
@@ -419,6 +420,7 @@ class TestXrayApiAdversarial(unittest.TestCase):
     def test_already_newer_runtime_verification_fails_when_user_absent(self):
         """already_newer must perform runtime verification and flag unverified inbounds if absent."""
         client_uuid = "33333333-3333-3333-3333-333333333333"
+        self.epoch_mgr.save_state("adv-epoch-fixture", 100, 1000, "boot-test")
         # Seed client_store with higher version
         self.app_module.client_store.add_client(client_uuid, version=10)
 
@@ -607,7 +609,15 @@ ensure_xrayapi_user() {{ return 0; }}
         self._create_mock_script("ufw", "#!/bin/sh\nexit 0\n")
         self._create_mock_script("systemctl", "#!/bin/sh\nexit 0\n")
 
-        res = self._run_shell_snippet("update_node_post 'all'")
+        snippet = """
+ensure_amnezia_api_service_and_env() { return 0; }
+apply_amnezia_abuse_protection() { return 0; }
+heal_node_firewall_and_stealth() { return 0; }
+acquire_just1knode_lock() { return 0; }
+release_just1knode_lock() { return 0; }
+update_node_post 'all'
+"""
+        res = self._run_shell_snippet(snippet)
         self.assertEqual(res.returncode, 0)
         self.assertNotIn("ERROR: xray core updated unexpectedly", res.stderr)
 
