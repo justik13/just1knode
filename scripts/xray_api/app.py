@@ -576,6 +576,7 @@ class ClientSyncRequest(BaseModel):
     uuid: Optional[str] = Field(None, description="Client UUID alias")
     desired_state: Optional[str] = Field(None, description="Target state: 'active' or 'disabled'")
     is_active: Optional[bool] = Field(None, description="Target state boolean alias")
+    state: Optional[str] = Field(None, description="Target state alias")
     version: Optional[int] = Field(None, description="Monotonic desired version")
     email: Optional[str] = Field(None, description="Optional client email/identifier")
     expected_node_epoch: Optional[str] = Field(None, description="Optional node epoch fencing")
@@ -585,6 +586,10 @@ class ClientSyncRequest(BaseModel):
     service: Optional[Literal["vless", "white_internet", "wl"]] = Field(
         None, description="Optional service filter: 'vless' or 'white_internet'"
     )
+
+    @property
+    def effective_state(self) -> str:
+        return self.desired_state or "active"
 
     @model_validator(mode="before")
     @classmethod
@@ -599,17 +604,21 @@ class ClientSyncRequest(BaseModel):
             except ValueError:
                 raise ValueError(f"Invalid UUID format: {cid}") from None
 
-            state = values.get("desired_state")
+            state = values.get("desired_state") or values.get("state")
             is_act = values.get("is_active")
             if state is not None:
                 s = str(state).strip().lower()
                 if s not in ("active", "disabled"):
                     raise ValueError("desired_state must be 'active' or 'disabled'")
                 values["desired_state"] = s
+                values["state"] = s
             elif is_act is not None:
-                values["desired_state"] = "active" if bool(is_act) else "disabled"
+                resolved = "active" if bool(is_act) else "disabled"
+                values["desired_state"] = resolved
+                values["state"] = resolved
             else:
                 values["desired_state"] = "active"
+                values["state"] = "active"
 
             srv = values.get("service")
             if srv is not None:
@@ -1031,6 +1040,7 @@ async def _sync_client_internal(
         )
 
     # Monotonic version fencing check (including tombstones)
+    curr_ver: Optional[int] = None
     if req.version is not None:
         try:
             entries = client_store.load_client_entries()
@@ -1096,38 +1106,48 @@ async def _sync_client_internal(
             if curr_ver is not None and (
                 req.version < curr_ver or (is_tombstone and req.version <= curr_ver)
             ):
-                logger.warning(
-                    "Stale sync request for %s: incoming version %d <= stored version %d (tombstone=%s). Fencing.",
-                    _mask_uuid(client_uuid),
-                    req.version,
-                    curr_ver,
-                    is_tombstone,
-                )
-                verified_inbounds: List[str] = []
-                for tag in target_inbounds:
-                    try:
-                        if curr_state == "active" and not is_tombstone:
-                            if grpc_client.probe_user_presence(tag, client_uuid):
-                                verified_inbounds.append(tag)
-                        else:
-                            if grpc_client.verify_user_absent(tag, client_uuid):
-                                verified_inbounds.append(tag)
-                    except Exception:
-                        pass
-                all_verified = (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0
-                return {
-                    "status": "ok",
-                    "client_id": client_uuid,
-                    "result": "already_newer",
-                    "state": curr_state,
-                    "version": curr_ver,
-                    "verified_epoch": epoch_before,
-                    "verified_inbounds": verified_inbounds,
-                    "all_inbounds_verified": all_verified,
-                    "fenced": True,
-                    "tombstone": is_tombstone,
-                    "inbounds": target_inbounds,
-                }
+                if not is_tombstone and desired_state != curr_state:
+                    logger.info(
+                        "Sync request state transition (%s -> %s) overrides version fencing for %s (incoming %d < stored %d). Central bot DB is SSOT.",
+                        curr_state,
+                        desired_state,
+                        _mask_uuid(client_uuid),
+                        req.version,
+                        curr_ver,
+                    )
+                else:
+                    logger.warning(
+                        "Stale sync request for %s: incoming version %d <= stored version %d (tombstone=%s). Fencing.",
+                        _mask_uuid(client_uuid),
+                        req.version,
+                        curr_ver,
+                        is_tombstone,
+                    )
+                    verified_inbounds: List[str] = []
+                    for tag in target_inbounds:
+                        try:
+                            if curr_state == "active" and not is_tombstone:
+                                if grpc_client.probe_user_presence(tag, client_uuid):
+                                    verified_inbounds.append(tag)
+                            else:
+                                if grpc_client.verify_user_absent(tag, client_uuid):
+                                    verified_inbounds.append(tag)
+                        except Exception:
+                            pass
+                    all_verified = (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0
+                    return {
+                        "status": "ok",
+                        "client_id": client_uuid,
+                        "result": "already_newer",
+                        "state": curr_state,
+                        "version": curr_ver,
+                        "verified_epoch": epoch_before,
+                        "verified_inbounds": verified_inbounds,
+                        "all_inbounds_verified": all_verified,
+                        "fenced": True,
+                        "tombstone": is_tombstone,
+                        "inbounds": target_inbounds,
+                    }
 
     # Capture initial runtime state before mutations for deterministic rollback
     initial_states: Dict[str, str] = {}
@@ -1231,13 +1251,18 @@ async def _sync_client_internal(
         )
 
     # Update local persistent client store with monotonic version
+    effective_ver = (
+        max(curr_ver or 0, req.version or 0)
+        if curr_ver is not None and req.version is not None
+        else req.version
+    )
     try:
         if desired_state == "active":
             client_store.add_client(
-                client_uuid, version=req.version, email=req.email, service=req.service
+                client_uuid, version=effective_ver, email=req.email, service=req.service
             )
         else:
-            client_store.remove_client(client_uuid, version=req.version, service=req.service)
+            client_store.remove_client(client_uuid, version=effective_ver, service=req.service)
     except Exception as e:
         logger.error("Failed to persist client state to disk: %s", e)
         # Rollback Xray RAM state to exact initial states so RAM does not diverge from disk

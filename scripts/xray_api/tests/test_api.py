@@ -311,17 +311,29 @@ def test_client_sync_version_fencing():
             assert res.json()["result"] == "applied"
             assert res.json()["version"] == 5
 
-    # Try sync older version 4 (should be fenced/ignored)
-    with patch.object(grpc_client, "remove_user", return_value=True) as mock_remove:
+    # Try sync older version 4 with same state (should be fenced/ignored)
+    with patch.object(grpc_client, "add_user", return_value=True) as mock_add:
         res = client.post(
             "/v1/clients/sync",
-            json={"client_id": uuid, "desired_state": "disabled", "version": 4},
+            json={"client_id": uuid, "desired_state": "active", "version": 4},
             headers=VALID_HEADERS,
         )
         assert res.status_code == 200
         assert res.json()["result"] == "already_newer"
         assert res.json().get("fenced") is True
-        assert mock_remove.call_count == 0  # Not executed!
+        assert mock_add.call_count == 0  # Not executed!
+
+    # State transition (active -> disabled) overrides version fencing because central bot DB is SSOT
+    with patch.object(grpc_client, "remove_user", return_value=True) as mock_remove:
+        with patch.object(grpc_client, "verify_user_absent", return_value=True):
+            res_trans = client.post(
+                "/v1/clients/sync",
+                json={"client_id": uuid, "desired_state": "disabled", "version": 4},
+                headers=VALID_HEADERS,
+            )
+            assert res_trans.status_code == 200
+            assert res_trans.json()["result"] == "applied"
+            assert mock_remove.call_count == 2
 
 
 def test_client_delete_version_fencing():
