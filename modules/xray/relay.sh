@@ -375,7 +375,7 @@ setup_xray_api_proxy() {
     set_state_val "xray_api_key" "$x_api_key"
     deploy_xray_api_service "$x_api_key" ""
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable xray-api 2>/dev/null || true
+    systemctl enable --now xray-api 2>/dev/null || true
     if ! ensure_xray_api_healthy; then
         error "Служба xray-api не смогла запуститься или не прошла проверку работоспособности."
         return 1

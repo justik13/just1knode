@@ -865,3 +865,10 @@ def test_epoch_change_invalidates_active_users_cache():
             assert grpc_client._active_users_epoch == "epoch_222"
             mock_restore.assert_called_once()
 
+            # When gRPC is unhealthy, restoration is deferred and epoch is NOT marked as synced
+            mock_restore.reset_mock()
+            with patch.object(grpc_client, "is_healthy", return_value=False):
+                sync_active_users_with_epoch("epoch_333")
+                mock_restore.assert_not_called()
+                assert grpc_client._active_users_epoch == "epoch_222"
+

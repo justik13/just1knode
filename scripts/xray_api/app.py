@@ -488,20 +488,25 @@ def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
     """Ensures in-memory active users set is aligned with current Xray epoch.
 
     If epoch changes (Xray restart), clears in-memory active users and restores
-    valid persisted clients from client_store into Xray RAM.
+    valid persisted clients from client_store into Xray RAM once gRPC is healthy.
     """
     if not current_epoch:
         return
     if grpc_client._active_users_epoch != current_epoch:
-        logger.info(
-            "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
-            grpc_client._active_users_epoch,
-            current_epoch,
-        )
-        grpc_client.clear_active_users()
-        grpc_client._active_users_epoch = current_epoch
         if grpc_client.is_healthy():
+            logger.info(
+                "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
+                grpc_client._active_users_epoch,
+                current_epoch,
+            )
+            grpc_client.clear_active_users()
             restore_persisted_clients_to_xray()
+            grpc_client._active_users_epoch = current_epoch
+        else:
+            logger.debug(
+                "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
+                current_epoch,
+            )
 
 
 @asynccontextmanager
