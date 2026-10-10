@@ -933,10 +933,11 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('update_node_post "$target" "${is_menu:-0}"', core_sh)
 
     def test_ensure_xray_api_healthy_guards_relay_nodes(self):
-        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes."""
+        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes without vless."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('role="$(get_state_val "role" "")"', common_sh)
-        self.assertIn('if [[ "$role" != "origin" ]]; then\n        return 0\n    fi', common_sh)
+        self.assertIn('cur_has_v="$(get_state_val "has_vless" "0")"', common_sh)
+        self.assertIn('if [[ "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
@@ -2948,7 +2949,7 @@ remove_traffic_watchdog_timer
     def test_validate_ip_ipv4_and_ipv6_behaviour(self):
         """Verify real validate_ip bash function handles both IPv4 and IPv6 properly."""
         def run_validate_ip(ip_str: str) -> bool:
-            res = self.run_snippet(f'validate_ip "{ip_str}"')
+            res = self._run_shell_snippet(f'validate_ip "{ip_str}"')
             return res.returncode == 0
 
         # Valid IPv4
