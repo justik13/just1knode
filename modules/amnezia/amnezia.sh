@@ -862,9 +862,9 @@ except Exception:
         fi
 
         local xray_v1_block=""
-        local current_role
-        current_role="$(get_state_val "role" "")"
-        if [[ "$current_role" == "dual" || "$current_role" == "relay" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+        local cur_has_v
+        cur_has_v="$(get_state_val "has_vless" "0")"
+        if [[ "$cur_has_v" == "1" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
             xray_v1_block="
     location /v1/ {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
@@ -930,9 +930,9 @@ ${xray_v1_block}
 EOF
     else
         local xray_v1_block=""
-        local current_role
-        current_role="$(get_state_val "role" "")"
-        if [[ "$current_role" == "dual" || "$current_role" == "relay" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+        local cur_has_v
+        cur_has_v="$(get_state_val "has_vless" "0")"
+        if [[ "$cur_has_v" == "1" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
             xray_v1_block="
     location /v1/ {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
@@ -1365,7 +1365,7 @@ uninstall_amnezia_component() {
     cur_has_v="$(get_state_val "has_vless" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
     if [[ "$cur_has_v" == "1" ]]; then
-        setup_dual_xray_api 2>/dev/null || true
+        setup_xray_api_proxy 2>/dev/null || true
     fi
     if [[ "$cur_has_v" == "0" && "$cur_has_r" == "0" ]]; then
         set_state_val "role" "unconfigured"

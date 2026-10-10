@@ -62,6 +62,9 @@ def test_auth_enforcement():
             assert data["xray_running"] is True
             assert data["grpc_ok"] is True
             assert "sub_path_prefix" in data
+            assert "services" in data
+            assert "capabilities" in data
+            assert "vless_domain" in data
 
 
 def test_sub_path_prefix_resolution(tmp_path):

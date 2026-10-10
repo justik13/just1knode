@@ -555,9 +555,6 @@ update_node_post() {
         heal_and_update_relay_config
     elif [[ "$role" == "vless" ]]; then
         heal_and_update_relay_config
-    elif [[ "$role" == "dual" ]]; then
-        heal_and_update_relay_config
-        apply_amnezia_abuse_protection
     elif [[ "$role" == "awg" ]]; then
         apply_amnezia_abuse_protection
         heal_node_firewall_and_stealth
@@ -567,7 +564,7 @@ update_node_post() {
     fi
 
     local has_xray="0"
-    if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "dual" ]]; then
+    if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]]; then
         has_xray="1"
     fi
 

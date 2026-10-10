@@ -264,19 +264,19 @@ show_status() {
         fi
 
         echo -e "\n  Службы:"
-        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "dual" || "$role" == "node" ]]; then
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" ]]; then
             systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         fi
         if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
             systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
         fi
-        if [[ "$cur_has_a" == "1" || "$role" == "awg" || "$role" == "dual" ]]; then
-            local c_name_dual
-            c_name_dual="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
+        if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
+            local c_name
+            c_name="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
             if is_amnezia_container_running 2>/dev/null; then
-                echo -e "    Docker (${c_name_dual}): ${GREEN}● Активен${NC}"
+                echo -e "    Docker (${c_name}): ${GREEN}● Активен${NC}"
             else
-                echo -e "    Docker (${c_name_dual}): ${RED}○ Не запущен${NC}"
+                echo -e "    Docker (${c_name}): ${RED}○ Не запущен${NC}"
             fi
             systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
             systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
@@ -330,7 +330,7 @@ show_relay_credentials() {
     local role cur_has_r
     role="$(get_state_val "role")"
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$role" != "relay" && "$role" != "dual" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
+    if [[ "$role" != "relay" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
         warn "Данные доступны только на сервере с настроенным компонентом Relay."
         return
     fi
@@ -434,7 +434,7 @@ run_doctor() {
         fi
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
-    elif [[ "$role" == "dual" || "$role" == "node" ]]; then
+    elif [[ "$role" == "node" ]]; then
         if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray")
         fi
@@ -464,8 +464,8 @@ run_doctor() {
         fi
     done
 
-    # gRPC проверяется на Origin, VLESS и Dual узлах
-    if [[ "$role" == "origin" || "$role" == "dual" || "$role" == "vless" || "$cur_has_v" == "1" ]]; then
+    # gRPC проверяется на Origin, VLESS и модульных узлах с поддержкой VLESS
+    if [[ "$role" == "origin" || "$role" == "vless" || "$cur_has_v" == "1" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         local grpc_ok=0
         for _ in 1 2 3; do
@@ -483,22 +483,25 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "relay" || "$cur_has_r" == "1" || ("$role" == "dual" && "$cur_has_r" == "1") ]]; then
+    if [[ "$role" == "relay" || "$cur_has_r" == "1" ]]; then
         log "2a. Проверка Relay инбаунд порта..."
         local r_port
         r_port="$(get_state_val "relay_port" "10443")"
-        if ! ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" && ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then
+        if ! [[ "$r_port" =~ ^[0-9]+$ ]] || (( r_port < 1 || r_port > 65535 )); then
+            r_port="10443"
+        fi
+        if ! ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" && ! python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
             heal_and_update_relay_config >/dev/null 2>&1 || true
             sleep 1
         fi
-        if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then
+        if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
         else
             echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss"
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" || ("$role" == "dual" && "$cur_has_a" == "1") ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
         if ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             ensure_amnezia_api_service_and_env >/dev/null 2>&1 || true
@@ -512,7 +515,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "dual" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
+    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
@@ -522,7 +525,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" || ("$role" == "dual" && "$cur_has_a" == "1") ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "3b. Проверка контейнера и конфигурации AmneziaWG..."
         local c_doc
         c_doc="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
@@ -558,7 +561,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" || "$cur_has_a" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
+    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" || "$cur_has_a" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"
@@ -640,7 +643,7 @@ run_doctor() {
                 echo -e "  ${YELLOW}!${NC} BOT_IP не настроен в state.json"
                 warnings=$((warnings + 1))
             fi
-        elif [[ "$role" == "awg" || "$role" == "dual" || "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
+        elif [[ "$role" == "awg" || "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
             local cur_has_a cur_has_v cur_has_r
             cur_has_a="$(get_state_val "has_awg" "0")"
             cur_has_v="$(get_state_val "has_vless" "0")"
@@ -648,7 +651,7 @@ run_doctor() {
             local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
 
-            if [[ "$cur_has_a" == "1" || "$role" == "awg" || "$role" == "dual" ]]; then
+            if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
                 local awg_p
                 awg_p="$(get_state_val "awg_port" "8443")"
 
@@ -680,7 +683,7 @@ run_doctor() {
                 fi
             fi
 
-            if [[ "$cur_has_r" == "1" || "$role" == "relay" || "$role" == "dual" ]]; then
+            if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
                 local relay_port origin_ip
                 relay_port="$(get_state_val "relay_port" "10443")"
                 origin_ip="$(get_state_val "origin_ip")"
@@ -803,7 +806,7 @@ run_doctor() {
                         done
                         # 2. Легитимные веб-порты 80 и 443
                         if [[ ("$r_port" == "80" || "$r_port" == "443") && ("$proto" == "tcp" || "$proto" == "any") ]]; then
-                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]] || command -v nginx >/dev/null 2>&1; then
+                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "node" ]] || command -v nginx >/dev/null 2>&1; then
                                 is_authorized=1
                             fi
                         fi
@@ -976,7 +979,7 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" || "$cur_has_a" == "1" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
         if check_amnezia_abuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
@@ -1799,9 +1802,6 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                             fi
                             heal_node_firewall_and_stealth
                             log "Конфигурация модульного узла актуализирована."
-                        elif [[ "$role" == "dual" ]]; then
-                            heal_and_update_relay_config
-                            apply_amnezia_abuse_protection
                         elif [[ "$role" == "awg" ]]; then
                             apply_amnezia_abuse_protection
                             heal_node_firewall_and_stealth

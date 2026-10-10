@@ -362,7 +362,8 @@ EOF
     fi
 }
 
-setup_dual_xray_api() {
+setup_xray_api_proxy() {
+    local target_domain="${1:-}"
     local x_api_key
     x_api_key="$(get_state_val "xray_api_key" "")"
     if [[ -z "$x_api_key" ]]; then
@@ -410,7 +411,7 @@ if 'location / {' in content:
         fi
     elif [[ ! -f "$amnezia_nginx" ]]; then
         local v_dom
-        v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "")")"
+        v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
         local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
         local cert_file="${le_dir}/live/${v_dom}/fullchain.pem"
         local key_file="${le_dir}/live/${v_dom}/privkey.pem"
@@ -470,12 +471,20 @@ EOF
     elif [[ -f /etc/nginx/sites-enabled/just1k-vless-api.conf ]]; then
         local bot_ip
         bot_ip="$(get_state_val "bot_ip" "")"
+        if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8444 >/dev/null 2>&1 || true
+        fi
         if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
             ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
         else
             warn "BOT_IP не задан в state.json. Порт VLESS API (8444) закрыт от внешнего мира (Fail-Closed)."
         fi
     fi
+}
+
+setup_dual_xray_api() {
+    setup_xray_api_proxy "$@"
 }
 
 install_xray_relay_node() {
@@ -814,11 +823,11 @@ EOF
 
     set_state_val "has_relay" "1"
     set_state_val "role" "node"
-    if [[ "$prev_role" == "awg" || "$prev_role" == "dual" || "$cur_has_vless" == "1" ]]; then
-        log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"
+    if [[ "$prev_role" == "awg" || "$cur_has_vless" == "1" ]]; then
+        log "Компоненты узла актуализированы (Relay активен)."
         apply_amnezia_abuse_protection
         if [[ "$cur_has_vless" == "1" ]]; then
-            setup_dual_xray_api
+            setup_xray_api_proxy "$dest_server"
         fi
     fi
 
@@ -1049,7 +1058,7 @@ setup_relay_domain() {
     local role cur_has_r
     role="$(get_state_val "role")"
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$role" != "relay" && "$role" != "dual" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
+    if [[ "$role" != "relay" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
         error "Команда 'setup-domain' предназначена для Relay узлов (текущая роль: ${role:-не настроен})."
         return 1
     fi
@@ -1277,7 +1286,7 @@ heal_and_update_relay_config() {
     role="$(get_state_val "role")"
     cur_has_r="$(get_state_val "has_relay" "0")"
     cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$role" != "relay" && "$role" != "dual" && "$role" != "vless" && ( "$role" != "node" || ( "$cur_has_r" != "1" && "$cur_has_v" != "1" ) ) ]]; then
+    if [[ "$role" != "relay" && "$role" != "vless" && ( "$role" != "node" || ( "$cur_has_r" != "1" && "$cur_has_v" != "1" ) ) ]]; then
         error "Функция доступна только на узле с компонентами Relay или VLESS (текущая роль: ${role:-не установлена})."
     fi
 
@@ -1578,7 +1587,7 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
     if [[ "$cur_has_vless" == "1" ]]; then
         deploy_vless_fallback_nginx
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
-        setup_dual_xray_api
+        setup_xray_api_proxy
     fi
 
     log "Оптимизация и обновление конфигурации Relay завершены успешно!"
@@ -1781,12 +1790,12 @@ with open(out_f, 'w', encoding='utf-8') as f:
     deploy_xray_systemd_service
     systemctl restart xray
 
-    deploy_vless_fallback_nginx
-    setup_dual_xray_api
-
     set_state_val "has_vless" "1"
     set_state_val "vless_domain" "$dest_server"
     set_state_val "role" "node"
+
+    deploy_vless_fallback_nginx
+    setup_xray_api_proxy "$dest_server"
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
     echo ""

@@ -2657,12 +2657,10 @@ remove_traffic_watchdog_timer
     def test_amnezia_antiabuse_persistence_and_doctor_invariants(self):
         """Verify anti-abuse persistence, update_node integration, and doctor auto-heal invariants."""
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        self.assertIn('elif [[ "$role" == "dual" ]]; then', core_sh)
-        self.assertIn('heal_and_update_relay_config\n        apply_amnezia_abuse_protection', core_sh)
         self.assertIn('elif [[ "$role" == "awg" ]]; then\n        apply_amnezia_abuse_protection', core_sh)
 
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"\n        apply_amnezia_abuse_protection', relay_sh)
+        self.assertIn('apply_amnezia_abuse_protection', relay_sh)
 
         main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("anti-abuse|antiabuse|apply-abuse-protection)", main_sh)
@@ -2948,33 +2946,26 @@ remove_traffic_watchdog_timer
 
 
     def test_validate_ip_ipv4_and_ipv6_behaviour(self):
-        """Verify validate_ip logic handles both IPv4 and IPv6 properly."""
-        import ipaddress
-
-        def mock_validate_ip(ip_str: str) -> bool:
-            if not ip_str or not isinstance(ip_str, str):
-                return False
-            try:
-                addr = ipaddress.ip_address(ip_str.strip())
-                return not addr.is_multicast and not addr.is_unspecified and not addr.is_reserved
-            except ValueError:
-                return False
+        """Verify real validate_ip bash function handles both IPv4 and IPv6 properly."""
+        def run_validate_ip(ip_str: str) -> bool:
+            res = self.run_snippet(f'validate_ip "{ip_str}"')
+            return res.returncode == 0
 
         # Valid IPv4
-        self.assertTrue(mock_validate_ip("192.168.1.1"))
-        self.assertTrue(mock_validate_ip("1.1.1.1"))
-        self.assertTrue(mock_validate_ip("185.220.101.5"))
+        self.assertTrue(run_validate_ip("192.168.1.1"))
+        self.assertTrue(run_validate_ip("1.1.1.1"))
+        self.assertTrue(run_validate_ip("185.220.101.5"))
 
         # Valid IPv6
-        self.assertTrue(mock_validate_ip("2001:db8::1"))
-        self.assertTrue(mock_validate_ip("2a00:1450:4010:c08::71"))
+        self.assertTrue(run_validate_ip("2001:db8::1"))
+        self.assertTrue(run_validate_ip("2a00:1450:4010:c08::71"))
 
         # Invalid IP addresses
-        self.assertFalse(mock_validate_ip("256.1.1.1"))
-        self.assertFalse(mock_validate_ip("0.0.0.0"))
-        self.assertFalse(mock_validate_ip("255.255.255.255"))
-        self.assertFalse(mock_validate_ip("::"))
-        self.assertFalse(mock_validate_ip("not-an-ip"))
+        self.assertFalse(run_validate_ip("256.1.1.1"))
+        self.assertFalse(run_validate_ip("0.0.0.0"))
+        self.assertFalse(run_validate_ip("255.255.255.255"))
+        self.assertFalse(run_validate_ip("::"))
+        self.assertFalse(run_validate_ip("not-an-ip"))
 
     def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
         """Verify uninstall_node and uninstall_amnezia_component remove awg_port and bot_ip from UFW."""

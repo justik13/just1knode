@@ -592,9 +592,25 @@ class ClientSyncRequest(BaseModel):
         return values
 
 
+def get_node_state_metadata() -> Dict[str, Any]:
+    """Load node state.json metadata safely without locking."""
+    if STATE_FILE_PATH.exists():
+        try:
+            with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.debug("Could not read node state metadata: %s", e)
+    return {}
+
+
 class InventoryRequest(BaseModel):
     client_ids: Optional[List[str]] = Field(
         None, description="Optional list of client UUIDs to probe"
+    )
+    service: Optional[Literal["vless", "white_internet", "wl"]] = Field(
+        None, description="Optional service filter: 'vless' or 'white_internet'"
     )
 
 
@@ -617,6 +633,37 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     target_inbounds = get_all_managed_inbounds()
     relays, relays_err = get_active_relays()
     secret_path = get_secret_base_path()
+
+    node_meta = get_node_state_metadata()
+    vless_domain = node_meta.get("vless_domain") or node_meta.get("sni") or ""
+    detected_services: List[str] = []
+    if (
+        any(
+            t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")
+            for t in target_inbounds
+        )
+        or node_meta.get("role") == "origin"
+    ):
+        detected_services.append("white_internet")
+    if (
+        any(t.startswith("just1k-vless-") or t == "just1k-vless-direct" for t in target_inbounds)
+        or str(node_meta.get("has_vless", "")) == "1"
+    ):
+        detected_services.append("vless")
+    if str(node_meta.get("has_relay", "")) == "1" or node_meta.get("role") == "relay":
+        detected_services.append("relay")
+    if str(node_meta.get("has_awg", "")) == "1" or node_meta.get("role") == "awg":
+        detected_services.append("awg")
+
+    capabilities: List[str] = []
+    if "vless" in detected_services:
+        capabilities.extend(["vless", "xray_vless"])
+    if "white_internet" in detected_services:
+        capabilities.append("white_internet")
+    if "relay" in detected_services:
+        capabilities.append("relay")
+    if "awg" in detected_services:
+        capabilities.append("awg")
 
     pid, starttime, boot_id, running_epoch = (
         epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
@@ -641,6 +688,9 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "grpc_ok": bool(grpc_ok),
         "active_clients_count": len(active_clients),
         "inbounds": target_inbounds,
+        "services": detected_services,
+        "capabilities": capabilities,
+        "vless_domain": vless_domain,
         "relays": relays if not relays_err else [],
         "relays_error": relays_err,
         "secret_base_path": secret_path,
@@ -1223,7 +1273,7 @@ async def delete_client(
             detail=f"Invalid UUID: {uuid}",
         ) from None
 
-    target_inbounds = get_target_inbounds()
+    target_inbounds = get_all_managed_inbounds()
     if not target_inbounds:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1329,7 +1379,11 @@ async def get_clients_inventory(
     """
     Returns verified observed runtime inventory directly from Xray memory across all managed inbounds.
     """
-    target_inbounds = get_target_inbounds()
+    target_inbounds = (
+        get_target_inbounds(service=req.service)
+        if (req and req.service)
+        else get_all_managed_inbounds()
+    )
     running_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
     if not running_epoch and epoch_manager:
         running_epoch = epoch_manager.load_state().get("node_epoch")
