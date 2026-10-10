@@ -484,6 +484,26 @@ def restore_persisted_clients_to_xray() -> int:
     return restored_unique
 
 
+def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
+    """Ensures in-memory active users set is aligned with current Xray epoch.
+
+    If epoch changes (Xray restart), clears in-memory active users and restores
+    valid persisted clients from client_store into Xray RAM.
+    """
+    if not current_epoch:
+        return
+    if grpc_client._active_users_epoch != current_epoch:
+        logger.info(
+            "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
+            grpc_client._active_users_epoch,
+            current_epoch,
+        )
+        grpc_client.clear_active_users()
+        grpc_client._active_users_epoch = current_epoch
+        if grpc_client.is_healthy():
+            restore_persisted_clients_to_xray()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: restore clients to Xray strictly as ephemeral hints
@@ -495,7 +515,10 @@ async def lifespan(app: FastAPI):
         retries = 5
         while retries > 0:
             if grpc_client.is_healthy():
-                restore_persisted_clients_to_xray()
+                current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
+                if not current_epoch and epoch_manager:
+                    current_epoch = epoch_manager.load_state().get("node_epoch")
+                sync_active_users_with_epoch(current_epoch)
                 break
             retries -= 1
             if retries > 0:
@@ -989,6 +1012,7 @@ async def _sync_client_internal(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
         )
+    sync_active_users_with_epoch(epoch_before)
     if req.expected_node_epoch and req.expected_node_epoch != epoch_before:
         logger.warning(
             "Epoch mismatch for client %s: expected %s != current %s",
@@ -1387,6 +1411,7 @@ async def get_clients_inventory(
     running_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
     if not running_epoch and epoch_manager:
         running_epoch = epoch_manager.load_state().get("node_epoch")
+    sync_active_users_with_epoch(running_epoch)
 
     # Determine which clients to probe:
     client_ids = req.client_ids if req and req.client_ids else None
@@ -1399,14 +1424,6 @@ async def get_clients_inventory(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Client store corrupted: {e}",
             ) from e
-
-    if not grpc_client._active_users:
-        try:
-            for active_cid in client_store.load_clients():
-                for tag in target_inbounds:
-                    grpc_client._active_users.add((tag, active_cid))
-        except Exception:
-            pass
 
     inventory: Dict[str, Any] = {}
     for cid in client_ids:

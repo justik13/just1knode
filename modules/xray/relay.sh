@@ -374,7 +374,12 @@ setup_xray_api_proxy() {
     fi
     set_state_val "xray_api_key" "$x_api_key"
     deploy_xray_api_service "$x_api_key" ""
-    systemctl enable --now xray-api 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable xray-api 2>/dev/null || true
+    if ! ensure_xray_api_healthy; then
+        error "Служба xray-api не смогла запуститься или не прошла проверку работоспособности."
+        return 1
+    fi
 
     # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx Amnezia
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
@@ -405,10 +410,12 @@ if 'location / {' in content:
     with open(path, 'w', encoding='utf-8') as f:
         f.write(new_content)
 " "$amnezia_nginx" 2>/dev/null || true
-        if nginx -t >/dev/null 2>&1; then
-            systemctl reload nginx 2>/dev/null || true
-            log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
+        if ! nginx -t >/dev/null 2>&1; then
+            error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси xray-api (/v1/)."
+            return 1
         fi
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
     elif [[ ! -f "$amnezia_nginx" ]]; then
         local v_dom
         v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
@@ -451,10 +458,13 @@ server {
 }
 EOF
             ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
-            if nginx -t >/dev/null 2>&1; then
-                systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-                log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
+            if ! nginx -t >/dev/null 2>&1; then
+                error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
+                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf
+                return 1
             fi
+            systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+            log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
         fi
     fi
 

@@ -843,3 +843,25 @@ def test_sync_client_passes_flow_to_vless_direct():
                         "active",
                         "",
                     )
+
+
+def test_epoch_change_invalidates_active_users_cache():
+    """Epoch drift/change clears in-memory active users set and re-populates only active persisted clients."""
+    from app import sync_active_users_with_epoch
+
+    grpc_client._active_users = {("just1k-vless-direct", "stale-client-uuid")}
+    grpc_client._active_users_epoch = "epoch_111"
+
+    with patch("app.restore_persisted_clients_to_xray") as mock_restore:
+        with patch.object(grpc_client, "is_healthy", return_value=True):
+            # Same epoch: no-op
+            sync_active_users_with_epoch("epoch_111")
+            assert ("just1k-vless-direct", "stale-client-uuid") in grpc_client._active_users
+            mock_restore.assert_not_called()
+
+            # New epoch: clears active users and restores
+            sync_active_users_with_epoch("epoch_222")
+            assert ("just1k-vless-direct", "stale-client-uuid") not in grpc_client._active_users
+            assert grpc_client._active_users_epoch == "epoch_222"
+            mock_restore.assert_called_once()
+

@@ -1,7 +1,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import grpc
 
@@ -40,6 +40,11 @@ class XrayGrpcClient:
         self.timeout = timeout
         self._channel = None
         self._active_users: set[tuple[str, str]] = set()
+        self._active_users_epoch: Optional[str] = None
+
+    def clear_active_users(self) -> None:
+        """Clear authoritative in-memory active users registry."""
+        self._active_users.clear()
 
     def _get_channel(self) -> grpc.Channel:
         if self._channel is None:
