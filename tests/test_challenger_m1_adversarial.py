@@ -384,6 +384,58 @@ class TestXrayApiAdversarial(unittest.TestCase):
                 # Must have evicted the stale key
                 mock_internal.assert_awaited_once()
 
+    def test_sync_client_rollback_restores_initial_states_on_partial_failure(self):
+        """Rollback must restore each inbound's exact initial state rather than blindly inverting."""
+        client_uuid = "22222222-2222-2222-2222-222222222222"
+        inbounds = ["just1k-wl-default", "just1k-vless-direct"]
+
+        # Initial state: inbounds[0] was disabled (False), inbounds[1] was active (True)
+        ensure_calls = []
+
+        def mock_probe(tag, cid):
+            return False if tag == inbounds[0] else True
+
+        def mock_ensure(tag, cid, desired_state, flow=None):
+            ensure_calls.append((tag, desired_state))
+            if tag == inbounds[1]:
+                raise RuntimeError("Simulated failure on second inbound")
+
+        with (
+            patch.object(self.app_module, "get_target_inbounds", return_value=inbounds),
+            patch.object(self.app_module.grpc_client, "probe_user_presence", side_effect=mock_probe),
+            patch.object(self.app_module.grpc_client, "ensure_user_state", side_effect=mock_ensure),
+        ):
+            res = self.client.post(
+                "/v1/clients/sync",
+                json={"client_id": client_uuid, "desired_state": "active"},
+                headers=self.headers,
+            )
+            self.assertEqual(res.status_code, 500)
+            # The mutation attempt on tag 0 was desired_state='active'.
+            # Rollback on tag 0 must restore its exact initial state ('disabled'), NOT blindly set it!
+            rollback_calls = [c for c in ensure_calls[2:] if c[0] == inbounds[0]]
+            self.assertTrue(any(c[1] == "disabled" for c in rollback_calls))
+
+    def test_already_newer_runtime_verification_fails_when_user_absent(self):
+        """already_newer must perform runtime verification and flag unverified inbounds if absent."""
+        client_uuid = "33333333-3333-3333-3333-333333333333"
+        # Seed client_store with higher version
+        self.app_module.client_store.add_client(client_uuid, version=10)
+
+        # Xray RAM probe returns False (user absent in memory)
+        with patch.object(self.app_module.grpc_client, "probe_user_presence", return_value=False):
+            res = self.client.post(
+                "/v1/clients/sync",
+                json={"client_id": client_uuid, "version": 5, "desired_state": "active"},
+                headers=self.headers,
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["result"], "already_newer")
+            self.assertFalse(data["all_inbounds_verified"])
+            self.assertEqual(data["verified_inbounds"], [])
+
+
 
 @unittest.skipIf(os.name == "nt", "POSIX bash required (run in Linux CI)")
 class TestJust1kNodeInstallerAdversarial(unittest.TestCase):
@@ -536,6 +588,30 @@ ensure_xrayapi_user() {{ return 0; }}
         self.assertIn("gRPC сокет Xray недоступен", res.stdout + res.stderr)
         self.assertIn("Обнаружено ошибок", res.stdout + res.stderr)
 
+    def test_install_origin_rejects_node_role_and_active_components(self):
+        """Origin installation must strictly reject nodes with role='node' or active AWG/Relay/VLESS components."""
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+
+        res = self._run_shell_snippet("install_xray_origin_node 'origin.test'")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Origin (Белый Интернет) требует выделенный изолированный сервер", res.stdout + res.stderr)
+
+    def test_update_node_post_skips_xray_core_for_awg_only_node(self):
+        """AWG-only nodes (role=node, has_awg=1, has_relay=0, has_vless=0) must not run update_xray_core."""
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+
+        # Mock xray binary to fail if invoked for core update
+        self._create_mock_script("xray", "#!/bin/sh\necho 'ERROR: xray core updated unexpectedly' >&2\nexit 1\n")
+        self._create_mock_script("ufw", "#!/bin/sh\nexit 0\n")
+        self._create_mock_script("systemctl", "#!/bin/sh\nexit 0\n")
+
+        res = self._run_shell_snippet("update_node_post 'all'")
+        self.assertEqual(res.returncode, 0)
+        self.assertNotIn("ERROR: xray core updated unexpectedly", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -566,7 +566,12 @@ update_node_post() {
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi
 
-    if [[ "$target" == "all" && ("$role" != "awg" || "$cur_r" == "1" || "$cur_v" == "1") && "$role" != "unconfigured" ]]; then
+    local has_xray="0"
+    if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "dual" ]]; then
+        has_xray="1"
+    fi
+
+    if [[ "$target" == "all" && "$has_xray" == "1" && "$role" != "unconfigured" ]]; then
         update_xray_core
     fi
 

@@ -1024,6 +1024,18 @@ async def _sync_client_internal(
                     curr_ver,
                     is_tombstone,
                 )
+                verified_inbounds: List[str] = []
+                for tag in target_inbounds:
+                    try:
+                        if curr_state == "active" and not is_tombstone:
+                            if grpc_client.probe_user_presence(tag, client_uuid):
+                                verified_inbounds.append(tag)
+                        else:
+                            if grpc_client.verify_user_absent(tag, client_uuid):
+                                verified_inbounds.append(tag)
+                    except Exception:
+                        pass
+                all_verified = (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0
                 return {
                     "status": "ok",
                     "client_id": client_uuid,
@@ -1031,12 +1043,20 @@ async def _sync_client_internal(
                     "state": curr_state,
                     "version": curr_ver,
                     "verified_epoch": epoch_before,
-                    "verified_inbounds": target_inbounds,
-                    "all_inbounds_verified": True,
+                    "verified_inbounds": verified_inbounds,
+                    "all_inbounds_verified": all_verified,
                     "fenced": True,
                     "tombstone": is_tombstone,
                     "inbounds": target_inbounds,
                 }
+
+    # Capture initial runtime state before mutations for deterministic rollback
+    initial_states: Dict[str, str] = {}
+    for tag in target_inbounds:
+        try:
+            initial_states[tag] = "active" if grpc_client.probe_user_presence(tag, client_uuid) else "disabled"
+        except Exception:
+            initial_states[tag] = "disabled"
 
     # Execute mutation across all target inbounds
     succeeded_inbounds: List[str] = []
@@ -1054,12 +1074,12 @@ async def _sync_client_internal(
             failed_inbounds.append(tag)
 
     if failed_inbounds:
-        # Atomic rollback across inbounds
+        # Rollback succeeded inbounds to their exact initial states
         for rb_tag in succeeded_inbounds:
             try:
-                rollback_state = "disabled" if desired_state == "active" else "active"
+                init_st = initial_states.get(rb_tag, "disabled")
                 grpc_client.ensure_user_state(
-                    rb_tag, client_uuid, desired_state=rollback_state, flow=get_inbound_flow(rb_tag)
+                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
                 )
             except Exception as rb_exc:
                 logger.error(
@@ -1112,6 +1132,20 @@ async def _sync_client_internal(
             _mask_uuid(client_uuid),
             unverified_inbounds,
         )
+        # Rollback all inbounds to exact initial states upon verification failure
+        for rb_tag in succeeded_inbounds:
+            try:
+                init_st = initial_states.get(rb_tag, "disabled")
+                grpc_client.ensure_user_state(
+                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
+                )
+            except Exception as rb_exc:
+                logger.error(
+                    "Rollback after unverified postcondition failed for %s on %s: %s",
+                    _mask_uuid(client_uuid),
+                    rb_tag,
+                    rb_exc,
+                )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Postcondition verification failed: inbounds {unverified_inbounds} unverified for state {desired_state}",
@@ -1127,6 +1161,20 @@ async def _sync_client_internal(
             client_store.remove_client(client_uuid, version=req.version, service=req.service)
     except Exception as e:
         logger.error("Failed to persist client state to disk: %s", e)
+        # Rollback Xray RAM state to exact initial states so RAM does not diverge from disk
+        for rb_tag in succeeded_inbounds:
+            try:
+                init_st = initial_states.get(rb_tag, "disabled")
+                grpc_client.ensure_user_state(
+                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
+                )
+            except Exception as rb_exc:
+                logger.error(
+                    "Rollback after persistence failure failed for %s on %s: %s",
+                    _mask_uuid(client_uuid),
+                    rb_tag,
+                    rb_exc,
+                )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to persist client state: {str(e)}",
