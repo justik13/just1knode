@@ -27,7 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 XRAY_API_DIR = REPO_ROOT / "scripts" / "xray_api"
