@@ -314,6 +314,36 @@ class TestXrayApiAdversarial(unittest.TestCase):
                 self.assertEqual(r6.json()["result"], "applied")
                 self.assertIn(uuid_test, self.app_module.client_store.load_clients())
 
+    def test_client_store_multi_service_tracking(self):
+        """ClientStore must track multiple services independently per UUID."""
+        cid = "multi-svc-test-uuid-1234"
+        self.app_module.client_store.add_client(cid, version=1, service="white_internet")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertEqual(entries[cid]["services"], ["white_internet"])
+        self.assertEqual(entries[cid]["service"], "white_internet")
+
+        # Now add same client to vless
+        self.app_module.client_store.add_client(cid, version=2, service="vless")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertIn("white_internet", entries[cid]["services"])
+        self.assertIn("vless", entries[cid]["services"])
+        self.assertEqual(entries[cid]["service"], "vless")
+
+    def test_get_target_inbounds_default_isolation(self):
+        """When service is not specified, do not pollute vless-direct if white_internet inbounds exist."""
+        with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-wl-default,just1k-vless-direct"}):
+            # When service=None, must default to white_internet inbounds
+            tags_unspecified = self.app_module.get_target_inbounds(service=None)
+            self.assertEqual(tags_unspecified, ["just1k-wl-default"])
+
+            # When service='vless', must return only vless inbounds
+            tags_vless = self.app_module.get_target_inbounds(service="vless")
+            self.assertEqual(tags_vless, ["just1k-vless-direct"])
+
+            # When service='white_internet', must return only wl inbounds
+            tags_wl = self.app_module.get_target_inbounds(service="white_internet")
+            self.assertEqual(tags_wl, ["just1k-wl-default"])
+
 
 @unittest.skipIf(os.name == "nt", "POSIX bash required (run in Linux CI)")
 class TestJust1kNodeInstallerAdversarial(unittest.TestCase):
@@ -465,36 +495,6 @@ ensure_xrayapi_user() {{ return 0; }}
         self.assertIn("Ошибка синтаксиса Nginx", res.stdout + res.stderr)
         self.assertIn("gRPC сокет Xray недоступен", res.stdout + res.stderr)
         self.assertIn("Обнаружено ошибок", res.stdout + res.stderr)
-
-    def test_client_store_multi_service_tracking(self):
-        """ClientStore must track multiple services independently per UUID."""
-        cid = "multi-svc-test-uuid-1234"
-        self.app_module.client_store.add_client(cid, version=1, service="white_internet")
-        entries = self.app_module.client_store.load_client_entries()
-        self.assertEqual(entries[cid]["services"], ["white_internet"])
-        self.assertEqual(entries[cid]["service"], "white_internet")
-
-        # Now add same client to vless
-        self.app_module.client_store.add_client(cid, version=2, service="vless")
-        entries = self.app_module.client_store.load_client_entries()
-        self.assertIn("white_internet", entries[cid]["services"])
-        self.assertIn("vless", entries[cid]["services"])
-        self.assertEqual(entries[cid]["service"], "vless")
-
-    def test_get_target_inbounds_default_isolation(self):
-        """When service is not specified, do not pollute vless-direct if white_internet inbounds exist."""
-        with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-wl-default,just1k-vless-direct"}):
-            # When service=None, must default to white_internet inbounds
-            tags_unspecified = self.app_module.get_target_inbounds(service=None)
-            self.assertEqual(tags_unspecified, ["just1k-wl-default"])
-
-            # When service='vless', must return only vless inbounds
-            tags_vless = self.app_module.get_target_inbounds(service="vless")
-            self.assertEqual(tags_vless, ["just1k-vless-direct"])
-
-            # When service='white_internet', must return only wl inbounds
-            tags_wl = self.app_module.get_target_inbounds(service="white_internet")
-            self.assertEqual(tags_wl, ["just1k-wl-default"])
 
 
 if __name__ == "__main__":
