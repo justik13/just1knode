@@ -7,7 +7,7 @@ import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
@@ -314,8 +314,8 @@ def get_sub_path_prefix() -> Optional[str]:
     return "/sub/wl"
 
 
-def get_target_inbounds(service: Optional[str] = None) -> List[str]:
-    """Dynamically discover all configured Just1k VLESS inbounds strictly filtering by managed namespaces."""
+def get_all_managed_inbounds() -> List[str]:
+    """Dynamically discover all configured Just1k inbounds across all services without filtering."""
     discovered_tags: List[str] = []
 
     # 1. Read from relays.json if available
@@ -383,6 +383,13 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
             tags = [t.strip() for t in raw.split(",") if t.strip()]
             if tags:
                 discovered_tags = tags
+
+    return discovered_tags
+
+
+def get_target_inbounds(service: Optional[str] = None) -> List[str]:
+    """Dynamically discover configured Just1k inbounds strictly filtering by service."""
+    discovered_tags = get_all_managed_inbounds()
 
     if service == "vless":
         return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
@@ -547,7 +554,7 @@ class ClientSyncRequest(BaseModel):
     idempotency_key: Optional[str] = Field(
         None, description="Optional idempotency key for durable retry"
     )
-    service: Optional[str] = Field(
+    service: Optional[Literal["vless", "white_internet", "wl"]] = Field(
         None, description="Optional service filter: 'vless' or 'white_internet'"
     )
 
@@ -575,6 +582,13 @@ class ClientSyncRequest(BaseModel):
                 values["desired_state"] = "active" if bool(is_act) else "disabled"
             else:
                 values["desired_state"] = "active"
+
+            srv = values.get("service")
+            if srv is not None:
+                s_str = str(srv).strip().lower()
+                if s_str not in ("vless", "white_internet", "wl"):
+                    raise ValueError(f"Invalid service '{srv}'. Must be 'vless' or 'white_internet'")
+                values["service"] = s_str
         return values
 
 
@@ -600,7 +614,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         active_clients = set()
         store_corrupted = True
 
-    target_inbounds = get_target_inbounds()
+    target_inbounds = get_all_managed_inbounds()
     relays, relays_err = get_active_relays()
     secret_path = get_secret_base_path()
 
@@ -876,13 +890,28 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
             if req.idempotency_key in completed_idempotent_ops:
                 cached = completed_idempotent_ops[req.idempotency_key]
                 cached_epoch = cached.get("verified_epoch")
-                if not req.expected_node_epoch or not cached_epoch or cached_epoch == req.expected_node_epoch:
+                current_epoch = (
+                    epoch_manager.get_current_running_epoch() if epoch_manager else None
+                )
+                if not current_epoch and epoch_manager:
+                    current_epoch = epoch_manager.load_state().get("node_epoch")
+
+                client_id_matches = cached.get("client_id") == client_uuid
+                epoch_valid = (
+                    client_id_matches
+                    and bool(cached_epoch)
+                    and (cached_epoch == current_epoch)
+                    and (not req.expected_node_epoch or cached_epoch == req.expected_node_epoch)
+                )
+
+                if epoch_valid:
                     logger.info("Returning cached durable operation for key %s", req.idempotency_key)
                     return {**cached, "idempotent": True}
                 logger.info(
-                    "Stale cached operation for key %s (cached epoch %s != expected %s). Evicting and re-executing.",
+                    "Stale or mismatched cached operation for key %s (cached epoch %s, current %s, expected %s). Evicting and re-executing.",
                     req.idempotency_key,
                     cached_epoch,
+                    current_epoch,
                     req.expected_node_epoch,
                 )
                 completed_idempotent_ops.pop(req.idempotency_key, None)
@@ -1095,7 +1124,7 @@ async def _sync_client_internal(
                 client_uuid, version=req.version, email=req.email, service=req.service
             )
         else:
-            client_store.remove_client(client_uuid, version=req.version)
+            client_store.remove_client(client_uuid, version=req.version, service=req.service)
     except Exception as e:
         logger.error("Failed to persist client state to disk: %s", e)
         raise HTTPException(

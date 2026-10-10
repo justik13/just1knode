@@ -124,9 +124,11 @@ set -eu
 STATE_FILE="/etc/just1knode/state.json"
 RELAY_SNI=""
 VLESS_DOMAIN=""
+HAS_VLESS="0"
 if [ -f "$STATE_FILE" ]; then
     RELAY_SNI=$(grep -o '"sni": *"[^"]*"' "$STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
     VLESS_DOMAIN=$(grep -o '"vless_domain": *"[^"]*"' "$STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
+    HAS_VLESS=$(grep -o '"has_vless": *"[^"]*"' "$STATE_FILE" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
 fi
 
 TARGET_DIR="/usr/local/etc/xray/tls"
@@ -141,7 +143,7 @@ if [ -n "${RENEWED_LINEAGE:-}" ]; then
             restarted=1
         fi
     fi
-    if [ -n "$VLESS_DOMAIN" ] && [ "$(basename "$RENEWED_LINEAGE")" = "$VLESS_DOMAIN" ]; then
+    if [ "$HAS_VLESS" = "1" ] && [ -n "$VLESS_DOMAIN" ] && [ "$(basename "$RENEWED_LINEAGE")" = "$VLESS_DOMAIN" ]; then
         if [ -f "${RENEWED_LINEAGE}/fullchain.pem" ] && [ -f "${RENEWED_LINEAGE}/privkey.pem" ]; then
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/fullchain.pem" "${TARGET_DIR}/vless_fullchain.pem"
             install -m 640 -o root -g nogroup "${RENEWED_LINEAGE}/privkey.pem" "${TARGET_DIR}/vless_privkey.pem"
@@ -471,7 +473,7 @@ EOF
         if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
             ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
         else
-            ufw allow 8444/tcp comment "just1knode xray-api" >/dev/null 2>&1 || true
+            warn "BOT_IP не задан в state.json. Порт VLESS API (8444) закрыт от внешнего мира (Fail-Closed)."
         fi
     fi
 }
@@ -1602,6 +1604,7 @@ install_vless_direct_node() {
     apply_node_sysctl_hardening
 
     local dest_server="${1:-}"
+    local bot_ip="${2:-${BOT_IP:-}}"
     local my_ip
     my_ip="$(get_public_ipv4 || true)"
 
@@ -1638,6 +1641,25 @@ install_vless_direct_node() {
         return 1
     fi
 
+    if [[ -z "$bot_ip" ]]; then
+        local saved_bip
+        saved_bip="$(get_state_val "bot_ip" "")"
+        if [[ -n "$saved_bip" && "$saved_bip" != "-" && "$saved_bip" != "any" ]]; then
+            bot_ip="$saved_bip"
+        fi
+    fi
+    if [[ -z "$bot_ip" && -t 0 ]]; then
+        echo -e "\n${BOLD}=== НАСТРОЙКА IP БОТА ДЛЯ ЗАЩИТЫ API (ПОРТ 8444) ===${NC}"
+        read -rp "Введите IP-адрес Telegram-бота (для ограничения доступа к API): " input_bip || true
+        bot_ip="$(echo "$input_bip" | tr -d '[:space:]')"
+    fi
+    if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
+        set_state_val "bot_ip" "$bot_ip"
+        log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
+    else
+        warn "BOT_IP не указан или невалиден. API 8444 будет закрыт от внешнего мира в UFW (Fail-Closed)."
+    fi
+
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
         return 1
     fi
@@ -1657,16 +1679,18 @@ install_vless_direct_node() {
         tls_key_file="${tls_cert_dir}/privkey.pem"
     fi
 
-    python3 -c "
+    local tmp_cfg="${XRAY_CONFIG}.tmp"
+    if ! python3 -c "
 import json, os, sys
-cfg_file, cert_f, key_f = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_file, cert_f, key_f, out_f = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 cfg = {}
-if os.path.exists(cfg_file):
+if os.path.exists(cfg_file) and os.path.getsize(cfg_file) > 0:
     try:
         with open(cfg_file, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
-    except Exception:
-        cfg = {}
+    except Exception as e:
+        print(f'ERROR: Ошибка чтения существующего {cfg_file}: {e}', file=sys.stderr)
+        sys.exit(1)
 
 if not cfg:
     cfg = {
@@ -1733,16 +1757,24 @@ else:
     st.setdefault('fallbacks', [{'dest': 80}])
     direct_ib.pop('fallbacks', None)
 
-with open(cfg_file, 'w', encoding='utf-8') as f:
+with open(out_f, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
-" "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file"
-
-    ensure_xray_config_permissions "$XRAY_CONFIG"
-
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
-        error "Ошибка валидации конфигурации Xray для VLESS. Изменения не применены."
+" "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file" "$tmp_cfg"; then
+        error "Ошибка генерации конфигурации Xray для VLESS. Исходный файл не изменен."
+        rm -f "$tmp_cfg" 2>/dev/null || true
         return 1
     fi
+
+    ensure_xray_config_permissions "$tmp_cfg"
+
+    if ! "$XRAY_BIN" run -test -config "$tmp_cfg"; then
+        error "Ошибка валидации сгенерированной конфигурации Xray для VLESS. Откат к исходной."
+        rm -f "$tmp_cfg" 2>/dev/null || true
+        return 1
+    fi
+
+    mv -f "$tmp_cfg" "$XRAY_CONFIG"
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
 
@@ -1859,6 +1891,7 @@ if os.path.exists(cfg_file):
     fi
 
     set_state_val "has_vless" "0"
+    set_state_val "vless_domain" ""
 
     migrate_legacy_state
     local cur_has_a cur_has_r

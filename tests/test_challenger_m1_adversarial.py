@@ -329,6 +329,17 @@ class TestXrayApiAdversarial(unittest.TestCase):
         self.assertIn("vless", entries[cid]["services"])
         self.assertEqual(entries[cid]["service"], "vless")
 
+        # Deactivate only VLESS: White Internet must remain active!
+        self.app_module.client_store.remove_client(cid, version=3, service="vless")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertTrue(entries[cid]["is_active"])
+        self.assertEqual(entries[cid]["services"], ["white_internet"])
+
+        # Deactivate White Internet: Now is_active becomes False
+        self.app_module.client_store.remove_client(cid, version=4, service="white_internet")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertFalse(entries[cid]["is_active"])
+
     def test_get_target_inbounds_default_isolation(self):
         """When service is not specified, do not pollute vless-direct if white_internet inbounds exist."""
         with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-wl-default,just1k-vless-direct"}):
@@ -343,6 +354,35 @@ class TestXrayApiAdversarial(unittest.TestCase):
             # When service='white_internet', must return only wl inbounds
             tags_wl = self.app_module.get_target_inbounds(service="white_internet")
             self.assertEqual(tags_wl, ["just1k-wl-default"])
+
+            # get_all_managed_inbounds must return ALL inbounds without namespace filtering
+            all_tags = self.app_module.get_all_managed_inbounds()
+            self.assertIn("just1k-wl-default", all_tags)
+            self.assertIn("just1k-vless-direct", all_tags)
+
+    def test_idempotency_cache_evicts_on_epoch_or_client_mismatch(self):
+        """Idempotency cache must evict and re-execute if node epoch changed or client_id differs."""
+        idem_key = "test-idem-key-1"
+        # Seed cache with old epoch
+        self.app_module.completed_idempotent_ops[idem_key] = {
+            "status": "ok",
+            "client_id": "11111111-1111-1111-1111-111111111111",
+            "result": "applied",
+            "verified_epoch": "old-epoch-1",
+        }
+
+        # Node currently runs new epoch
+        with patch.object(self.app_module.epoch_manager, "get_current_running_epoch", return_value="new-epoch-2"):
+            with patch.object(self.app_module, "_sync_client_internal", new=AsyncMock(return_value={"status": "ok", "result": "re-executed"})) as mock_internal:
+                res = self.client.post(
+                    "/v1/clients/sync",
+                    json={"client_id": "11111111-1111-1111-1111-111111111111", "idempotency_key": idem_key},
+                    headers=self.headers,
+                )
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.json()["result"], "re-executed")
+                # Must have evicted the stale key
+                mock_internal.assert_awaited_once()
 
 
 @unittest.skipIf(os.name == "nt", "POSIX bash required (run in Linux CI)")

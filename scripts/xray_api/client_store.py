@@ -202,7 +202,9 @@ class ClientStore:
         finally:
             self._release_lock(lock_fd)
 
-    def remove_client(self, client_uuid: str, version: Optional[int] = None) -> None:
+    def remove_client(
+        self, client_uuid: str, version: Optional[int] = None, service: Optional[str] = None
+    ) -> None:
         self._ensure_dir()
         lock_fd = self._acquire_lock()
         try:
@@ -217,8 +219,13 @@ class ClientStore:
             if "service" in entries.get(client_uuid, {}) and entries[client_uuid]["service"] not in existing_services:
                 existing_services.append(entries[client_uuid]["service"])
 
+            if service:
+                aliases = {"wl", "white_internet"} if service in ("wl", "white_internet") else {service}
+                existing_services = [s for s in existing_services if s not in aliases]
+
+            is_still_active = bool(service and existing_services)
             entry: Dict[str, Any] = {
-                "is_active": False,
+                "is_active": is_still_active,
                 "version": new_ver,
                 "updated_at": time.time(),
             }
