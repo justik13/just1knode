@@ -164,7 +164,7 @@ update_node() {
     tmp_dir="$(mktemp -d /tmp/just1knode_update_dir.XXXXXX 2>/dev/null || mktemp -d)"
 
     local archive_url
-    if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
         archive_url="${repo_url}/archive/${ref}.tar.gz"
     else
         archive_url="${repo_url}/archive/refs/heads/${ref}.tar.gz"
@@ -528,19 +528,33 @@ update_node_post() {
     acquire_just1knode_lock
     trap release_just1knode_lock RETURN EXIT
 
+    migrate_legacy_state
     heal_node_firewall_and_stealth
 
     # Автоматическая оптимизация конфигурации в зависимости от роли сервера
     local role
     role="$(get_state_val "role")"
 
+    local cur_a cur_r cur_v
+    cur_a="$(get_state_val "has_awg" "0")"
+    cur_r="$(get_state_val "has_relay" "0")"
+    cur_v="$(get_state_val "has_vless" "0")"
+
     if [[ "$role" == "origin" ]]; then
         heal_and_update_origin_config
+    elif [[ "$role" == "node" ]]; then
+        if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
+            heal_and_update_relay_config
+        fi
+        if [[ "$cur_a" == "1" ]]; then
+            ensure_amnezia_api_service_and_env
+            apply_amnezia_abuse_protection
+            heal_node_firewall_and_stealth
+        fi
     elif [[ "$role" == "relay" ]]; then
         heal_and_update_relay_config
-    elif [[ "$role" == "dual" ]]; then
+    elif [[ "$role" == "vless" ]]; then
         heal_and_update_relay_config
-        apply_amnezia_abuse_protection
     elif [[ "$role" == "awg" ]]; then
         apply_amnezia_abuse_protection
         heal_node_firewall_and_stealth
@@ -549,7 +563,12 @@ update_node_post() {
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi
 
-    if [[ "$target" == "all" && "$role" != "awg" ]]; then
+    local has_xray="0"
+    if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]]; then
+        has_xray="1"
+    fi
+
+    if [[ "$target" == "all" && "$has_xray" == "1" && "$role" != "unconfigured" ]]; then
         update_xray_core
     fi
 

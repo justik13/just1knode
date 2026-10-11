@@ -275,6 +275,52 @@ remove_amnezia_abuse_protection() {
     set_state_val "abuse_protection" "disabled"
 }
 
+ensure_amnezia_api_service_and_env() {
+    local cur_has_a
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    [[ "$cur_has_a" == "1" ]] || return 0
+
+    local etc_dir="${AMNEZIA_API_ETC:-/etc/amnezia-api}"
+    local app_dir="${AMNEZIA_API_DIR:-/opt/amnezia-api}"
+    local api_key="$(get_state_val "awg_api_key" "")"
+    local domain="$(get_state_val "awg_domain" "")"
+    local container
+    container="$(detect_amnezia_container || echo "amnezia-awg2")"
+
+    if [[ ! -f "${etc_dir}/config.env" && -n "$api_key" ]]; then
+        mkdir -p "$etc_dir"
+        cat > "${etc_dir}/config.env" <<EOF
+AMNEZIA_API_KEY=${api_key}
+FASTIFY_API_KEY=${api_key}
+AWG_DIR=${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}
+AWG_CONF_PATH=/opt/amnezia/awg/awg0.conf
+AWG_CONTAINER_NAME=${container}
+SERVER_HOST_NAME=${domain}
+SERVER_PUBLIC_HOST=${domain}
+SERVER_DNS1=8.8.8.8
+SERVER_DNS2=8.8.4.4
+EOF
+        chmod 600 "${etc_dir}/config.env"
+        log "✔ Конфигурация ${etc_dir}/config.env успешно восстановлена из state.json"
+    fi
+
+    if [[ ! -f /etc/systemd/system/amnezia-api.service ]]; then
+        if [[ -f "${app_dir}/amnezia-api.service" ]]; then
+            cp "${app_dir}/amnezia-api.service" /etc/systemd/system/amnezia-api.service
+            systemctl daemon-reload
+            systemctl enable amnezia-api.service 2>/dev/null || true
+        elif [[ -f "${INSTALL_DIR:-/opt/just1knode}/scripts/amnezia_api/amnezia-api.service" ]]; then
+            cp "${INSTALL_DIR:-/opt/just1knode}/scripts/amnezia_api/amnezia-api.service" /etc/systemd/system/amnezia-api.service
+            systemctl daemon-reload
+            systemctl enable amnezia-api.service 2>/dev/null || true
+        fi
+    fi
+
+    if ! systemctl is-active --quiet amnezia-api 2>/dev/null; then
+        systemctl restart amnezia-api 2>/dev/null || true
+    fi
+}
+
 deploy_amnezia_certbot_renewal_hook() {
     local base_hook_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks"
     mkdir -p "${base_hook_dir}/deploy"
@@ -815,6 +861,28 @@ except Exception:
 }"
         fi
 
+        local xray_v1_block=""
+        local cur_has_v
+        cur_has_v="$(get_state_val "has_vless" "0")"
+        if [[ "$cur_has_v" == "1" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+            xray_v1_block="
+    location /v1/ {
+        limit_req zone=just1k_amnezia_api burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+"
+        fi
+
         cat > "$nginx_conf" <<EOF
 # 0. Catch-All: мгновенный сброс прямых сканирований по IP и неизвестным SNI
 ${catchall_ssl_block}
@@ -843,7 +911,7 @@ server {
         default_type text/plain;
         return 404 "Not Found\n";
     }
-
+${xray_v1_block}
     location / {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
         limit_req_status 429;
@@ -861,6 +929,28 @@ server {
 }
 EOF
     else
+        local xray_v1_block=""
+        local cur_has_v
+        cur_has_v="$(get_state_val "has_vless" "0")"
+        if [[ "$cur_has_v" == "1" ]] || systemctl is-active --quiet xray-api 2>/dev/null || [[ -f "/etc/systemd/system/xray-api.service" ]]; then
+            xray_v1_block="
+    location /v1/ {
+        limit_req zone=just1k_amnezia_api burst=50 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:5001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+    }
+"
+        fi
+
         cat > "$nginx_conf" <<EOF
 # JUST1KNODE: AmneziaWG API Reverse Proxy
 server {
@@ -886,7 +976,7 @@ server {
         default_type text/plain;
         return 404 "Not Found\n";
     }
-
+${xray_v1_block}
     location / {
         limit_req zone=just1k_amnezia_api burst=50 nodelay;
         limit_req_status 429;
@@ -949,14 +1039,9 @@ EOF
     apply_amnezia_abuse_protection
     set_state_val "abuse_protection" "enabled"
 
-    # 11. Обновление состояния и определение мультироли (Coexistence)
-    if [[ "$prev_role" == "relay" || "$prev_role" == "dual" ]]; then
-        set_state_val "role" "dual"
-        log "Режим узла обновлен: DUAL (Совмещенный Relay + AmneziaWG)"
-    else
-        set_state_val "role" "awg"
-        log "Режим узла установлен: AMNEZIAWG"
-    fi
+    set_state_val "has_awg" "1"
+    set_state_val "role" "node"
+    log "Компонент AmneziaWG успешно установлен (роль: Модульный узел)."
 
     local final_api_url="https://${api_domain}:${public_port}"
     set_state_val "awg_api_url" "$final_api_url"
@@ -964,6 +1049,7 @@ EOF
     set_state_val "awg_domain" "$api_domain"
     set_state_val "awg_port" "$public_port"
     set_state_val "awg_installed" "true"
+    set_state_val "has_awg" "1"
     if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
         set_state_val "bot_ip" "$bot_ip"
     fi
@@ -1273,14 +1359,20 @@ uninstall_amnezia_component() {
 
     remove_amnezia_abuse_protection
 
-    local prev_role
-    prev_role="$(get_node_status)"
-    if [[ "$prev_role" == "dual" ]]; then
-        set_state_val "role" "relay"
-        log "Режим узла переключен обратно на: RELAY"
-    else
+    set_state_val "has_awg" "0"
+    set_state_val "awg_installed" "false"
+    local cur_has_v cur_has_r
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$cur_has_v" == "1" ]]; then
+        setup_xray_api_proxy 2>/dev/null || true
+    fi
+    if [[ "$cur_has_v" == "0" && "$cur_has_r" == "0" ]]; then
         set_state_val "role" "unconfigured"
         log "Режим узла сброшен в: НЕ НАСТРОЕН"
+    else
+        set_state_val "role" "node"
+        log "Компонент AmneziaWG удален. Оставшиеся службы активны на узле."
     fi
 
     set_state_val "awg_installed" "false"

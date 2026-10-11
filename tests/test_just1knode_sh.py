@@ -933,10 +933,11 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('update_node_post "$target" "${is_menu:-0}"', core_sh)
 
     def test_ensure_xray_api_healthy_guards_relay_nodes(self):
-        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes."""
+        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes without vless."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('role="$(get_state_val "role" "")"', common_sh)
-        self.assertIn('if [[ "$role" != "origin" ]]; then\n        return 0\n    fi', common_sh)
+        self.assertIn('cur_has_v="$(get_state_val "has_vless" "0")"', common_sh)
+        self.assertIn('if [[ "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
@@ -2657,12 +2658,10 @@ remove_traffic_watchdog_timer
     def test_amnezia_antiabuse_persistence_and_doctor_invariants(self):
         """Verify anti-abuse persistence, update_node integration, and doctor auto-heal invariants."""
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        self.assertIn('elif [[ "$role" == "dual" ]]; then', core_sh)
-        self.assertIn('heal_and_update_relay_config\n        apply_amnezia_abuse_protection', core_sh)
         self.assertIn('elif [[ "$role" == "awg" ]]; then\n        apply_amnezia_abuse_protection', core_sh)
 
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"\n        apply_amnezia_abuse_protection', relay_sh)
+        self.assertIn('apply_amnezia_abuse_protection', relay_sh)
 
         main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("anti-abuse|antiabuse|apply-abuse-protection)", main_sh)
@@ -2948,33 +2947,26 @@ remove_traffic_watchdog_timer
 
 
     def test_validate_ip_ipv4_and_ipv6_behaviour(self):
-        """Verify validate_ip logic handles both IPv4 and IPv6 properly."""
-        import ipaddress
-
-        def mock_validate_ip(ip_str: str) -> bool:
-            if not ip_str or not isinstance(ip_str, str):
-                return False
-            try:
-                addr = ipaddress.ip_address(ip_str.strip())
-                return not addr.is_multicast and not addr.is_unspecified and not addr.is_reserved
-            except ValueError:
-                return False
+        """Verify real validate_ip bash function handles both IPv4 and IPv6 properly."""
+        def run_validate_ip(ip_str: str) -> bool:
+            res = self._run_shell_snippet(f'validate_ip "{ip_str}"')
+            return res.returncode == 0
 
         # Valid IPv4
-        self.assertTrue(mock_validate_ip("192.168.1.1"))
-        self.assertTrue(mock_validate_ip("1.1.1.1"))
-        self.assertTrue(mock_validate_ip("185.220.101.5"))
+        self.assertTrue(run_validate_ip("192.168.1.1"))
+        self.assertTrue(run_validate_ip("1.1.1.1"))
+        self.assertTrue(run_validate_ip("185.220.101.5"))
 
         # Valid IPv6
-        self.assertTrue(mock_validate_ip("2001:db8::1"))
-        self.assertTrue(mock_validate_ip("2a00:1450:4010:c08::71"))
+        self.assertTrue(run_validate_ip("2001:db8::1"))
+        self.assertTrue(run_validate_ip("2a00:1450:4010:c08::71"))
 
         # Invalid IP addresses
-        self.assertFalse(mock_validate_ip("256.1.1.1"))
-        self.assertFalse(mock_validate_ip("0.0.0.0"))
-        self.assertFalse(mock_validate_ip("255.255.255.255"))
-        self.assertFalse(mock_validate_ip("::"))
-        self.assertFalse(mock_validate_ip("not-an-ip"))
+        self.assertFalse(run_validate_ip("256.1.1.1"))
+        self.assertFalse(run_validate_ip("0.0.0.0"))
+        self.assertFalse(run_validate_ip("255.255.255.255"))
+        self.assertFalse(run_validate_ip("::"))
+        self.assertFalse(run_validate_ip("not-an-ip"))
 
     def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
         """Verify uninstall_node and uninstall_amnezia_component remove awg_port and bot_ip from UFW."""
@@ -3609,6 +3601,33 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # add_relay_node and rename_relay_node normalization
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
+
+    def test_migrate_legacy_state_and_vless_invariants(self):
+        """Verify legacy state migration, root:xrayapi permissions, and anti-probing fallbacks."""
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+
+        # 1. State migration invariants
+        self.assertIn("migrate_legacy_state()", state_sh)
+        self.assertIn("migrate_legacy_state", core_sh)
+        self.assertIn("get_node_status()", state_sh)
+
+        # 2. Xray config permission invariants
+        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
+        self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
+
+        # 3. Fallback and anti-probing invariants
+        self.assertIn("deploy_vless_fallback_nginx", relay_sh)
+        self.assertIn("'alpn': ['http/1.1']", relay_sh)
+        self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
+
+        # 4. Doctor and firewall UFW regex invariants
+        self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
+        self.assertIn("just1k-vless-api.conf", common_sh)
+        self.assertIn("just1k-amnezia.conf", common_sh)
 
 
 if __name__ == "__main__":

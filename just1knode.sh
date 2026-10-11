@@ -237,60 +237,52 @@ show_status() {
         systemctl is-active --quiet nginx && echo -e "    Nginx:       ${GREEN}● Активен${NC}" || echo -e "    Nginx:       ${RED}○ Не работает${NC}"
 
         list_relays
-    elif [[ "$role" == "relay" ]]; then
-        local r_port r_orig r_sni r_sec
-        r_port="$(get_state_val "relay_port" "-")"
-        r_orig="$(get_state_val "origin_ip" "-")"
-        r_sni="$(get_state_val "sni" "-")"
-        r_sec="$(get_state_val "security" "tls")"
+    else
+        local cur_has_a cur_has_r cur_has_v
+        cur_has_a="$(get_state_val "has_awg" "0")"
+        cur_has_r="$(get_state_val "has_relay" "0")"
+        cur_has_v="$(get_state_val "has_vless" "0")"
 
-        echo -e "  Порт туннеля:         ${CYAN}${r_port}${NC} (${r_sec^^})"
-        echo -e "  Разрешенный Origin:   ${CYAN}${r_orig}${NC}"
-        echo -e "  Домен / SNI:          ${CYAN}${r_sni}${NC}"
-
-        echo -e "\n  Службы:"
-        systemctl is-active --quiet xray && echo -e "    Xray Relay:  ${GREEN}● Активен${NC}" || echo -e "    Xray Relay:  ${RED}○ Не работает${NC}"
-    elif [[ "$role" == "awg" ]]; then
-        local a_url a_port
-        a_url="$(get_state_val "awg_api_url" "-")"
-        a_port="$(get_state_val "awg_port" "8443")"
-
-        echo -e "  Amnezia API URL:      ${CYAN}${a_url}${NC}"
-        echo -e "  HTTPS Порт:           ${CYAN}${a_port}${NC}"
-
-        echo -e "\n  Службы:"
-        local c_name
-        c_name="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
-        if is_amnezia_container_running 2>/dev/null; then
-            echo -e "    Docker (${c_name}): ${GREEN}● Активен${NC}"
-        else
-            echo -e "    Docker (${c_name}): ${RED}○ Не запущен${NC}"
+        if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+            local v_dom
+            v_dom="$(get_state_val "vless_domain" "-")"
+            echo -e "  [TLS/VLESS] Домен:    ${CYAN}${v_dom}${NC} (Порт: 443 TLS XTLS-Vision)"
         fi
-        systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
-        systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
-    elif [[ "$role" == "dual" ]]; then
-        local r_port r_orig r_sni a_url a_port r_sec
-        r_port="$(get_state_val "relay_port" "-")"
-        r_orig="$(get_state_val "origin_ip" "-")"
-        r_sni="$(get_state_val "sni" "-")"
-        r_sec="$(get_state_val "security" "tls")"
-        a_url="$(get_state_val "awg_api_url" "-")"
-        a_port="$(get_state_val "awg_port" "8443")"
-
-        echo -e "  [Relay] Порт туннеля: ${CYAN}${r_port}${NC} (${r_sec^^}, Origin: ${r_orig}, SNI: ${r_sni})"
-        echo -e "  [AWG]   API URL:      ${CYAN}${a_url}${NC} (HTTPS Порт: ${a_port})"
+        if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
+            local a_url a_port
+            a_url="$(get_state_val "awg_api_url" "-")"
+            a_port="$(get_state_val "awg_port" "8443")"
+            echo -e "  [AWG]   API URL:      ${CYAN}${a_url}${NC} (HTTPS Порт: ${a_port})"
+        fi
+        if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
+            local r_port r_orig r_sni r_sec
+            r_port="$(get_state_val "relay_port" "-")"
+            r_orig="$(get_state_val "origin_ip" "-")"
+            r_sni="$(get_state_val "sni" "-")"
+            r_sec="$(get_state_val "security" "tls")"
+            echo -e "  [Relay] Порт туннеля: ${CYAN}${r_port}${NC} (${r_sec^^}, Origin: ${r_orig}, SNI: ${r_sni})"
+        fi
 
         echo -e "\n  Службы:"
-        systemctl is-active --quiet xray && echo -e "    Xray Relay:           ${GREEN}● Активен${NC}" || echo -e "    Xray Relay:           ${RED}○ Не работает${NC}"
-        local c_name_dual
-        c_name_dual="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
-        if is_amnezia_container_running 2>/dev/null; then
-            echo -e "    Docker (${c_name_dual}): ${GREEN}● Активен${NC}"
-        else
-            echo -e "    Docker (${c_name_dual}): ${RED}○ Не запущен${NC}"
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" ]]; then
+            systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         fi
-        systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
-        systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
+        if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+            systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
+        fi
+        if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
+            local c_name
+            c_name="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
+            if is_amnezia_container_running 2>/dev/null; then
+                echo -e "    Docker (${c_name}): ${GREEN}● Активен${NC}"
+            else
+                echo -e "    Docker (${c_name}): ${RED}○ Не запущен${NC}"
+            fi
+            systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
+            systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
+        elif [[ "$cur_has_v" == "1" || "$role" == "vless" ]] && systemctl is-active --quiet nginx 2>/dev/null; then
+            echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}"
+        fi
     fi
 
     local t_status
@@ -335,10 +327,11 @@ show_bot_credentials() {
 
 show_relay_credentials() {
     title "ДАННЫЕ ПОДКЛЮЧЕНИЯ RELAY (КОМАНДА ДЛЯ ORIGIN)"
-    local role
+    local role cur_has_r
     role="$(get_state_val "role")"
-    if [[ "$role" != "relay" && "$role" != "dual" ]]; then
-        warn "Данные доступны только на сервере с ролью Relay или Dual."
+    cur_has_r="$(get_state_val "has_relay" "0")"
+    if [[ "$role" != "relay" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
+        warn "Данные доступны только на сервере с настроенным компонентом Relay."
         return
     fi
 
@@ -423,6 +416,10 @@ run_doctor() {
     local warnings=0
     local role
     role="$(get_state_val "role" "не определена")"
+    local cur_has_a cur_has_v cur_has_r
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
 
     log "1. Проверка системных служб..."
     local services_to_check=()
@@ -430,10 +427,25 @@ run_doctor() {
         services_to_check+=("xray" "nginx" "xray-api")
     elif [[ "$role" == "relay" ]]; then
         services_to_check+=("xray")
+    elif [[ "$role" == "vless" ]]; then
+        services_to_check+=("xray" "xray-api")
+        if systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]; then
+            services_to_check+=("nginx")
+        fi
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
-    elif [[ "$role" == "dual" ]]; then
-        services_to_check+=("xray" "amnezia-api" "nginx")
+    elif [[ "$role" == "node" ]]; then
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
+            services_to_check+=("xray")
+        fi
+        if [[ "$cur_has_v" == "1" ]]; then
+            services_to_check+=("xray-api")
+        fi
+        if [[ "$cur_has_a" == "1" || ("$cur_has_r" == "0" && "$cur_has_v" == "0") ]]; then
+            services_to_check+=("amnezia-api" "nginx")
+        elif [[ "$cur_has_v" == "1" ]] && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]); then
+            services_to_check+=("nginx")
+        fi
     fi
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
@@ -452,8 +464,8 @@ run_doctor() {
         fi
     done
 
-    # gRPC проверяется только на Origin узле
-    if [[ "$role" == "origin" ]]; then
+    # gRPC проверяется на Origin, VLESS и модульных узлах с поддержкой VLESS
+    if [[ "$role" == "origin" || "$role" == "vless" || "$cur_has_v" == "1" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         local grpc_ok=0
         for _ in 1 2 3; do
@@ -469,19 +481,32 @@ run_doctor() {
             echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
             failed=$((failed + 1))
         fi
-    elif [[ "$role" == "relay" || "$role" == "dual" ]]; then
-        log "2. Проверка Relay инбаунд порта..."
+    fi
+
+    if [[ "$role" == "relay" || "$cur_has_r" == "1" ]]; then
+        log "2a. Проверка Relay инбаунд порта..."
         local r_port
         r_port="$(get_state_val "relay_port" "10443")"
-        if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import socket; s = socket.create_connection(('127.0.0.1', ${r_port}), timeout=2); s.close()" 2>/dev/null; then
+        if ! [[ "$r_port" =~ ^[0-9]+$ ]] || (( r_port < 1 || r_port > 65535 )); then
+            r_port="10443"
+        fi
+        if ! ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" && ! python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
+            heal_and_update_relay_config >/dev/null 2>&1 || true
+            sleep 1
+        fi
+        if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
         else
             echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss"
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
+        if ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
+            ensure_amnezia_api_service_and_env >/dev/null 2>&1 || true
+            sleep 1
+        fi
         if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
         else
@@ -490,7 +515,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]]; then
+    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
@@ -500,7 +525,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "3b. Проверка контейнера и конфигурации AmneziaWG..."
         local c_doc
         c_doc="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
@@ -536,7 +561,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" || "$cur_has_a" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"
@@ -550,6 +575,7 @@ run_doctor() {
     local domain
     domain="$(get_state_val "domain")"
     [[ -z "$domain" ]] && domain="$(get_state_val "sni")"
+    [[ -z "$domain" ]] && domain="$(get_state_val "vless_domain")"
     [[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"
 
     if [[ -n "$domain" && -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
@@ -605,7 +631,7 @@ run_doctor() {
         if [[ "$role" == "origin" ]]; then
             local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
-            if echo "$ufw_out" | grep -E "8444(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            if echo "$ufw_out" | grep -E "8444(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт 8444 открыт для всех (0.0.0.0/0)!"
                 failed=$((failed + 1))
             elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
@@ -617,43 +643,57 @@ run_doctor() {
                 echo -e "  ${YELLOW}!${NC} BOT_IP не настроен в state.json"
                 warnings=$((warnings + 1))
             fi
-        elif [[ "$role" == "awg" || "$role" == "dual" ]]; then
-            local awg_p bot_ip
-            awg_p="$(get_state_val "awg_port" "8443")"
+        elif [[ "$role" == "awg" || "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
+            local cur_has_a cur_has_v cur_has_r
+            cur_has_a="$(get_state_val "has_awg" "0")"
+            cur_has_v="$(get_state_val "has_vless" "0")"
+            cur_has_r="$(get_state_val "has_relay" "0")"
+            local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
 
-            if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                echo -e "  ${YELLOW}!${NC} Порт API AmneziaWG $awg_p открыт для всех (рекомендуется ограничить: just1knode set-bot-ip <IP>)"
-                warnings=$((warnings + 1))
-            elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "$awg_p"; then
-                echo -e "  ${GREEN}✔${NC} Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP ($bot_ip)"
-            elif [[ -n "$bot_ip" ]]; then
-                echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт $awg_p не найдено в UFW"
-                failed=$((failed + 1))
+            if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
+                local awg_p
+                awg_p="$(get_state_val "awg_port" "8443")"
+
+                if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                    echo -e "  ${YELLOW}!${NC} Порт API AmneziaWG $awg_p открыт для всех (рекомендуется ограничить: just1knode set-bot-ip <IP>)"
+                    warnings=$((warnings + 1))
+                elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "$awg_p"; then
+                    echo -e "  ${GREEN}✔${NC} Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP ($bot_ip)"
+                elif [[ -n "$bot_ip" ]]; then
+                    echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт $awg_p не найдено в UFW"
+                    failed=$((failed + 1))
+                fi
             fi
 
-            if [[ "$role" == "dual" ]]; then
+            if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+                if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                    echo -e "  ${GREEN}✔${NC} Порт VLESS 443 открыт для клиентских подключений"
+                else
+                    echo -e "  ${YELLOW}!${NC} Порт VLESS 443 не найден среди разрешенных в UFW"
+                    warnings=$((warnings + 1))
+                fi
+                if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_a" != "1" ]]; then
+                    if [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
+                        echo -e "  ${GREEN}✔${NC} Порт 8444 защищен и доступен только с BOT_IP ($bot_ip)"
+                    elif [[ -n "$bot_ip" ]]; then
+                        echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт 8444 не найдено в UFW"
+                        failed=$((failed + 1))
+                    fi
+                fi
+            fi
+
+            if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
                 local relay_port origin_ip
                 relay_port="$(get_state_val "relay_port" "10443")"
                 origin_ip="$(get_state_val "origin_ip")"
 
-                if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                     echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
                     failed=$((failed + 1))
                 elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then
                     echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
                 fi
-            fi
-        elif [[ "$role" == "relay" ]]; then
-            local relay_port origin_ip
-            relay_port="$(get_state_val "relay_port" "10443")"
-            origin_ip="$(get_state_val "origin_ip")"
-
-            if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
-                failed=$((failed + 1))
-            elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then
-                echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
             fi
         fi
 
@@ -766,7 +806,7 @@ run_doctor() {
                         done
                         # 2. Легитимные веб-порты 80 и 443
                         if [[ ("$r_port" == "80" || "$r_port" == "443") && ("$proto" == "tcp" || "$proto" == "any") ]]; then
-                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "dual" ]] || command -v nginx >/dev/null 2>&1; then
+                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "node" ]] || command -v nginx >/dev/null 2>&1; then
                                 is_authorized=1
                             fi
                         fi
@@ -939,7 +979,7 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$role" == "dual" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
         if check_amnezia_abuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
@@ -1467,18 +1507,20 @@ main_menu() {
         if [[ "$status" == "unconfigured" ]]; then
             echo -e "  Статус текущего сервера: ${BOLD}${YELLOW}⚪ НЕ НАСТРОЕН${NC}\n"
             echo -e "  ${BOLD}[1]${NC} 🌐 Установить Origin узел (Белый Интернет — Входной шлюз в РФ)"
-            echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход VLESS TLS)"
+            echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход)"
             echo -e "  ${BOLD}[3]${NC} ⚡ Настроить AmneziaWG узел (Зарубежный выход AmneziaWG API)"
-            echo -e "  ${BOLD}[4]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[4]${NC} 🚀 Настроить VLESS TLS узел (Зарубежный выход для Sub-ссылки)"
+            echo -e "  ${BOLD}[5]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-4]: " choice
+            read -rp "Выберите действие [0-5]: " choice
 
             case "$choice" in
                 1) install_xray_origin_node; read -rp "Нажмите Enter для продолжения...";;
                 2) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
                 3) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                4) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                4) install_vless_direct_node; read -rp "Нажмите Enter для продолжения...";;
+                5) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1521,98 +1563,49 @@ main_menu() {
                 *) warn "Неверный выбор."; sleep 1;;
             esac
 
-        elif [[ "$status" == "relay" ]]; then
-            local r_port r_orig r_sni r_sec
-            r_port="$(get_state_val "relay_port" "10443")"
-            r_orig="$(get_state_val "origin_ip" "-")"
-            r_sni="$(get_state_val "sni" "-")"
-            r_sec="$(get_state_val "security" "tls")"
+        else
+            local cur_has_a cur_has_r cur_has_v
+            cur_has_a="$(get_state_val "has_awg" "0")"
+            cur_has_r="$(get_state_val "has_relay" "0")"
+            cur_has_v="$(get_state_val "has_vless" "0")"
 
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🛡️ RELAY (Зарубежный выход)${NC}"
-            echo -e "  Порт: ${CYAN}${r_port}${NC} (${r_sec^^})  |  Origin IP: ${CYAN}${r_orig}${NC}  |  SNI: ${CYAN}${r_sni}${NC}\n"
+            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🌐 ЗАРУБЕЖНЫЙ МОДУЛЬНЫЙ УЗЕЛ${NC}\n"
+            echo -e "  Службы узла:"
+            if [[ "$cur_has_v" == "1" ]]; then
+                local v_dom
+                v_dom="$(get_state_val "vless_domain" "-")"
+                echo -e "    🚀 VLESS TLS (443):  ${GREEN}● Активен${NC}  (Домен: ${CYAN}${v_dom}${NC})"
+            else
+                echo -e "    🚀 VLESS TLS (443):  ${YELLOW}○ Не установлен${NC}"
+            fi
 
-            echo -e "  ${BOLD}[1]${NC} 📋 Показать данные подключения (команда для Origin)"
-            echo -e "  ${BOLD}[2]${NC} 🔐 Настроить персональный домен Relay (VLESS+TLS)"
-            echo -e "  ${BOLD}[3]${NC} 📊 Статус туннеля и сетевой трафик"
-            echo -e "  ${BOLD}[4]${NC} ⚡ Добавить AmneziaWG на этот сервер (Режим Dual)"
-            echo -e "  ${BOLD}[5]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            if [[ "$cur_has_a" == "1" ]]; then
+                local a_url
+                a_url="$(get_state_val "awg_api_url" "-")"
+                echo -e "    ⚡ AmneziaWG (UDP):  ${GREEN}● Активен${NC}  (API: ${CYAN}${a_url}${NC})"
+            else
+                echo -e "    ⚡ AmneziaWG (UDP):  ${YELLOW}○ Не установлен${NC}"
+            fi
+
+            if [[ "$cur_has_r" == "1" ]]; then
+                local r_port r_orig
+                r_port="$(get_state_val "relay_port" "10443")"
+                r_orig="$(get_state_val "origin_ip" "-")"
+                echo -e "    🛡️  Relay (Туннель):  ${GREEN}● Активен${NC}  (Порт: ${CYAN}${r_port}${NC} ➔ Origin: ${CYAN}${r_orig}${NC})"
+            else
+                echo -e "    🛡️  Relay (Туннель):  ${YELLOW}○ Не установлен${NC}"
+            fi
+            echo ""
+
+            echo -e "  ${BOLD}[1]${NC} 🚀 VLESS TLS    $([[ "$cur_has_v" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
+            echo -e "  ${BOLD}[2]${NC} ⚡ AmneziaWG    $([[ "$cur_has_a" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
+            echo -e "  ${BOLD}[3]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
+            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
+            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
             echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
             echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
-            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-            echo ""
-            read -rp "Выберите действие [0-10]: " choice
-
-            case "$choice" in
-                1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
-                2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
-                3) show_status; read -rp "Нажмите Enter для продолжения...";;
-                4) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                5) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
-                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
-                *) warn "Неверный выбор."; sleep 1;;
-            esac
-
-        elif [[ "$status" == "awg" ]]; then
-            local a_url
-            a_url="$(get_state_val "awg_api_url" "-")"
-
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}⚡ AMNEZIAWG (Зарубежный выход)${NC}"
-            echo -e "  API URL: ${CYAN}${a_url}${NC}\n"
-
-            echo -e "  ${BOLD}[1]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[2]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[3]${NC} 📊 Статус узла и активные клиенты"
-            echo -e "  ${BOLD}[4]${NC} 🛡️  Добавить Relay на этот сервер (Режим Dual)"
-            echo -e "  ${BOLD}[5]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
-            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-            echo ""
-            read -rp "Выберите действие [0-9]: " choice
-
-            case "$choice" in
-                1) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                2) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
-                3) show_status; read -rp "Нажмите Enter для продолжения...";;
-                4) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
-                5) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
-                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
-                *) warn "Неверный выбор."; sleep 1;;
-            esac
-
-        elif [[ "$status" == "dual" ]]; then
-            local r_port a_url r_sni r_sec
-            r_port="$(get_state_val "relay_port" "10443")"
-            a_url="$(get_state_val "awg_api_url" "-")"
-            r_sni="$(get_state_val "sni" "-")"
-            r_sec="$(get_state_val "security" "tls")"
-
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}⚡🛡️ DUAL (Relay + AmneziaWG)${NC}"
-            echo -e "  Relay: ${CYAN}${r_port}${NC} (${r_sec^^}, SNI: ${r_sni})  |  Amnezia API: ${CYAN}${a_url}${NC}\n"
-
-            echo -e "  ${BOLD}[1]${NC} 📋 Показать данные подключения Relay (для Origin)"
-            echo -e "  ${BOLD}[2]${NC} 🔐 Настроить персональный домен Relay (VLESS+TLS)"
-            echo -e "  ${BOLD}[3]${NC} 🔑 Показать данные AmneziaWG для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и сетевой трафик"
-            echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[7]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[8]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[9]${NC} ⚡ Обновить ядро Xray-core"
+            echo -e "  ${BOLD}[9]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
             echo -e "  ${BOLD}[10]${NC} ⚠️ Сбросить / переустановить узел"
             echo -e "  ${BOLD}[11]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
@@ -1620,15 +1613,64 @@ main_menu() {
             read -rp "Выберите действие [0-11]: " choice
 
             case "$choice" in
-                1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
-                2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
-                3) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                1)
+                    if [[ "$cur_has_v" == "1" ]]; then
+                        echo -e "\n${BOLD}=== УПРАВЛЕНИЕ VLESS TLS ===${NC}"
+                        echo "[1] Показать данные для Telegram-бота (/admin)"
+                        echo "[2] Удалить VLESS TLS с этого сервера"
+                        echo "[0] Назад"
+                        read -rp "Выбор [0-2]: " v_choice
+                        case "$v_choice" in
+                            1) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                            2) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
+                        esac
+                    else
+                        install_vless_direct_node
+                        read -rp "Нажмите Enter для продолжения..."
+                    fi
+                    ;;
+                2)
+                    if [[ "$cur_has_a" == "1" ]]; then
+                        echo -e "\n${BOLD}=== УПРАВЛЕНИЕ AMNEZIAWG ===${NC}"
+                        echo "[1] Показать данные для Telegram-бота (/admin)"
+                        echo "[2] Резервная копия (Backup AmneziaWG)"
+                        echo "[3] Удалить AmneziaWG с этого сервера"
+                        echo "[0] Назад"
+                        read -rp "Выбор [0-3]: " a_choice
+                        case "$a_choice" in
+                            1) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
+                            2) backup_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_amnezia_component; read -rp "Нажмите Enter для продолжения...";;
+                        esac
+                    else
+                        install_amnezia_node
+                        read -rp "Нажмите Enter для продолжения..."
+                    fi
+                    ;;
+                3)
+                    if [[ "$cur_has_r" == "1" ]]; then
+                        echo -e "\n${BOLD}=== УПРАВЛЕНИЕ RELAY (БЕЛЫЙ ИНТЕРНЕТ) ===${NC}"
+                        echo "[1] Показать данные подключения (команда для Origin)"
+                        echo "[2] Настроить персональный домен Relay"
+                        echo "[3] Удалить Relay с этого сервера"
+                        echo "[0] Назад"
+                        read -rp "Выбор [0-3]: " r_choice
+                        case "$r_choice" in
+                            1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
+                            2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_relay_component; read -rp "Нажмите Enter для продолжения...";;
+                        esac
+                    else
+                        install_xray_relay_node
+                        read -rp "Нажмите Enter для продолжения..."
+                    fi
+                    ;;
                 4) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
                 5) show_status; read -rp "Нажмите Enter для продолжения...";;
-                6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                7) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                8) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                9) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
+                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
+                9) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
                 10) reset_node; read -rp "Нажмите Enter для продолжения...";;
                 11) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
@@ -1649,16 +1691,36 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     origin|xray-origin) install_xray_origin_node "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" ;;
                     relay|xray-relay|exit|xray-exit) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
                     amnezia|awg) install_amnezia_node "${3:-}" "${4:-}" "${5:-}" ;;
-                    *) error "Неизвестный тип установки: $2. Доступно: origin, relay, amnezia, awg" ;;
+                    vless|tls|xray-vless) install_vless_direct_node "${3:-}" ;;
+                    *) error "Неизвестный тип установки: $2. Доступно: origin, relay, amnezia, awg, vless, tls" ;;
                 esac
                 ;;
+            install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
+            uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
+            install-amnezia|install-awg|add-amnezia) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
+            uninstall-amnezia|uninstall-awg|remove-amnezia) uninstall_amnezia_component "${2:-}" ;;
+            install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
+            uninstall-relay|remove-relay) uninstall_relay_component "${2:-}" ;;
             setup-domain|relay-domain|setup_domain)
                 setup_relay_domain "${2:-}"
                 ;;
+            tls|vless)
+                case "${2:-}" in
+                    install|setup) install_vless_direct_node "${3:-}" ;;
+                    status) show_status ;;
+                    creds|bot) show_vless_bot_credentials ;;
+                    bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
+                    uninstall|remove|del) uninstall_vless_component "${3:-}" ;;
+                    *) install_vless_direct_node "${2:-}" ;;
+                esac
+                ;;
             relay)
                 case "${2:-}" in
+                    install|setup) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
+                    creds|info) show_relay_credentials ;;
+                    uninstall|remove|del) uninstall_relay_component "${3:-}" ;;
                     add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-de}" "${8:-tls}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
-                    remove|del) remove_relay_node "${3:-}" ;;
+                    remove-origin|del-origin) remove_relay_node "${3:-}" ;;
                     rename) rename_relay_node "${3:-}" "${4:-}" ;;
                     sni|domain) update_relay_sni "${3:-}" "${4:-}" "${5:-tls}" "${6:-}" ;;
                     list) list_relays ;;
@@ -1673,7 +1735,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
                     backup) backup_amnezia_node "${3:-}" ;;
                     restore) restore_amnezia_node "${3:-}" ;;
-                    uninstall|remove) uninstall_amnezia_component ;;
+                    uninstall|remove|del) uninstall_amnezia_component ;;
                     *) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
                 esac
                 ;;
@@ -1725,9 +1787,21 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                             heal_and_update_origin_config
                         elif [[ "$role" == "relay" ]]; then
                             heal_and_update_relay_config
-                        elif [[ "$role" == "dual" ]]; then
+                        elif [[ "$role" == "vless" ]]; then
                             heal_and_update_relay_config
-                            apply_amnezia_abuse_protection
+                        elif [[ "$role" == "node" ]]; then
+                            has_v="$(get_state_val "has_vless" "0")"
+                            has_r="$(get_state_val "has_relay" "0")"
+                            has_a="$(get_state_val "has_awg" "0")"
+                            if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
+                                heal_and_update_relay_config
+                            fi
+                            if [[ "$has_a" == "1" ]]; then
+                                ensure_amnezia_api_service_and_env
+                                apply_amnezia_abuse_protection
+                            fi
+                            heal_node_firewall_and_stealth
+                            log "Конфигурация модульного узла актуализирована."
                         elif [[ "$role" == "awg" ]]; then
                             apply_amnezia_abuse_protection
                             heal_node_firewall_and_stealth

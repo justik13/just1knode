@@ -1,7 +1,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import grpc
 
@@ -40,6 +40,11 @@ class XrayGrpcClient:
         self.timeout = timeout
         self._channel = None
         self._active_users: set[tuple[str, str]] = set()
+        self._active_users_epoch: Optional[str] = None
+
+    def clear_active_users(self) -> None:
+        """Clear authoritative in-memory active users registry."""
+        self._active_users.clear()
 
     def _get_channel(self) -> grpc.Channel:
         if self._channel is None:
@@ -139,11 +144,15 @@ class XrayGrpcClient:
             raise
 
     def probe_user_presence(self, inbound_tag: str, user_id: str) -> bool:
-        """Strictly non-destructive presence check without mutating AlterInbound."""
+        """Strictly non-destructive presence check via synchronized in-memory set (_active_users).
+
+        Because Xray core HandlerService lacks a ListUsers/QueryUser gRPC RPC, tracking is maintained
+        via an authoritative local in-memory registry synchronized across add_user and remove_user calls.
+        """
         return (inbound_tag, user_id) in self._active_users
 
     def verify_user_absent(self, inbound_tag: str, user_id: str) -> bool:
-        """Strictly non-destructive absence verification without mutating AlterInbound."""
+        """Strictly non-destructive absence verification via synchronized in-memory set (_active_users)."""
         return (inbound_tag, user_id) not in self._active_users
 
     def ensure_user_state(

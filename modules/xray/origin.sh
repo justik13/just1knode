@@ -121,7 +121,11 @@ install_xray_origin_node() {
 
     local prev_role
     prev_role="$(get_node_status)"
-    if [[ "$prev_role" == "awg" || "$prev_role" == "relay" || "$prev_role" == "dual" ]]; then
+    local has_a has_r has_v
+    has_a="$(get_state_val "has_awg" "0")"
+    has_r="$(get_state_val "has_relay" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+    if [[ "$prev_role" == "node" || "$prev_role" == "awg" || "$prev_role" == "relay" || "$has_a" == "1" || "$has_r" == "1" || "$has_v" == "1" ]]; then
         error "На узле уже активна роль '${prev_role}'. Origin (Белый Интернет) требует выделенный изолированный сервер."
         return 1
     fi
@@ -746,15 +750,24 @@ set_origin_bot_ip() {
     local target_port="8444"
     local role_descr="Origin API (порт 8444)"
 
+    local has_a has_v
+    has_a="$(get_state_val "has_awg" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+
     if [[ "$role" == "origin" ]]; then
         target_port="8444"
         role_descr="Origin API (порт 8444)"
-    elif [[ "$role" == "awg" || "$role" == "dual" ]]; then
-        target_port="$(get_state_val "awg_port" "8443")"
-        role_descr="AmneziaWG API (порт ${target_port})"
+    elif [[ "$role" == "awg" || "$role" == "node" || "$has_a" == "1" || "$has_v" == "1" || "$role" == "vless" ]]; then
+        if [[ "$has_a" == "1" || "$role" == "awg" ]]; then
+            target_port="$(get_state_val "awg_port" "8443")"
+            role_descr="AmneziaWG API (порт ${target_port})"
+        else
+            target_port="8444"
+            role_descr="Xray API (порт 8444)"
+        fi
     else
         release_just1knode_lock
-        error "Функция доступна только на узлах с ролью Origin, AmneziaWG или Dual (текущая роль: ${role:-не установлена})."
+        error "Функция доступна только на настроенных узлах (Origin, AmneziaWG или VLESS)."
         return 1
     fi
 

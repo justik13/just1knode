@@ -27,7 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 XRAY_API_DIR = REPO_ROOT / "scripts" / "xray_api"
@@ -314,6 +314,130 @@ class TestXrayApiAdversarial(unittest.TestCase):
                 self.assertEqual(r6.json()["result"], "applied")
                 self.assertIn(uuid_test, self.app_module.client_store.load_clients())
 
+    def test_client_store_multi_service_tracking(self):
+        """ClientStore must track multiple services independently per UUID."""
+        cid = "multi-svc-test-uuid-1234"
+        self.app_module.client_store.add_client(cid, version=1, service="white_internet")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertEqual(entries[cid]["services"], ["white_internet"])
+        self.assertEqual(entries[cid]["service"], "white_internet")
+
+        # Now add same client to vless
+        self.app_module.client_store.add_client(cid, version=2, service="vless")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertIn("white_internet", entries[cid]["services"])
+        self.assertIn("vless", entries[cid]["services"])
+        self.assertEqual(entries[cid]["service"], "vless")
+
+        # Deactivate only VLESS: White Internet must remain active!
+        self.app_module.client_store.remove_client(cid, version=3, service="vless")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertTrue(entries[cid]["is_active"])
+        self.assertEqual(entries[cid]["services"], ["white_internet"])
+
+        # Deactivate White Internet: Now is_active becomes False
+        self.app_module.client_store.remove_client(cid, version=4, service="white_internet")
+        entries = self.app_module.client_store.load_client_entries()
+        self.assertFalse(entries[cid]["is_active"])
+
+    def test_get_target_inbounds_default_isolation(self):
+        """When service is not specified, do not pollute vless-direct if white_internet inbounds exist."""
+        with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-wl-default,just1k-vless-direct"}):
+            # When service=None, must default to white_internet inbounds
+            tags_unspecified = self.app_module.get_target_inbounds(service=None)
+            self.assertEqual(tags_unspecified, ["just1k-wl-default"])
+
+            # When service='vless', must return only vless inbounds
+            tags_vless = self.app_module.get_target_inbounds(service="vless")
+            self.assertEqual(tags_vless, ["just1k-vless-direct"])
+
+            # When service='white_internet', must return only wl inbounds
+            tags_wl = self.app_module.get_target_inbounds(service="white_internet")
+            self.assertEqual(tags_wl, ["just1k-wl-default"])
+
+            # get_all_managed_inbounds must return ALL inbounds without namespace filtering
+            all_tags = self.app_module.get_all_managed_inbounds()
+            self.assertIn("just1k-wl-default", all_tags)
+            self.assertIn("just1k-vless-direct", all_tags)
+
+    def test_idempotency_cache_evicts_on_epoch_or_client_mismatch(self):
+        """Idempotency cache must evict and re-execute if node epoch changed or client_id differs."""
+        idem_key = "test-idem-key-1"
+        # Seed cache with old epoch
+        self.app_module.completed_idempotent_ops[idem_key] = {
+            "status": "ok",
+            "client_id": "11111111-1111-1111-1111-111111111111",
+            "result": "applied",
+            "verified_epoch": "old-epoch-1",
+        }
+
+        # Node currently runs new epoch
+        with patch.object(self.app_module.epoch_manager, "get_current_running_epoch", return_value="new-epoch-2"):
+            with patch.object(self.app_module, "_sync_client_internal", new=AsyncMock(return_value={"status": "ok", "result": "re-executed"})) as mock_internal:
+                res = self.client.post(
+                    "/v1/clients/sync",
+                    json={"client_id": "11111111-1111-1111-1111-111111111111", "idempotency_key": idem_key},
+                    headers=self.headers,
+                )
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(res.json()["result"], "re-executed")
+                # Must have evicted the stale key
+                mock_internal.assert_awaited_once()
+
+    def test_sync_client_rollback_restores_initial_states_on_partial_failure(self):
+        """Rollback must restore each inbound's exact initial state rather than blindly inverting."""
+        client_uuid = "22222222-2222-2222-2222-222222222222"
+        inbounds = ["just1k-wl-default", "just1k-vless-direct"]
+        self.epoch_mgr.save_state("adv-epoch-fixture", 100, 1000, "boot-test")
+
+        # Initial state: inbounds[0] was disabled (False), inbounds[1] was active (True)
+        ensure_calls = []
+
+        def mock_probe(tag, cid):
+            return False if tag == inbounds[0] else True
+
+        def mock_ensure(tag, cid, desired_state, flow=None):
+            ensure_calls.append((tag, desired_state))
+            if tag == inbounds[1]:
+                raise RuntimeError("Simulated failure on second inbound")
+
+        with (
+            patch.object(self.app_module, "get_target_inbounds", return_value=inbounds),
+            patch.object(self.app_module.grpc_client, "probe_user_presence", side_effect=mock_probe),
+            patch.object(self.app_module.grpc_client, "ensure_user_state", side_effect=mock_ensure),
+        ):
+            res = self.client.post(
+                "/v1/clients/sync",
+                json={"client_id": client_uuid, "desired_state": "active"},
+                headers=self.headers,
+            )
+            self.assertEqual(res.status_code, 500)
+            # The mutation attempt on tag 0 was desired_state='active'.
+            # Rollback on tag 0 must restore its exact initial state ('disabled'), NOT blindly set it!
+            rollback_calls = [c for c in ensure_calls[2:] if c[0] == inbounds[0]]
+            self.assertTrue(any(c[1] == "disabled" for c in rollback_calls))
+
+    def test_already_newer_runtime_verification_fails_when_user_absent(self):
+        """already_newer must perform runtime verification and flag unverified inbounds if absent."""
+        client_uuid = "33333333-3333-3333-3333-333333333333"
+        self.epoch_mgr.save_state("adv-epoch-fixture", 100, 1000, "boot-test")
+        # Seed client_store with higher version
+        self.app_module.client_store.add_client(client_uuid, version=10)
+
+        # Xray RAM probe returns False (user absent in memory)
+        with patch.object(self.app_module.grpc_client, "probe_user_presence", return_value=False):
+            res = self.client.post(
+                "/v1/clients/sync",
+                json={"client_id": client_uuid, "version": 5, "desired_state": "active"},
+                headers=self.headers,
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["result"], "already_newer")
+            self.assertFalse(data["all_inbounds_verified"])
+            self.assertEqual(data["verified_inbounds"], [])
+
+
 
 @unittest.skipIf(os.name == "nt", "POSIX bash required (run in Linux CI)")
 class TestJust1kNodeInstallerAdversarial(unittest.TestCase):
@@ -466,6 +590,38 @@ ensure_xrayapi_user() {{ return 0; }}
         self.assertIn("gRPC сокет Xray недоступен", res.stdout + res.stderr)
         self.assertIn("Обнаружено ошибок", res.stdout + res.stderr)
 
+    def test_install_origin_rejects_node_role_and_active_components(self):
+        """Origin installation must strictly reject nodes with role='node' or active AWG/Relay/VLESS components."""
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+
+        res = self._run_shell_snippet("install_xray_origin_node 'origin.test'")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Origin (Белый Интернет) требует выделенный изолированный сервер", res.stdout + res.stderr)
+
+    def test_update_node_post_skips_xray_core_for_awg_only_node(self):
+        """AWG-only nodes (role=node, has_awg=1, has_relay=0, has_vless=0) must not run update_xray_core."""
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+
+        # Mock xray binary to fail if invoked for core update
+        self._create_mock_script("xray", "#!/bin/sh\necho 'ERROR: xray core updated unexpectedly' >&2\nexit 1\n")
+        self._create_mock_script("ufw", "#!/bin/sh\nexit 0\n")
+        self._create_mock_script("systemctl", "#!/bin/sh\nexit 0\n")
+
+        snippet = """
+ensure_amnezia_api_service_and_env() { return 0; }
+apply_amnezia_abuse_protection() { return 0; }
+heal_node_firewall_and_stealth() { return 0; }
+acquire_just1knode_lock() { return 0; }
+release_just1knode_lock() { return 0; }
+update_node_post 'all'
+"""
+        res = self._run_shell_snippet(snippet)
+        self.assertEqual(res.returncode, 0)
+        self.assertNotIn("ERROR: xray core updated unexpectedly", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
+
