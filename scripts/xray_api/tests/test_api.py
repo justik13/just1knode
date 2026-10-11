@@ -890,24 +890,24 @@ def test_multi_service_state_isolation():
     uuid = "44444444-5555-6666-7777-888888888888"
 
     # Add for white_internet first
-    client_store.add_client(uuid, state="active", version=1, service="white_internet")
+    client_store.add_client(uuid, version=1, service="white_internet")
     c = client_store.get_client(uuid)
     assert c is not None
-    assert c["service_states"]["white_internet"]["state"] == "active"
+    assert c["service_states"]["white_internet"]["is_active"] is True
     assert c["service_states"]["white_internet"]["version"] == 1
 
     # Add for vless next
-    client_store.add_client(uuid, state="active", version=2, service="vless")
+    client_store.add_client(uuid, version=2, service="vless")
     c = client_store.get_client(uuid)
-    assert c["service_states"]["white_internet"]["state"] == "active"
-    assert c["service_states"]["vless"]["state"] == "active"
+    assert c["service_states"]["white_internet"]["is_active"] is True
+    assert c["service_states"]["vless"]["is_active"] is True
     assert c["service_states"]["vless"]["version"] == 2
 
     # Disable vless - white_internet must remain active
     client_store.remove_client(uuid, version=3, service="vless")
     c = client_store.get_client(uuid)
-    assert c["service_states"]["white_internet"]["state"] == "active"
-    assert c["service_states"]["vless"]["state"] == "disabled"
+    assert c["service_states"]["white_internet"]["is_active"] is True
+    assert c["service_states"]["vless"]["is_active"] is False
     assert c["service_states"]["vless"]["version"] == 3
 
     # Stale version for vless (version 2 < 3) rejected by client_store
@@ -917,7 +917,7 @@ def test_multi_service_state_isolation():
     client_store.delete_client(uuid, version=4, service="vless")
     c = client_store.get_client(uuid)
     assert "vless" not in c["service_states"]
-    assert c["service_states"]["white_internet"]["state"] == "active"
+    assert c["service_states"]["white_internet"]["is_active"] is True
 
     # Delete white_internet service -> entry completely removed
     client_store.delete_client(uuid, version=5, service="white_internet")

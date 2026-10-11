@@ -410,9 +410,11 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
 
     effective = resolve_effective_service(service) if service is not None else None
     if effective == "vless":
-        return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
+        matched = [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
+        return matched if matched else discovered_tags
     if effective == "white_internet":
-        return [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
+        matched = [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
+        return matched if matched else discovered_tags
 
     # If service is unspecified, do not mix namespaces:
     # If white_internet inbounds exist, default to white_internet to prevent accidental leakage into vless-direct.
