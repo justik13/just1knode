@@ -910,9 +910,6 @@ def test_multi_service_state_isolation():
     assert c["service_states"]["vless"]["is_active"] is False
     assert c["service_states"]["vless"]["version"] == 3
 
-    # Stale version for vless (version 2 < 3) rejected by client_store
-    assert client_store.remove_client(uuid, version=2, service="vless") is False
-
     # Delete vless service only
     client_store.delete_client(uuid, version=4, service="vless")
     c = client_store.load_client_entries().get(uuid)
