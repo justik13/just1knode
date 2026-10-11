@@ -214,7 +214,8 @@ def test_startup_reconciliation_db_authority():
             health_after = client.get("/v1/health", headers=VALID_HEADERS).json()
             assert health_after["sync_status"] == "unsynchronized"
             assert health_after["synchronized"] is False
-            assert health_after["last_client_sync_at"] is not None
+            assert health_after["last_synced_at"] is not None
+            assert node_sync_state["last_client_sync_at"] is not None
             assert uuid_active in client_store.load_clients()
             assert uuid_stale not in client_store.load_clients()
 
