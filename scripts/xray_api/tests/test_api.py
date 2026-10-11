@@ -212,8 +212,9 @@ def test_startup_reconciliation_db_authority():
             return_value=(100, 1000, "boot-1", "epoch_1"),
         ):
             health_after = client.get("/v1/health", headers=VALID_HEADERS).json()
-            assert health_after["sync_status"] == "synchronized"
-            assert health_after["synchronized"] is True
+            assert health_after["sync_status"] == "unsynchronized"
+            assert health_after["synchronized"] is False
+            assert health_after["last_client_sync_at"] is not None
             assert uuid_active in client_store.load_clients()
             assert uuid_stale not in client_store.load_clients()
 
@@ -997,7 +998,6 @@ def test_legacy_client_migration_defaults_to_vless(tmp_path):
     store = ClientStore(store_file)
 
     uuid = "33333333-2222-1111-0000-aaaaaaaaaaaa"
-    # Write raw legacy entry with only is_active and version
     raw_entries = {
         uuid: {
             "is_active": True,
@@ -1006,28 +1006,54 @@ def test_legacy_client_migration_defaults_to_vless(tmp_path):
     }
     store.save_client_entries(raw_entries)
 
-    # Calling add_client for a new service or same triggers migration
-    store.add_client(uuid, version=6, service="vless")
-    loaded = store.load_client_entries().get(uuid)
-    assert loaded is not None
-    assert "vless" in loaded["service_states"]
-    assert loaded["service_states"]["vless"]["is_active"] is True
-    assert loaded["service_states"]["vless"]["version"] == 6
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-vless-direct"}):
+        # Calling add_client for a new service or same triggers migration
+        store.add_client(uuid, version=6, service="vless")
+        loaded = store.load_client_entries().get(uuid)
+        assert loaded is not None
+        assert "vless" in loaded["service_states"]
+        assert loaded["service_states"]["vless"]["is_active"] is True
+        assert loaded["service_states"]["vless"]["version"] == 6
 
-    # Verify removing another legacy entry without services deactivates default 'vless'
-    uuid2 = "77777777-6666-5555-4444-bbbbbbbbbbbb"
-    raw_entries2 = {
-        uuid2: {
+        # Verify removing another legacy entry without services deactivates default 'vless'
+        uuid2 = "77777777-6666-5555-4444-bbbbbbbbbbbb"
+        raw_entries2 = {
+            uuid2: {
+                "is_active": True,
+                "version": 2,
+            }
+        }
+        store.save_client_entries(raw_entries2)
+        store.remove_client(uuid2, version=3, service="vless")
+        loaded2 = store.load_client_entries().get(uuid2)
+        assert loaded2 is not None
+        assert "vless" in loaded2["service_states"]
+        assert loaded2["service_states"]["vless"]["is_active"] is False
+
+
+def test_legacy_client_migration_defaults_to_white_internet_on_wl_node(tmp_path):
+    """P2.8: Legacy entry on White Internet node migrates with default service 'white_internet'."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid = "55555555-4444-3333-2222-cccccccccccc"
+    raw_entries = {
+        uuid: {
             "is_active": True,
-            "version": 2,
+            "version": 3,
         }
     }
-    store.save_client_entries(raw_entries2)
-    store.remove_client(uuid2, version=3, service="vless")
-    loaded2 = store.load_client_entries().get(uuid2)
-    assert loaded2 is not None
-    assert "vless" in loaded2["service_states"]
-    assert loaded2["service_states"]["vless"]["is_active"] is False
+    store.save_client_entries(raw_entries)
+
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "inbound-de,inbound-nl"}):
+        store.remove_client(uuid, version=4, service="white_internet")
+        loaded = store.load_client_entries().get(uuid)
+        assert loaded is not None
+        assert "white_internet" in loaded["service_states"]
+        assert loaded["service_states"]["white_internet"]["is_active"] is False
+        assert loaded["is_active"] is False
+
 
 
 
