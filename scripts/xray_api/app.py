@@ -410,17 +410,19 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
 
     effective = resolve_effective_service(service) if service is not None else None
     if effective == "vless":
-        matched = [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
-        return matched if matched else discovered_tags
+        return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
     if effective == "white_internet":
-        matched = [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
-        return matched if matched else discovered_tags
+        return [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
 
     # If service is unspecified, do not mix namespaces:
     # If white_internet inbounds exist, default to white_internet to prevent accidental leakage into vless-direct.
     wl_inbounds = [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
     if wl_inbounds:
         return wl_inbounds
+
+    vless_inbounds = [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
+    if vless_inbounds:
+        return vless_inbounds
 
     return discovered_tags
 
@@ -1493,8 +1495,19 @@ async def get_clients_inventory(
         running_epoch = epoch_manager.load_state().get("node_epoch")
     sync_active_users_with_epoch(running_epoch)
 
+    if not target_inbounds:
+        return {
+            "status": "ok",
+            "node_epoch": running_epoch,
+            "managed_inbounds": [],
+            "inventory": {},
+            "count": 0,
+        }
+
     # Determine which clients to probe:
     client_ids = req.client_ids if req and req.client_ids else None
+    if client_ids and len(client_ids) > 1000:
+        client_ids = client_ids[:1000]
     if not client_ids:
         try:
             client_ids = list(client_store.load_client_entries().keys())

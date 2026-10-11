@@ -922,3 +922,51 @@ def test_multi_service_state_isolation():
     c_final = client_store.load_client_entries().get(uuid)
     assert c_final is None or c_final.get("tombstone") is True
 
+
+def test_get_target_inbounds_service_isolation_fail_closed():
+    """F13: Service-specific target inbounds fail-closed and never cross-pollinate namespaces."""
+    with patch("app.get_all_managed_inbounds", return_value=["just1k-wl-default"]):
+        # Requesting vless when only white_internet exists must return empty list (fail-closed)
+        vless_inbounds = get_target_inbounds(service="vless")
+        assert vless_inbounds == []
+
+        # Requesting white_internet returns matched
+        wl_inbounds = get_target_inbounds(service="white_internet")
+        assert wl_inbounds == ["just1k-wl-default"]
+
+    with patch("app.get_all_managed_inbounds", return_value=["just1k-vless-direct"]):
+        # Requesting white_internet when only vless exists must return empty list
+        assert get_target_inbounds(service="white_internet") == []
+        assert get_target_inbounds(service="vless") == ["just1k-vless-direct"]
+
+
+def test_inventory_service_scoped_evaluation():
+    """F14: Inventory respects service parameter and avoids false partial status on dual nodes."""
+    client_uuid = "22222222-3333-4444-5555-666666666666"
+
+    # User is only present in just1k-wl-default, not in just1k-vless-direct
+    def mock_probe(tag, cid):
+        return tag == "just1k-wl-default" and cid == client_uuid
+
+    with patch.object(grpc_client, "probe_user_presence", side_effect=mock_probe):
+        with patch("app.get_all_managed_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
+            with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_inv"):
+                # Without service scoping: client is in wl but not in vless -> observed as partial
+                res_all = client.post(
+                    "/v1/clients/inventory",
+                    headers=VALID_HEADERS,
+                    json={"client_ids": [client_uuid]},
+                )
+                assert res_all.status_code == 200
+                assert res_all.json()["inventory"][client_uuid]["observed_state"] == "partial"
+
+                # With service="white_internet": client is evaluated ONLY against white_internet -> active!
+                res_wl = client.post(
+                    "/v1/clients/inventory",
+                    headers=VALID_HEADERS,
+                    json={"client_ids": [client_uuid], "service": "white_internet"},
+                )
+                assert res_wl.status_code == 200
+                assert res_wl.json()["inventory"][client_uuid]["observed_state"] == "active"
+
+
