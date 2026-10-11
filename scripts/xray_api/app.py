@@ -1347,7 +1347,7 @@ async def _sync_client_internal(
         "service": effective_service,
         "verified_epoch": epoch_after,
         "verified_inbounds": verified_inbounds,
-        "all_inbounds_verified": True,
+        "all_inbounds_verified": (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0,
         "fenced": False,
         "inbounds": target_inbounds,
     }

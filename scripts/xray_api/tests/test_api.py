@@ -1056,5 +1056,47 @@ def test_legacy_client_migration_defaults_to_white_internet_on_wl_node(tmp_path)
         assert loaded["is_active"] is False
 
 
+def test_legacy_client_migration_with_none_or_empty_service_defaults_properly(tmp_path):
+    """P2.8: Legacy entry with None or empty service/services migrates to default service without null keys."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid1 = "11111111-1111-1111-1111-111111111111"
+    uuid2 = "22222222-2222-2222-2222-222222222222"
+    raw_entries = {
+        uuid1: {
+            "is_active": True,
+            "version": 1,
+            "service": None,
+            "services": [],
+        },
+        uuid2: {
+            "is_active": True,
+            "version": 2,
+            "services": [None],
+        },
+    }
+    store.save_client_entries(raw_entries)
+
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-vless-direct"}):
+        store.add_client(uuid1, version=3, service="vless")
+        loaded1 = store.load_client_entries().get(uuid1)
+        assert loaded1 is not None
+        assert "null" not in loaded1.get("service_states", {})
+        assert None not in loaded1.get("service_states", {})
+        assert "vless" in loaded1["service_states"]
+        assert loaded1["service_states"]["vless"]["version"] == 3
+
+        store.remove_client(uuid2, version=4, service="vless")
+        loaded2 = store.load_client_entries().get(uuid2)
+        assert loaded2 is not None
+        assert "null" not in loaded2.get("service_states", {})
+        assert None not in loaded2.get("service_states", {})
+        assert "vless" in loaded2["service_states"]
+        assert loaded2["service_states"]["vless"]["is_active"] is False
+
+
+
 
 

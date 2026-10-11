@@ -231,6 +231,36 @@ class ClientStore:
 
         return "vless"
 
+    def _extract_or_migrate_service_states(self, existing_entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract existing service_states dict or migrate legacy entry without service_states."""
+        curr_service_states = existing_entry.get("service_states")
+        if isinstance(curr_service_states, dict):
+            return dict(curr_service_states)
+
+        curr_service_states = {}
+        if existing_entry:
+            raw_services = existing_entry.get("services") or []
+            if not isinstance(raw_services, list):
+                raw_services = [raw_services] if raw_services else []
+            legacy_services = [s for s in raw_services if s]
+            raw_svc = existing_entry.get("service")
+            if raw_svc and raw_svc not in legacy_services:
+                legacy_services.append(raw_svc)
+            if not legacy_services:
+                legacy_services = [self._detect_default_service()]
+            legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
+            legacy_ver = existing_entry.get("version", 0)
+            legacy_tomb = bool(existing_entry.get("tombstone", False))
+            for s in legacy_services:
+                canon_s = self.canonicalize_service(s) or s
+                if canon_s:
+                    curr_service_states[canon_s] = {
+                        "is_active": legacy_act,
+                        "version": legacy_ver,
+                        "tombstone": legacy_tomb,
+                    }
+        return curr_service_states
+
     def add_client(
         self,
         client_uuid: str,
@@ -243,28 +273,7 @@ class ClientStore:
         try:
             entries = self.load_client_entries()
             existing_entry = entries.get(client_uuid, {})
-            curr_service_states = existing_entry.get("service_states")
-            if not isinstance(curr_service_states, dict):
-                curr_service_states = {}
-                if existing_entry:
-                    # Migrate legacy entry
-                    legacy_services = existing_entry.get("services") or []
-                    if not isinstance(legacy_services, list):
-                        legacy_services = [legacy_services] if legacy_services else []
-                    if "service" in existing_entry and existing_entry["service"] not in legacy_services:
-                        legacy_services.append(existing_entry["service"])
-                    if not legacy_services:
-                        legacy_services = [self._detect_default_service()]
-                    legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
-                    legacy_ver = existing_entry.get("version", 0)
-                    legacy_tomb = bool(existing_entry.get("tombstone", False))
-                    for s in legacy_services:
-                        canon_s = self.canonicalize_service(s) or s
-                        curr_service_states[canon_s] = {
-                            "is_active": legacy_act,
-                            "version": legacy_ver,
-                            "tombstone": legacy_tomb,
-                        }
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
 
             svc_name = self.canonicalize_service(service) or "vless"
             svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
@@ -310,27 +319,7 @@ class ClientStore:
         try:
             entries = self.load_client_entries()
             existing_entry = entries.get(client_uuid, {})
-            curr_service_states = existing_entry.get("service_states")
-            if not isinstance(curr_service_states, dict):
-                curr_service_states = {}
-                if existing_entry:
-                    legacy_services = existing_entry.get("services") or []
-                    if not isinstance(legacy_services, list):
-                        legacy_services = [legacy_services] if legacy_services else []
-                    if "service" in existing_entry and existing_entry["service"] not in legacy_services:
-                        legacy_services.append(existing_entry["service"])
-                    if not legacy_services:
-                        legacy_services = [self._detect_default_service()]
-                    legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
-                    legacy_ver = existing_entry.get("version", 0)
-                    legacy_tomb = bool(existing_entry.get("tombstone", False))
-                    for s in legacy_services:
-                        canon_s = self.canonicalize_service(s) or s
-                        curr_service_states[canon_s] = {
-                            "is_active": legacy_act,
-                            "version": legacy_ver,
-                            "tombstone": legacy_tomb,
-                        }
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
 
             svc_name = self.canonicalize_service(service)
             if svc_name:
@@ -389,27 +378,7 @@ class ClientStore:
         try:
             entries = self.load_client_entries()
             existing_entry = entries.get(client_uuid, {})
-            curr_service_states = existing_entry.get("service_states")
-            if not isinstance(curr_service_states, dict):
-                curr_service_states = {}
-                if existing_entry:
-                    legacy_services = existing_entry.get("services") or []
-                    if not isinstance(legacy_services, list):
-                        legacy_services = [legacy_services] if legacy_services else []
-                    if "service" in existing_entry and existing_entry["service"] not in legacy_services:
-                        legacy_services.append(existing_entry["service"])
-                    if not legacy_services:
-                        legacy_services = [self._detect_default_service()]
-                    legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
-                    legacy_ver = existing_entry.get("version", 0)
-                    legacy_tomb = bool(existing_entry.get("tombstone", False))
-                    for s in legacy_services:
-                        canon_s = self.canonicalize_service(s) or s
-                        curr_service_states[canon_s] = {
-                            "is_active": legacy_act,
-                            "version": legacy_ver,
-                            "tombstone": legacy_tomb,
-                        }
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
             svc_name = self.canonicalize_service(service)
             if svc_name:
                 svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
