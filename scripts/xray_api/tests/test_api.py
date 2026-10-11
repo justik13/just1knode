@@ -1097,6 +1097,57 @@ def test_legacy_client_migration_with_none_or_empty_service_defaults_properly(tm
         assert loaded2["service_states"]["vless"]["is_active"] is False
 
 
+def test_service_version_fencing_isolation_between_services():
+    """Client with existing VLESS state (version 5, tombstone: true) syncs to white_internet with version 1 as applied."""
+    client_uuid = "88888888-9999-aaaa-bbbb-cccccccccccc"
+    raw_entries = {
+        client_uuid: {
+            "version": 5,
+            "tombstone": True,
+            "is_active": False,
+            "service_states": {
+                "vless": {
+                    "version": 5,
+                    "tombstone": True,
+                    "is_active": False,
+                }
+            },
+        }
+    }
+    client_store.save_client_entries(raw_entries)
+
+    with patch.object(grpc_client, "ensure_user_state", return_value=True):
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            with patch("app.get_target_inbounds", return_value=["inbound-de"]):
+                with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_iso"):
+                    res = client.post(
+                        "/v1/clients/sync",
+                        headers=VALID_HEADERS,
+                        json={
+                            "client_id": client_uuid,
+                            "desired_state": "active",
+                            "version": 1,
+                            "service": "white_internet",
+                        },
+                    )
+                    assert res.status_code == 200
+                    data = res.json()
+                    assert data["result"] == "applied"
+                    assert data["state"] == "active"
+                    assert data["version"] == 1
+                    assert data["service"] == "white_internet"
+                    assert data.get("fenced") is not True
+
+                    # Verify persisted client store has independent service states
+                    persisted = client_store.load_client_entries().get(client_uuid)
+                    assert persisted is not None
+                    assert persisted["service_states"]["vless"]["version"] == 5
+                    assert persisted["service_states"]["vless"]["tombstone"] is True
+                    assert persisted["service_states"]["white_internet"]["version"] == 1
+                    assert persisted["service_states"]["white_internet"]["is_active"] is True
+
+
+
 
 
 

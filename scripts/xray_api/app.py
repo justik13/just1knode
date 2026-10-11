@@ -1094,15 +1094,20 @@ async def _sync_client_internal(
         curr_entry = entries.get(client_uuid)
         if curr_entry:
             service_states = curr_entry.get("service_states")
-            if isinstance(service_states, dict) and effective_service in service_states:
-                svc_meta = service_states[effective_service]
-                curr_ver = svc_meta.get("version")
-                is_tombstone = svc_meta.get("tombstone", False)
-                curr_state = (
-                    "disabled"
-                    if is_tombstone
-                    else ("active" if svc_meta.get("is_active") else "disabled")
-                )
+            if isinstance(service_states, dict):
+                if effective_service in service_states:
+                    svc_meta = service_states[effective_service]
+                    curr_ver = svc_meta.get("version")
+                    is_tombstone = svc_meta.get("tombstone", False)
+                    curr_state = (
+                        "disabled"
+                        if is_tombstone
+                        else ("active" if svc_meta.get("is_active") else "disabled")
+                    )
+                else:
+                    curr_ver = None
+                    is_tombstone = False
+                    curr_state = "disabled"
             else:
                 curr_ver = curr_entry.get("version")
                 is_tombstone = curr_entry.get("tombstone", False)
