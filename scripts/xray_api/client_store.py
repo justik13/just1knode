@@ -275,7 +275,11 @@ class ClientStore:
             existing_entry = entries.get(client_uuid, {})
             curr_service_states = self._extract_or_migrate_service_states(existing_entry)
 
-            svc_name = self.canonicalize_service(service) or "vless"
+            svc_name = (
+                self.canonicalize_service(service)
+                or existing_entry.get("service")
+                or self._detect_default_service()
+            )
             svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
             new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
 
