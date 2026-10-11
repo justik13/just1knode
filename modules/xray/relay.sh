@@ -1888,20 +1888,36 @@ except Exception:
     fi
 
     if [[ -f "$XRAY_CONFIG" ]]; then
-        python3 -c "
-import json, os, sys
+        if ! python3 -c "
+import json, os, sys, tempfile
 cfg_file = sys.argv[1]
-if os.path.exists(cfg_file):
-    try:
-        with open(cfg_file, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
-        cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if ib.get('tag') != 'just1k-vless-direct']
-        with open(cfg_file, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-" "$XRAY_CONFIG" 2>/dev/null || true
+if not os.path.exists(cfg_file):
+    sys.exit(0)
+with open(cfg_file, 'r', encoding='utf-8') as f:
+    cfg = json.load(f)
+cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if ib.get('tag') != 'just1k-vless-direct']
+dir_name = os.path.dirname(cfg_file)
+with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8') as tf:
+    json.dump(cfg, tf, indent=2, ensure_ascii=False)
+    tf.flush()
+    os.fsync(tf.fileno())
+    tmp_path = tf.name
+os.replace(tmp_path, cfg_file)
+" "$XRAY_CONFIG"; then
+            error "Не удалось удалить inbound VLESS из конфигурации Xray ($XRAY_CONFIG)."
+            return 1
+        fi
         ensure_xray_config_permissions "$XRAY_CONFIG"
+        if ! python3 -c "
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    cfg = json.load(f)
+if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', [])):
+    sys.exit(1)
+" "$XRAY_CONFIG" 2>/dev/null; then
+            error "Ошибка верификации: inbound just1k-vless-direct остался в $XRAY_CONFIG."
+            return 1
+        fi
     fi
 
     ufw delete allow 443/tcp >/dev/null 2>&1 || true

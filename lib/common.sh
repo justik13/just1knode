@@ -502,6 +502,7 @@ heal_node_firewall_and_stealth() {
         return 0
     fi
 
+    migrate_legacy_state
     local role
     role="$(get_state_val "role" "")"
 
@@ -529,9 +530,9 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. AmneziaWG API (порты для ролей awg, node, либо при наличии has_awg/активного конфига amnezia)
+    # 3. AmneziaWG API (порты для ролей awg либо при наличии has_awg/активного конфига amnezia)
     local is_awg_node=0
-    if [[ "$role" == "awg" || "$role" == "node" || "$(get_state_val "has_awg" "0")" == "1" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+    if [[ "$role" == "awg" || "$(get_state_val "has_awg" "0")" == "1" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
         is_awg_node=1
     fi
 
@@ -597,8 +598,10 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 5. Relay туннель (роль relay, node или has_relay)
-    if [[ "$role" == "relay" || "$role" == "node" || "$(get_state_val "has_relay" "0")" == "1" ]]; then
+    # 5. Relay туннель (роль relay либо has_relay)
+    local cur_has_relay
+    cur_has_relay="$(get_state_val "has_relay" "0")"
+    if [[ "$role" == "relay" || "$cur_has_relay" == "1" ]]; then
         local relay_port origin_ip
         relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
         origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
@@ -623,16 +626,25 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 6. VLESS Direct и API (роль vless, node, либо при наличии has_vless)
+    # 6. VLESS Direct и API (роль vless либо has_vless)
     local cur_has_vless
     cur_has_vless="$(get_state_val "has_vless" "0")"
-    if [[ "$role" == "vless" || "$role" == "node" || "$cur_has_vless" == "1" ]]; then
+    if [[ "$role" == "vless" || "$cur_has_vless" == "1" || -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" ]]; then
         # Клиентский вход VLESS TLS на порту 443
         if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW" -q; then
             ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         fi
 
-        # Защита xray-api (порт 8444 активен только если поднят автономный virtual host 8444 и нет Amnezia reverse proxy)
+        # Гарантированно устраняем уязвимость: удаляем любое публичное Anywhere правило для 8444
+        if ! is_ssh_port "8444"; then
+            if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+                ufw delete allow 8444 >/dev/null 2>&1 || true
+                warn "Фаервол UFW: устранена уязвимость — удалено публичное правило на порт 8444."
+            fi
+        fi
+
+        # Защита xray-api (порт 8444 активен если есть just1k-vless-api.conf и не настроен Amnezia proxy)
         if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || ("$role" == "vless" && ! -f "/etc/nginx/sites-enabled/just1k-amnezia.conf") ]]; then
             local v_bot_ip
             v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"

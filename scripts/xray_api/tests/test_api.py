@@ -323,17 +323,17 @@ def test_client_sync_version_fencing():
         assert res.json().get("fenced") is True
         assert mock_add.call_count == 0  # Not executed!
 
-    # State transition (active -> disabled) overrides version fencing because central bot DB is SSOT
+    # Stale version (4 < 5) must be strictly fenced even if desired_state differs (active -> disabled)
     with patch.object(grpc_client, "remove_user", return_value=True) as mock_remove:
-        with patch.object(grpc_client, "verify_user_absent", return_value=True):
-            res_trans = client.post(
-                "/v1/clients/sync",
-                json={"client_id": uuid, "desired_state": "disabled", "version": 4},
-                headers=VALID_HEADERS,
-            )
-            assert res_trans.status_code == 200
-            assert res_trans.json()["result"] == "applied"
-            assert mock_remove.call_count == 2
+        res_trans = client.post(
+            "/v1/clients/sync",
+            json={"client_id": uuid, "desired_state": "disabled", "version": 4},
+            headers=VALID_HEADERS,
+        )
+        assert res_trans.status_code == 200
+        assert res_trans.json()["result"] == "already_newer"
+        assert res_trans.json().get("fenced") is True
+        assert mock_remove.call_count == 0
 
 
 def test_client_delete_version_fencing():
@@ -883,4 +883,43 @@ def test_epoch_change_invalidates_active_users_cache():
                 sync_active_users_with_epoch("epoch_333")
                 mock_restore.assert_not_called()
                 assert grpc_client._active_users_epoch == "epoch_222"
+
+
+def test_multi_service_state_isolation():
+    """Clients registered for multiple services maintain independent state and persist correctly."""
+    uuid = "44444444-5555-6666-7777-888888888888"
+
+    # Add for white_internet first
+    client_store.add_client(uuid, state="active", version=1, service="white_internet")
+    c = client_store.get_client(uuid)
+    assert c is not None
+    assert c["service_states"]["white_internet"]["state"] == "active"
+    assert c["service_states"]["white_internet"]["version"] == 1
+
+    # Add for vless next
+    client_store.add_client(uuid, state="active", version=2, service="vless")
+    c = client_store.get_client(uuid)
+    assert c["service_states"]["white_internet"]["state"] == "active"
+    assert c["service_states"]["vless"]["state"] == "active"
+    assert c["service_states"]["vless"]["version"] == 2
+
+    # Disable vless - white_internet must remain active
+    client_store.remove_client(uuid, version=3, service="vless")
+    c = client_store.get_client(uuid)
+    assert c["service_states"]["white_internet"]["state"] == "active"
+    assert c["service_states"]["vless"]["state"] == "disabled"
+    assert c["service_states"]["vless"]["version"] == 3
+
+    # Stale version for vless (version 2 < 3) rejected by client_store
+    assert client_store.remove_client(uuid, version=2, service="vless") is False
+
+    # Delete vless service only
+    client_store.delete_client(uuid, version=4, service="vless")
+    c = client_store.get_client(uuid)
+    assert "vless" not in c["service_states"]
+    assert c["service_states"]["white_internet"]["state"] == "active"
+
+    # Delete white_internet service -> entry completely removed
+    client_store.delete_client(uuid, version=5, service="white_internet")
+    assert client_store.get_client(uuid) is None
 

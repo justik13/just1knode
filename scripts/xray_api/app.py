@@ -334,6 +334,7 @@ def get_all_managed_inbounds() -> List[str]:
 
     # 2. Read from Xray config.json if available
     config_tags: List[str] = []
+    config_read_ok = False
     if XRAY_CONFIG_PATH.exists():
         try:
             with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -348,6 +349,7 @@ def get_all_managed_inbounds() -> List[str]:
                         or tag in ("just1k-wl-default", "inbound-default", "just1k-vless-direct")
                     ):
                         config_tags.append(tag)
+                config_read_ok = True
         except Exception as e:
             logger.warning("Could not load inbounds from %s: %s", XRAY_CONFIG_PATH, e)
 
@@ -362,8 +364,8 @@ def get_all_managed_inbounds() -> List[str]:
     if not discovered_tags and relay_tags:
         discovered_tags = list(relay_tags)
 
-    # Invariant: Origin nodes that host relays or have role 'origin' must always manage just1k-wl-default,
-    # ensuring fallback survival even if reading config.json encounters permission errors or locks.
+    # Invariant: Origin nodes that host relays or have role 'origin' only use fallback just1k-wl-default
+    # if config.json was unreadable or completely missing managed inbounds.
     is_origin_node = bool(relay_tags)
     if not is_origin_node and STATE_FILE_PATH.exists():
         try:
@@ -373,7 +375,7 @@ def get_all_managed_inbounds() -> List[str]:
                     is_origin_node = True
         except Exception:
             pass
-    if is_origin_node and "just1k-wl-default" not in discovered_tags:
+    if is_origin_node and (not config_read_ok or not config_tags) and "just1k-wl-default" not in discovered_tags:
         discovered_tags.insert(0, "just1k-wl-default")
 
     # 3. Fallback to environment override (for mock/test environments without real config files)
@@ -387,13 +389,29 @@ def get_all_managed_inbounds() -> List[str]:
     return discovered_tags
 
 
+def resolve_effective_service(service: Optional[str] = None) -> str:
+    """Deterministically resolves the canonical service namespace ('vless' or 'white_internet')."""
+    if service:
+        s = str(service).strip().lower()
+        if s in ("wl", "white_internet"):
+            return "white_internet"
+        if s in ("vless", "xray_vless"):
+            return "vless"
+        return s
+    discovered = get_all_managed_inbounds()
+    if any(t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default") for t in discovered):
+        return "white_internet"
+    return "vless"
+
+
 def get_target_inbounds(service: Optional[str] = None) -> List[str]:
     """Dynamically discover configured Just1k inbounds strictly filtering by service."""
     discovered_tags = get_all_managed_inbounds()
 
-    if service == "vless":
+    effective = resolve_effective_service(service) if service is not None else None
+    if effective == "vless":
         return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
-    if service in ("white_internet", "wl"):
+    if effective == "white_internet":
         return [t for t in discovered_tags if t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")]
 
     # If service is unspecified, do not mix namespaces:
@@ -428,6 +446,7 @@ client_store = ClientStore(CLIENTS_FILE_PATH)
 node_sync_state: Dict[str, Any] = {
     "status": "unsynchronized",
     "last_synced_at": None,
+    "last_client_sync_at": None,
 }
 
 
@@ -451,15 +470,24 @@ def restore_persisted_clients_to_xray() -> int:
     restored_unique = 0
     restored_registrations = 0
     for client_uuid, meta in entries.items():
-        if not meta.get("is_active", True) or meta.get("tombstone", False):
+        if not isinstance(meta, dict):
             continue
-        services = meta.get("services")
-        if not services:
-            svc = meta.get("service")
-            services = [svc] if svc else [None]
+        service_states = meta.get("service_states")
+        if isinstance(service_states, dict) and service_states:
+            active_services = [
+                s for s, st in service_states.items()
+                if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+        else:
+            if not meta.get("is_active", True) or meta.get("tombstone", False):
+                continue
+            active_services = meta.get("services") or ([meta.get("service")] if meta.get("service") else [None])
+
+        if not active_services:
+            continue
 
         target_inbounds: List[str] = []
-        for s in services:
+        for s in active_services:
             for tag in get_target_inbounds(service=s):
                 if tag not in target_inbounds:
                     target_inbounds.append(tag)
@@ -983,9 +1011,16 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
                 if not current_epoch and epoch_manager:
                     current_epoch = epoch_manager.load_state().get("node_epoch")
 
+                effective_svc = resolve_effective_service(req.service)
                 client_id_matches = cached.get("client_id") == client_uuid
+                state_matches = cached.get("state") == desired_state
+                version_matches = (req.version is None) or (cached.get("version") == req.version)
+                service_matches = cached.get("service") in (effective_svc, None) or req.service is None
                 epoch_valid = (
                     client_id_matches
+                    and state_matches
+                    and version_matches
+                    and service_matches
                     and bool(cached_epoch)
                     and (cached_epoch == current_epoch)
                     and (not req.expected_node_epoch or cached_epoch == req.expected_node_epoch)
@@ -1010,7 +1045,8 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
 async def _sync_client_internal(
     req: ClientSyncRequest, client_uuid: str, desired_state: str
 ) -> Dict[str, Any]:
-    target_inbounds = get_target_inbounds(service=req.service)
+    effective_service = resolve_effective_service(req.service)
+    target_inbounds = get_target_inbounds(service=effective_service)
     if not target_inbounds:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1039,7 +1075,7 @@ async def _sync_client_internal(
             detail=f"Epoch fencing failed (pre-mutation): expected {req.expected_node_epoch} != current {epoch_before}",
         )
 
-    # Monotonic version fencing check (including tombstones)
+    # Monotonic version fencing check strictly scoped to target service
     curr_ver: Optional[int] = None
     if req.version is not None:
         try:
@@ -1053,13 +1089,24 @@ async def _sync_client_internal(
 
         curr_entry = entries.get(client_uuid)
         if curr_entry:
-            curr_ver = curr_entry.get("version")
-            is_tombstone = curr_entry.get("tombstone", False)
-            curr_state = (
-                "disabled"
-                if is_tombstone
-                else ("active" if curr_entry.get("is_active") else "disabled")
-            )
+            service_states = curr_entry.get("service_states")
+            if isinstance(service_states, dict) and effective_service in service_states:
+                svc_meta = service_states[effective_service]
+                curr_ver = svc_meta.get("version")
+                is_tombstone = svc_meta.get("tombstone", False)
+                curr_state = (
+                    "disabled"
+                    if is_tombstone
+                    else ("active" if svc_meta.get("is_active") else "disabled")
+                )
+            else:
+                curr_ver = curr_entry.get("version")
+                is_tombstone = curr_entry.get("tombstone", False)
+                curr_state = (
+                    "disabled"
+                    if is_tombstone
+                    else ("active" if curr_entry.get("is_active") else "disabled")
+                )
 
             # Idempotent retry: exact same version and same desired_state already applied!
             if curr_ver is not None and req.version == curr_ver and curr_state == desired_state:
@@ -1080,8 +1127,9 @@ async def _sync_client_internal(
 
                 if inbounds_healthy:
                     logger.info(
-                        "Idempotent retry for %s: version %d already in desired_state %s across all inbounds",
+                        "Idempotent retry for %s (%s): version %d already in desired_state %s across all inbounds",
                         _mask_uuid(client_uuid),
+                        effective_service,
                         req.version,
                         desired_state,
                     )
@@ -1091,6 +1139,7 @@ async def _sync_client_internal(
                         "result": "applied",
                         "state": curr_state,
                         "version": curr_ver,
+                        "service": effective_service,
                         "verified_epoch": epoch_before,
                         "verified_inbounds": target_inbounds,
                         "all_inbounds_verified": True,
@@ -1103,51 +1152,48 @@ async def _sync_client_internal(
                     target_inbounds,
                 )
 
+            # Strict Monotonic Version Fencing (prevents delayed stale requests from reactivating revoked clients)
             if curr_ver is not None and (
-                req.version < curr_ver or (is_tombstone and req.version <= curr_ver)
+                req.version < curr_ver
+                or (req.version == curr_ver and desired_state != curr_state)
+                or (is_tombstone and req.version <= curr_ver)
             ):
-                if not is_tombstone and desired_state != curr_state:
-                    logger.info(
-                        "Sync request state transition (%s -> %s) overrides version fencing for %s (incoming %d < stored %d). Central bot DB is SSOT.",
-                        curr_state,
-                        desired_state,
-                        _mask_uuid(client_uuid),
-                        req.version,
-                        curr_ver,
-                    )
-                else:
-                    logger.warning(
-                        "Stale sync request for %s: incoming version %d <= stored version %d (tombstone=%s). Fencing.",
-                        _mask_uuid(client_uuid),
-                        req.version,
-                        curr_ver,
-                        is_tombstone,
-                    )
-                    verified_inbounds: List[str] = []
-                    for tag in target_inbounds:
-                        try:
-                            if curr_state == "active" and not is_tombstone:
-                                if grpc_client.probe_user_presence(tag, client_uuid):
-                                    verified_inbounds.append(tag)
-                            else:
-                                if grpc_client.verify_user_absent(tag, client_uuid):
-                                    verified_inbounds.append(tag)
-                        except Exception:
-                            pass
-                    all_verified = (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0
-                    return {
-                        "status": "ok",
-                        "client_id": client_uuid,
-                        "result": "already_newer",
-                        "state": curr_state,
-                        "version": curr_ver,
-                        "verified_epoch": epoch_before,
-                        "verified_inbounds": verified_inbounds,
-                        "all_inbounds_verified": all_verified,
-                        "fenced": True,
-                        "tombstone": is_tombstone,
-                        "inbounds": target_inbounds,
-                    }
+                logger.warning(
+                    "Stale or conflicting sync request for %s (%s): incoming version %d <= stored version %d (curr_state=%s, desired_state=%s, tombstone=%s). Fencing.",
+                    _mask_uuid(client_uuid),
+                    effective_service,
+                    req.version,
+                    curr_ver,
+                    curr_state,
+                    desired_state,
+                    is_tombstone,
+                )
+                verified_inbounds: List[str] = []
+                for tag in target_inbounds:
+                    try:
+                        if curr_state == "active" and not is_tombstone:
+                            if grpc_client.probe_user_presence(tag, client_uuid):
+                                verified_inbounds.append(tag)
+                        else:
+                            if grpc_client.verify_user_absent(tag, client_uuid):
+                                verified_inbounds.append(tag)
+                    except Exception:
+                        pass
+                all_verified = (len(verified_inbounds) == len(target_inbounds)) and len(target_inbounds) > 0
+                return {
+                    "status": "ok",
+                    "client_id": client_uuid,
+                    "result": "already_newer",
+                    "state": curr_state,
+                    "version": curr_ver,
+                    "service": effective_service,
+                    "verified_epoch": epoch_before,
+                    "verified_inbounds": verified_inbounds,
+                    "all_inbounds_verified": all_verified,
+                    "fenced": True,
+                    "tombstone": is_tombstone,
+                    "inbounds": target_inbounds,
+                }
 
     # Capture initial runtime state before mutations for deterministic rollback
     initial_states: Dict[str, str] = {}
@@ -1250,7 +1296,7 @@ async def _sync_client_internal(
             detail=f"Postcondition verification failed: inbounds {unverified_inbounds} unverified for state {desired_state}",
         )
 
-    # Update local persistent client store with monotonic version
+    # Update local persistent client store with monotonic version scoped to service
     effective_ver = (
         max(curr_ver or 0, req.version or 0)
         if curr_ver is not None and req.version is not None
@@ -1259,10 +1305,10 @@ async def _sync_client_internal(
     try:
         if desired_state == "active":
             client_store.add_client(
-                client_uuid, version=effective_ver, email=req.email, service=req.service
+                client_uuid, version=effective_ver, email=req.email, service=effective_service
             )
         else:
-            client_store.remove_client(client_uuid, version=effective_ver, service=req.service)
+            client_store.remove_client(client_uuid, version=effective_ver, service=effective_service)
     except Exception as e:
         logger.error("Failed to persist client state to disk: %s", e)
         # Rollback Xray RAM state to exact initial states so RAM does not diverge from disk
@@ -1284,9 +1330,9 @@ async def _sync_client_internal(
             detail=f"Failed to persist client state: {str(e)}",
         ) from e
 
-    # Update synchronization state
-    node_sync_state["status"] = "synchronized"
+    # Update synchronization state (record client operation timestamp, keep status until complete sweep)
     node_sync_state["last_synced_at"] = time.time()
+    node_sync_state["last_client_sync_at"] = time.time()
 
     resp = {
         "status": "ok",
@@ -1294,6 +1340,7 @@ async def _sync_client_internal(
         "result": "applied",
         "state": desired_state,
         "version": req.version,
+        "service": effective_service,
         "verified_epoch": epoch_after,
         "verified_inbounds": verified_inbounds,
         "all_inbounds_verified": True,
