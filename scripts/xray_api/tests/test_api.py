@@ -913,7 +913,8 @@ def test_multi_service_state_isolation():
     # Delete vless service only
     client_store.delete_client(uuid, version=4, service="vless")
     c = client_store.load_client_entries().get(uuid)
-    assert "vless" not in c["service_states"]
+    assert c["service_states"]["vless"]["tombstone"] is True
+    assert c["service_states"]["vless"]["is_active"] is False
     assert c["service_states"]["white_internet"]["is_active"] is True
 
     # Delete white_internet service -> entry tombstoned or completely removed
