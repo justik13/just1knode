@@ -1335,7 +1335,6 @@ async def _sync_client_internal(
         ) from e
 
     # Update synchronization state
-    node_sync_state["status"] = "synchronized"
     node_sync_state["last_synced_at"] = time.time()
     node_sync_state["last_client_sync_at"] = time.time()
 

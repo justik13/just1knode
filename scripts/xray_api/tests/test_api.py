@@ -970,3 +970,64 @@ def test_inventory_service_scoped_evaluation():
                 assert res_wl.json()["inventory"][client_uuid]["observed_state"] == "active"
 
 
+def test_client_sync_does_not_mark_node_sync_state_synchronized():
+    """P2.3: Single client sync updates timestamps but does NOT change global node_sync_state to synchronized."""
+    node_sync_state["status"] = "unsynchronized"
+    node_sync_state["last_synced_at"] = None
+    node_sync_state["last_client_sync_at"] = None
+
+    uuid = "99999999-8888-7777-6666-555555555555"
+    with patch.object(grpc_client, "ensure_user_state", return_value=True):
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            res = client.post(
+                "/v1/clients/sync",
+                json={"client_id": uuid, "desired_state": "active", "version": 1},
+                headers=VALID_HEADERS,
+            )
+            assert res.status_code == 200
+            assert node_sync_state["status"] == "unsynchronized"
+            assert node_sync_state["last_synced_at"] is not None
+            assert node_sync_state["last_client_sync_at"] is not None
+
+
+def test_legacy_client_migration_defaults_to_vless(tmp_path):
+    """P2.8: Legacy entry without services or service field migrates with default service 'vless'."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid = "33333333-2222-1111-0000-aaaaaaaaaaaa"
+    # Write raw legacy entry with only is_active and version
+    raw_entries = {
+        uuid: {
+            "is_active": True,
+            "version": 5,
+        }
+    }
+    store.save_client_entries(raw_entries)
+
+    # Calling add_client for a new service or same triggers migration
+    store.add_client(uuid, version=6, service="vless")
+    loaded = store.load_client_entries().get(uuid)
+    assert loaded is not None
+    assert "vless" in loaded["service_states"]
+    assert loaded["service_states"]["vless"]["is_active"] is True
+    assert loaded["service_states"]["vless"]["version"] == 6
+
+    # Verify removing another legacy entry without services deactivates default 'vless'
+    uuid2 = "77777777-6666-5555-4444-bbbbbbbbbbbb"
+    raw_entries2 = {
+        uuid2: {
+            "is_active": True,
+            "version": 2,
+        }
+    }
+    store.save_client_entries(raw_entries2)
+    store.remove_client(uuid2, version=3, service="vless")
+    loaded2 = store.load_client_entries().get(uuid2)
+    assert loaded2 is not None
+    assert "vless" in loaded2["service_states"]
+    assert loaded2["service_states"]["vless"]["is_active"] is False
+
+
+

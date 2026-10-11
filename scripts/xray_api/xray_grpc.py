@@ -147,7 +147,8 @@ class XrayGrpcClient:
         """Strictly non-destructive presence check via synchronized in-memory set (_active_users).
 
         Because Xray core HandlerService lacks a ListUsers/QueryUser gRPC RPC, tracking is maintained
-        via an authoritative local in-memory registry synchronized across add_user and remove_user calls.
+        via a synchronized local cache (_active_users) updated on successful AlterInbound calls
+        and restored upon Xray core restarts based on epoch tracking.
         """
         return (inbound_tag, user_id) in self._active_users
 

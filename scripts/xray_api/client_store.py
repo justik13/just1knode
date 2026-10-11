@@ -194,6 +194,8 @@ class ClientStore:
                     legacy_services = [legacy_services] if legacy_services else []
                 if "service" in existing_entry and existing_entry["service"] not in legacy_services:
                     legacy_services.append(existing_entry["service"])
+                if not legacy_services:
+                    legacy_services = ["vless"]
                 legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
                 legacy_ver = existing_entry.get("version", 0)
                 legacy_tomb = bool(existing_entry.get("tombstone", False))
@@ -257,6 +259,8 @@ class ClientStore:
                     legacy_services = [legacy_services] if legacy_services else []
                 if "service" in existing_entry and existing_entry["service"] not in legacy_services:
                     legacy_services.append(existing_entry["service"])
+                if not legacy_services:
+                    legacy_services = ["vless"]
                 legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
                 legacy_ver = existing_entry.get("version", 0)
                 legacy_tomb = bool(existing_entry.get("tombstone", False))
@@ -328,6 +332,23 @@ class ClientStore:
             curr_service_states = existing_entry.get("service_states")
             if not isinstance(curr_service_states, dict):
                 curr_service_states = {}
+                legacy_services = existing_entry.get("services") or []
+                if not isinstance(legacy_services, list):
+                    legacy_services = [legacy_services] if legacy_services else []
+                if "service" in existing_entry and existing_entry["service"] not in legacy_services:
+                    legacy_services.append(existing_entry["service"])
+                if not legacy_services:
+                    legacy_services = ["vless"]
+                legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
+                legacy_ver = existing_entry.get("version", 0)
+                legacy_tomb = bool(existing_entry.get("tombstone", False))
+                for s in legacy_services:
+                    canon_s = self.canonicalize_service(s) or s
+                    curr_service_states[canon_s] = {
+                        "is_active": legacy_act,
+                        "version": legacy_ver,
+                        "tombstone": legacy_tomb,
+                    }
             svc_name = self.canonicalize_service(service)
             if svc_name:
                 svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
