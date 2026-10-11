@@ -384,6 +384,13 @@ setup_xray_api_proxy() {
     # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx Amnezia
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
     if [[ -f "$amnezia_nginx" ]] && ! grep -q "location /v1/" "$amnezia_nginx"; then
+        mkdir -p /etc/nginx/conf.d
+        if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
+            cat > "/etc/nginx/conf.d/amnezia-ratelimit.conf" <<'EOF'
+# JUST1KNODE: AmneziaWG API Rate Limiting Zone
+limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;
+EOF
+        fi
         python3 -c "
 import sys
 path = sys.argv[1]
@@ -643,7 +650,7 @@ print('[]')
     \"network\": \"tcp\",
     \"security\": \"tls\",
     \"tlsSettings\": {
-      \"alpn\": [\"h2\", \"http/1.1\"],
+      \"alpn\": [\"http/1.1\"],
       \"certificates\": [
         {
           \"certificateFile\": \"/usr/local/etc/xray/tls/vless_fullchain.pem\",
@@ -658,6 +665,7 @@ print('[]')
     local cur_has_vless
     cur_has_vless="$(get_state_val "has_vless" "0")"
     if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
+        deploy_vless_fallback_nginx
         direct_inbound_json=",
     {
       \"tag\": \"just1k-vless-direct\",
@@ -665,7 +673,12 @@ print('[]')
       \"protocol\": \"vless\",
       \"settings\": {
         \"clients\": ${existing_vless_clients_json},
-        \"decryption\": \"none\"
+        \"decryption\": \"none\",
+        \"fallbacks\": [
+          {
+            \"dest\": 80
+          }
+        ]
       },
       \"streamSettings\": ${vless_stream_settings_json},
       \"sniffing\": {

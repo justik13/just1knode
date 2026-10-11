@@ -1680,6 +1680,36 @@ main_menu() {
     done
 }
 
+heal_node_config() {
+    local role
+    role="$(get_state_val "role")"
+    if [[ "$role" == "origin" ]]; then
+        heal_and_update_origin_config
+    elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
+        heal_and_update_relay_config
+    elif [[ "$role" == "node" ]]; then
+        local has_v has_r has_a
+        has_v="$(get_state_val "has_vless" "0")"
+        has_r="$(get_state_val "has_relay" "0")"
+        has_a="$(get_state_val "has_awg" "0")"
+        if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
+            heal_and_update_relay_config
+        fi
+        if [[ "$has_a" == "1" ]]; then
+            ensure_amnezia_api_service_and_env
+            apply_amnezia_abuse_protection
+        fi
+        heal_node_firewall_and_stealth
+        log "Конфигурация модульного узла актуализирована."
+    elif [[ "$role" == "awg" ]]; then
+        apply_amnezia_abuse_protection
+        heal_node_firewall_and_stealth
+        log "Сетевая защита AmneziaWG актуализирована."
+    else
+        error "Узел не настроен."
+    fi
+}
+
 # --- Точка входа CLI ---
 if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
     if [[ $# -eq 0 ]]; then
@@ -1762,6 +1792,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             status) show_status ;;
             doctor|test) run_doctor ;;
+            heal) heal_node_config ;;
             set-bot-ip|bot-ip)
                 set_origin_bot_ip "${2:-}"
                 ;;
@@ -1781,35 +1812,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             update)
                 case "${2:-}" in
                     core|xray) update_xray_core ;;
-                    config|heal)
-                        role="$(get_state_val "role")"
-                        if [[ "$role" == "origin" ]]; then
-                            heal_and_update_origin_config
-                        elif [[ "$role" == "relay" ]]; then
-                            heal_and_update_relay_config
-                        elif [[ "$role" == "vless" ]]; then
-                            heal_and_update_relay_config
-                        elif [[ "$role" == "node" ]]; then
-                            has_v="$(get_state_val "has_vless" "0")"
-                            has_r="$(get_state_val "has_relay" "0")"
-                            has_a="$(get_state_val "has_awg" "0")"
-                            if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
-                                heal_and_update_relay_config
-                            fi
-                            if [[ "$has_a" == "1" ]]; then
-                                ensure_amnezia_api_service_and_env
-                                apply_amnezia_abuse_protection
-                            fi
-                            heal_node_firewall_and_stealth
-                            log "Конфигурация модульного узла актуализирована."
-                        elif [[ "$role" == "awg" ]]; then
-                            apply_amnezia_abuse_protection
-                            heal_node_firewall_and_stealth
-                            log "Сетевая защита AmneziaWG актуализирована."
-                        else
-                            error "Узел не настроен."
-                        fi
-                        ;;
+                    config|heal) heal_node_config ;;
                     *) update_node "${2:-all}" ;;
                 esac
                 ;;

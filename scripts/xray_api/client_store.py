@@ -222,9 +222,9 @@ class ClientStore:
                         t.startswith("just1k-vless-") or t == "just1k-vless-direct"
                         for t in tags
                     )
-                    if has_wl and not has_vless:
+                    if has_wl:
                         return "white_internet"
-                    if has_vless and not has_wl:
+                    if has_vless:
                         return "vless"
             except Exception:
                 pass
