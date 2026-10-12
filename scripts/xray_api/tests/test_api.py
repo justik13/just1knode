@@ -1220,8 +1220,6 @@ def test_delete_client_invalidates_idempotency_cache():
 
 def test_health_self_heals_clients_on_epoch_drift():
     """Verify GET /v1/health triggers sync_active_users_with_epoch when running epoch changes."""
-    from app import sync_active_users_with_epoch
-
     with (
         patch.object(grpc_client, "is_healthy", return_value=True),
         patch.object(

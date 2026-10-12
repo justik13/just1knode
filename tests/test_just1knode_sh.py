@@ -3637,7 +3637,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         self.assertIn('local xray_cache_dest="${node_dir}/scripts/xray_api"', core_sh)
-        self.assertIn('archive_urls+=("${repo_url}/archive/refs/tags/${ref}.tar.gz")', core_sh)
+        self.assertIn('"${repo_url}/archive/refs/tags/${ref}.tar.gz"', core_sh)
 
     def test_select_relay_domain_non_interactive_guard(self):
         """Verify select_relay_domain_interactive guards against blocking read under non-interactive update."""
