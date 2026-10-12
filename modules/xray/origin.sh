@@ -378,6 +378,13 @@ rules.append({
     'outboundTag': 'just1k-wl-api'
 })
 
+# Запрет доступа к приватным и локальным адресам (SSRF, gRPC сокет 10085, cloud metadata)
+rules.append({
+    'type': 'field',
+    'ip': ['geoip:private'],
+    'outboundTag': 'just1k-wl-block'
+})
+
 # Запрет BitTorrent (P2P трафик) на уровне ядра Xray
 rules.append({
     'type': 'field',
@@ -1086,6 +1093,14 @@ if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag
     rules.insert(1, {
         'type': 'field',
         'port': '25',
+        'outboundTag': 'just1k-wl-block'
+    })
+
+# 4.1d. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
+if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
+    rules.insert(1, {
+        'type': 'field',
+        'ip': ['geoip:private'],
         'outboundTag': 'just1k-wl-block'
     })
 

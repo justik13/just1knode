@@ -544,8 +544,9 @@ exit 0
                 self.assertFalse(ib["sniffing"]["routeOnly"])
                 self.assertIn("quic", ib["sniffing"]["destOverride"])
 
-        # 5. Check BitTorrent and SMTP:25 blocking rules on Origin
+        # 5. Check geoip:private, BitTorrent and SMTP:25 blocking rules on Origin
         origin_rules = updated["routing"]["rules"]
+        self.assertTrue(any(r.get("ip") == ["geoip:private"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "geoip:private block rule must be present on Origin")
         self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
 
@@ -2315,8 +2316,9 @@ ensure_xrayapi_user
         else:
             self.assertTrue(bool(st & 0o600))
 
-        # Verify BitTorrent and SMTP:25 filtering and blackhole block outbound injected
+        # Verify geoip:private, BitTorrent and SMTP:25 filtering and blackhole block outbound injected
         rules = updated_cfg.get("routing", {}).get("rules", [])
+        self.assertTrue(any("geoip:private" in r.get("ip", []) and r.get("outboundTag") == "block" for r in rules), "geoip:private block rule must be present on Relay")
         self.assertTrue(any("bittorrent" in r.get("protocol", []) for r in rules), "BitTorrent protocol rule must be present")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "block" for r in rules), "SMTP:25 block rule must be present on Relay")
         self.assertTrue(any(ob.get("tag") == "block" and ob.get("protocol") == "blackhole" for ob in updated_cfg.get("outbounds", [])), "Blackhole outbound must be present")
@@ -3515,8 +3517,10 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'geosite:category-ru'", origin_sh)
         self.assertIn("'geosite:tld-ru'", origin_sh)
         self.assertIn("'outboundTag': 'just1k-wl-direct'", origin_sh)
+        self.assertIn("'geoip:private'", origin_sh)
         self.assertIn("insert_idx = rules.index(dom_rule) + 1", relays_manage_sh)
         self.assertIn("'geosite:category-ru'", relays_manage_sh)
+        self.assertIn("'geoip:private'", relays_manage_sh)
 
     def test_state_and_watchdog_locks_use_o_nofollow_and_fchmod(self):
         """Invariant: state.sh, traffic_watchdog.sh and traffic_watchdog.py must use O_NOFOLLOW and fd-based fchmod."""

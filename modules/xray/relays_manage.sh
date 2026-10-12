@@ -392,9 +392,18 @@ for r in rules:
             if isinstance(existing_ib, list):
                 r['inboundTag'] = [t for t in existing_ib if str(t).strip().lower() not in target_tags]
 
+# Запрет доступа к приватным и локальным адресам (SSRF, gRPC сокет 10085, cloud metadata)
+insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
+if not any(r.get('ip') == ['geoip:private'] for r in rules):
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'ip': ['geoip:private'],
+        'outboundTag': 'just1k-wl-block'
+    })
+
 # Запрет BitTorrent (P2P трафик)
 if not any(r.get('protocol') == ['bittorrent'] for r in rules):
-    rules.insert(0, {
+    rules.insert(insert_pos, {
         'type': 'field',
         'protocol': ['bittorrent'],
         'outboundTag': 'just1k-wl-block'
@@ -402,7 +411,7 @@ if not any(r.get('protocol') == ['bittorrent'] for r in rules):
 
 # Запрет SMTP (порт 25)
 if not any((r.get('port') == '25' or r.get('port') == 25) for r in rules):
-    rules.insert(0, {
+    rules.insert(insert_pos, {
         'type': 'field',
         'port': '25',
         'outboundTag': 'just1k-wl-block'

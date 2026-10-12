@@ -762,6 +762,13 @@ print('[]')
       },
       {
         "type": "field",
+        "ip": [
+          "geoip:private"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
         "protocol": [
           "bittorrent"
         ],
@@ -1535,16 +1542,24 @@ if not has_block:
 routing = cfg.setdefault('routing', {})
 routing.setdefault('domainStrategy', 'IPIfNonMatch')
 rules = routing.setdefault('rules', [])
+insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
+has_geoip_private = any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) for r in rules)
+if not has_geoip_private:
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'ip': ['geoip:private'],
+        'outboundTag': 'block'
+    })
 has_bt_proto = any(r.get('type') == 'field' and 'bittorrent' in r.get('protocol', []) for r in rules)
 if not has_bt_proto:
-    rules.insert(0, {
+    rules.insert(insert_pos, {
         'type': 'field',
         'protocol': ['bittorrent'],
         'outboundTag': 'block'
     })
 has_smtp_port = any(r.get('type') == 'field' and (r.get('port') == '25' or r.get('port') == 25) for r in rules)
 if not has_smtp_port:
-    rules.insert(0, {
+    rules.insert(insert_pos, {
         'type': 'field',
         'port': '25',
         'outboundTag': 'block'
@@ -1746,6 +1761,7 @@ if not cfg:
             'domainStrategy': 'IPIfNonMatch',
             'rules': [
                 {'type': 'field', 'inboundTag': ['just1k-wl-api-grpc'], 'outboundTag': 'api'},
+                {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'},
                 {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
                 {'type': 'field', 'port': '25', 'outboundTag': 'block'}
             ]
