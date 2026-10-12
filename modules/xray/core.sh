@@ -163,17 +163,24 @@ update_node() {
     local tmp_dir
     tmp_dir="$(mktemp -d /tmp/just1knode_update_dir.XXXXXX 2>/dev/null || mktemp -d)"
 
-    local archive_url
+    local archive_urls=()
     if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-        archive_url="${repo_url}/archive/${ref}.tar.gz"
+        archive_urls+=("${repo_url}/archive/${ref}.tar.gz")
     else
-        archive_url="${repo_url}/archive/refs/heads/${ref}.tar.gz"
+        archive_urls+=(
+            "${repo_url}/archive/${ref}.tar.gz"
+            "${repo_url}/archive/refs/tags/${ref}.tar.gz"
+            "${repo_url}/archive/refs/heads/${ref}.tar.gz"
+        )
     fi
 
     local download_ok=0
-    if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null || wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
-        download_ok=1
-    fi
+    for archive_url in "${archive_urls[@]}"; do
+        if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null || wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
+            download_ok=1
+            break
+        fi
+    done
 
     if [[ $download_ok -eq 1 ]]; then
         if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 --no-same-owner 2>/dev/null; then
@@ -409,6 +416,25 @@ update_node() {
                         fi
                     fi
                     rm -rf "$cache_staging"
+                fi
+                if [[ -f "${tmp_dir}/scripts/xray_api/app.py" && \
+                      -f "${tmp_dir}/scripts/xray_api/requirements.txt" && \
+                      -f "${tmp_dir}/scripts/xray_api/xray-api.service" ]]; then
+                    local xray_cache_staging="${node_dir}/scripts/.xray_api_stage_$$"
+                    local xray_cache_dest="${node_dir}/scripts/xray_api"
+                    rm -rf "$xray_cache_staging"
+                    mkdir -p "$xray_cache_staging"
+                    if cp -a "${tmp_dir}/scripts/xray_api/." "$xray_cache_staging/" 2>/dev/null; then
+                        if [[ -f "${xray_cache_staging}/app.py" && \
+                              -f "${xray_cache_staging}/requirements.txt" && \
+                              -f "${xray_cache_staging}/xray-api.service" ]]; then
+                            rm -rf "${xray_cache_dest}.old"
+                            [[ -d "$xray_cache_dest" ]] && mv "$xray_cache_dest" "${xray_cache_dest}.old" 2>/dev/null || true
+                            mv "$xray_cache_staging" "$xray_cache_dest" 2>/dev/null || true
+                            rm -rf "${xray_cache_dest}.old"
+                        fi
+                    fi
+                    rm -rf "$xray_cache_staging"
                 fi
                 log "Модули ${node_dir} успешно обновлены и проверены."
             fi

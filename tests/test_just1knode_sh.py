@@ -3633,6 +3633,18 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("just1k-vless-api.conf", common_sh)
         self.assertIn("just1k-amnezia.conf", common_sh)
 
+    def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
+        """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        self.assertIn('local xray_cache_dest="${node_dir}/scripts/xray_api"', core_sh)
+        self.assertIn('archive_urls+=("${repo_url}/archive/refs/tags/${ref}.tar.gz")', core_sh)
+
+    def test_select_relay_domain_non_interactive_guard(self):
+        """Verify select_relay_domain_interactive guards against blocking read under non-interactive update."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('JUST1KNODE_NON_INTERACTIVE', relay_sh)
+        self.assertIn('! -t 0', relay_sh)
+
 
 if __name__ == "__main__":
     unittest.main()

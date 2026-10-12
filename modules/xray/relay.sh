@@ -1012,6 +1012,10 @@ select_relay_domain_interactive() {
             return 0
         fi
         # Нестыковка: текущий SNI отличается от единственного валидного кандидата
+        if [[ ! -t 0 || "${JUST1KNODE_NON_INTERACTIVE:-0}" == "1" || "${DEBIAN_FRONTEND:-}" == "noninteractive" ]]; then
+            echo "${candidates[0]}"
+            return 0
+        fi
         warn "ВНИМАНИЕ: Текущий домен '$cur_sni' отличается от найденного валидного сертификата '${candidates[0]}'." >&2
         local ans=""
         read -rp "Использовать '${candidates[0]}' для Relay? [Y/n]: " ans
@@ -1061,6 +1065,11 @@ select_relay_domain_interactive() {
     if [[ $has_cur_sni -eq 1 ]]; then
         default_idx=$((cur_sni_idx + 1))
         default_domain="$cur_sni"
+    fi
+
+    if [[ ! -t 0 || "${JUST1KNODE_NON_INTERACTIVE:-0}" == "1" || "${DEBIAN_FRONTEND:-}" == "noninteractive" ]]; then
+        echo "$default_domain"
+        return 0
     fi
 
     local chosen_domain=""

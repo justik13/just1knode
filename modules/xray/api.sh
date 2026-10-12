@@ -50,15 +50,26 @@ deploy_xray_api_sources() {
         tmp_tar="$(mktemp /tmp/just1k_repo.XXXXXX.tar.gz 2>/dev/null || mktemp)"
         local tmp_extracted
         tmp_extracted="$(mktemp -d /tmp/just1k_extracted.XXXXXX 2>/dev/null || mktemp -d)"
-        local archive_url
-        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            archive_url="${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
+        local archive_urls=()
+        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            archive_urls+=("${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz")
         else
-            archive_url="${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
+            archive_urls+=(
+                "${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
+                "${JUST1KNODE_REPO_URL}/archive/refs/tags/${JUST1KNODE_REF}.tar.gz"
+                "${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
+            )
         fi
-        if ! curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
+        local download_ok=0
+        for archive_url in "${archive_urls[@]}"; do
+            if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
+                download_ok=1
+                break
+            fi
+        done
+        if [[ $download_ok -ne 1 ]]; then
             rm -rf "$tmp_tar" "$tmp_extracted"
-            error "Не удалось загрузить архив репозитория для развертывания xray-api ($archive_url)."
+            error "Не удалось загрузить архив репозитория для развертывания xray-api ($JUST1KNODE_REF)."
             return 1
         fi
 

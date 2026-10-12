@@ -433,6 +433,13 @@ def get_all_managed_inbounds() -> List[str]:
     return discovered_tags
 
 
+def is_wl_inbound_tag(t: str) -> bool:
+    """Check if tag belongs to white_internet, strictly excluding internal relay tunnels."""
+    if t in ("inbound-tls", "inbound-reality", "from-origin"):
+        return False
+    return t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default") or t.startswith("inbound-")
+
+
 def resolve_effective_service(service: Optional[str] = None) -> str:
     """Deterministically resolves the canonical service namespace ('vless' or 'white_internet')."""
     if service:
@@ -443,7 +450,7 @@ def resolve_effective_service(service: Optional[str] = None) -> str:
             return "vless"
         return s
     discovered = get_all_managed_inbounds()
-    if any(t.startswith("just1k-wl-") or t.startswith("inbound-") or t == "just1k-wl-default" for t in discovered):
+    if any(is_wl_inbound_tag(t) for t in discovered):
         return "white_internet"
     return "vless"
 
@@ -456,11 +463,11 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
     if effective == "vless":
         return [t for t in discovered_tags if t.startswith("just1k-vless-") or t == "just1k-vless-direct"]
     if effective == "white_internet":
-        return [t for t in discovered_tags if t.startswith("just1k-wl-") or t.startswith("inbound-") or t == "just1k-wl-default"]
+        return [t for t in discovered_tags if is_wl_inbound_tag(t)]
 
     # If service is unspecified, do not mix namespaces:
     # If white_internet inbounds exist, default to white_internet to prevent accidental leakage into vless-direct.
-    wl_inbounds = [t for t in discovered_tags if t.startswith("just1k-wl-") or t.startswith("inbound-") or t == "just1k-wl-default"]
+    wl_inbounds = [t for t in discovered_tags if is_wl_inbound_tag(t)]
     if wl_inbounds:
         return wl_inbounds
 
@@ -794,6 +801,8 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     if not is_running:
         running_epoch = None
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    elif running_epoch:
+        sync_active_users_with_epoch(running_epoch)
 
     return {
         "status": "ok" if is_running else "error",

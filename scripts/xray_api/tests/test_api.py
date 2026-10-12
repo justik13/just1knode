@@ -1218,6 +1218,43 @@ def test_delete_client_invalidates_idempotency_cache():
             assert data.get("fenced") is True or data.get("result") == "already_newer"
 
 
+def test_health_self_heals_clients_on_epoch_drift():
+    """Verify GET /v1/health triggers sync_active_users_with_epoch when running epoch changes."""
+    from app import sync_active_users_with_epoch
+
+    with (
+        patch.object(grpc_client, "is_healthy", return_value=True),
+        patch.object(
+            epoch_manager,
+            "get_process_and_epoch",
+            return_value=(999, 1234, "boot-99", "epoch_new_after_restart"),
+        ),
+        patch("app.sync_active_users_with_epoch") as mock_sync,
+    ):
+        res = client.get("/v1/health", headers=VALID_HEADERS)
+        assert res.status_code == 200
+        mock_sync.assert_called_once_with("epoch_new_after_restart")
+
+
+def test_inbound_isolation_excludes_relay_tunnels():
+    """Verify is_wl_inbound_tag and resolve_effective_service exclude inbound-tls/reality."""
+    from app import is_wl_inbound_tag, resolve_effective_service, get_target_inbounds
+
+    assert not is_wl_inbound_tag("inbound-tls")
+    assert not is_wl_inbound_tag("inbound-reality")
+    assert not is_wl_inbound_tag("from-origin")
+    assert is_wl_inbound_tag("just1k-wl-default")
+    assert is_wl_inbound_tag("just1k-wl-direct")
+    assert is_wl_inbound_tag("inbound-de")
+
+    with patch("app.get_all_managed_inbounds", return_value=["inbound-tls", "just1k-vless-direct"]):
+        # When only inbound-tls and vless are present, must resolve to vless direct, NOT white_internet
+        assert resolve_effective_service() == "vless"
+        vless_inbounds = get_target_inbounds()
+        assert vless_inbounds == ["just1k-vless-direct"]
+
+
+
 
 
 
