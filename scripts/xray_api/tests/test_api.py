@@ -1169,6 +1169,8 @@ def test_delete_client_invalidates_idempotency_cache():
     client_uuid = "e3b0c442-98fc-1c14-9afb-f4c8996fb924"
     idem_key = "idemp_test_delete_eviction_key"
 
+    client_store.add_client(client_uuid, version=1, service="white_internet")
+
     # Pre-populate completed idempotent ops with active state
     completed_idempotent_ops[idem_key] = {
         "status": "ok",
@@ -1193,7 +1195,11 @@ def test_delete_client_invalidates_idempotency_cache():
         assert idem_key not in completed_idempotent_ops
 
         # Subsequent sync replay with same idempotency key must not return cached active
-        with patch("app.get_target_inbounds", return_value=["inbound-de"]):
+        with (
+            patch("app.get_target_inbounds", return_value=["inbound-de"]),
+            patch.object(grpc_client, "add_user", return_value=True),
+            patch.object(grpc_client, "probe_user_presence", return_value=True),
+        ):
             replay_res = client.post(
                 "/v1/clients/sync",
                 headers={"X-API-Key": "test-secret-key-12345"},

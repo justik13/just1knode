@@ -417,8 +417,13 @@ class ClientStore:
                     "updated_at": time.time(),
                 }
             else:
-                for s in list(curr_service_states.keys()):
-                    svc_curr_ver = curr_service_states[s].get("version", 0)
+                services_to_tombstone = (
+                    list(curr_service_states.keys())
+                    if curr_service_states
+                    else ["vless", "white_internet"]
+                )
+                for s in services_to_tombstone:
+                    svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
                     new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
                     curr_service_states[s] = {
                         "is_active": False,
