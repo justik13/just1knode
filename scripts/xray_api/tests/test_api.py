@@ -1147,6 +1147,71 @@ def test_service_version_fencing_isolation_between_services():
                     assert persisted["service_states"]["white_internet"]["is_active"] is True
 
 
+def test_client_store_raises_on_empty_zero_byte_file():
+    import pytest
+    from client_store import ClientStore, ClientStoreCorruptedError
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f_path = f.name
+    try:
+        # File exists with 0 bytes
+        assert os.path.exists(f_path)
+        assert os.path.getsize(f_path) == 0
+        store = ClientStore(file_path=f_path)
+        with pytest.raises(ClientStoreCorruptedError):
+            store.load_client_entries()
+    finally:
+        if os.path.exists(f_path):
+            os.remove(f_path)
+
+
+def test_delete_client_invalidates_idempotency_cache():
+    from app import completed_idempotent_ops
+    client_uuid = "e3b0c442-98fc-1c14-9afbf4c8996fb924"
+    idem_key = "idemp_test_delete_eviction_key"
+
+    # Pre-populate completed idempotent ops with active state
+    completed_idempotent_ops[idem_key] = {
+        "status": "ok",
+        "client_id": client_uuid,
+        "result": "applied",
+        "state": "active",
+        "version": 1,
+        "service": "vless",
+        "verified_epoch": "epoch_test_fixture",
+    }
+
+    with patch("app.grpc_client.remove_user", return_value=True):
+        # DELETE the client
+        res = client.delete(
+            f"/v1/clients/{client_uuid}?version=2",
+            headers={"X-API-Key": "test-secret-key-12345"},
+        )
+        assert res.status_code == 200
+        assert res.json()["result"] == "applied"
+
+        # Cached op should be evicted
+        assert idem_key not in completed_idempotent_ops
+
+        # Subsequent sync replay with same idempotency key must not return cached active
+        replay_res = client.post(
+            "/v1/clients/sync",
+            headers={"X-API-Key": "test-secret-key-12345"},
+            json={
+                "client_id": client_uuid,
+                "action": "upsert",
+                "state": "active",
+                "version": 1,
+                "service": "vless",
+                "idempotency_key": idem_key,
+            },
+        )
+        assert replay_res.status_code == 200
+        # Version 1 request is fenced because client was deleted at version 2
+        data = replay_res.json()
+        assert data.get("fenced") is True or data.get("result") == "already_newer"
+
+
+
 
 
 

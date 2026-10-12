@@ -116,7 +116,9 @@ class XrayGrpcClient:
                         self.remove_user(inbound_tag, user_id)
                         stub.AlterInbound(req, timeout=self.timeout)
                     except Exception as retry_exc:
-                        logger.debug("Re-adding user %s with flow %s failed: %s", user_id, flow, retry_exc)
+                        logger.error("Re-adding user %s with flow %s failed: %s", user_id, flow, retry_exc)
+                        self.close()
+                        raise
                 self._active_users.add((inbound_tag, user_id))
                 return True
             logger.error("AlterInbound AddUser failed: %s", exc)

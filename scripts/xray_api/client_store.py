@@ -40,8 +40,12 @@ class ClientStore:
 
     def load_client_entries(self) -> Dict[str, Dict[str, Any]]:
         """Loads all client metadata entries {uuid: {is_active: bool, version: int, updated_at: float}}."""
-        if not self.file_path.exists() or self.file_path.stat().st_size == 0:
+        if not self.file_path.exists():
             return {}
+        if self.file_path.stat().st_size == 0:
+            raise ClientStoreCorruptedError(
+                f"Client store file exists but is empty (0 bytes): {self.file_path}"
+            )
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)

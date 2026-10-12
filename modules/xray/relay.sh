@@ -532,16 +532,24 @@ install_xray_relay_node() {
         read -rp "Порт туннеля Relay [по умолчанию: 10443]: " relay_port_in || true
         relay_port="${relay_port_in:-10443}"
     fi
+    if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
+        error "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}')."
+        return 1
+    fi
     if [[ "$relay_port" == "443" ]]; then
         error "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
+        return 1
+    fi
+    if is_ssh_port "$relay_port"; then
+        error "Порт ${relay_port} занят службой SSH. Запрещено использовать порт SSH для Relay туннеля."
         return 1
     fi
 
     if [[ -z "$origin_ip" ]]; then
         read -rp "Введите IP-адрес Origin-сервера в РФ (для защиты UFW): " origin_ip || true
     fi
-    if [[ -z "$origin_ip" ]]; then
-        error "IP-адрес Origin обязателен для настройки фаервола."
+    if [[ -z "$origin_ip" ]] || ! validate_ipv4 "$origin_ip"; then
+        error "IP-адрес Origin ('${origin_ip}') некорректен или пуст. Требуется валидный IPv4-адрес для настройки фаервола."
         return 1
     fi
 
@@ -693,7 +701,8 @@ print('[]')
     fi
 
     log "Формирование конфигурации Relay ноды (VLESS ${sec_mode^^})..."
-    cat > "$XRAY_CONFIG" <<EOF
+    local tmp_xray_config="${XRAY_CONFIG}.tmp"
+    cat > "$tmp_xray_config" <<EOF
 {
   "log": {
     "loglevel": "warning"
@@ -810,14 +819,18 @@ print('[]')
 }
 EOF
 
-    ensure_xray_config_permissions "$XRAY_CONFIG"
+    ensure_xray_config_permissions "$tmp_xray_config"
 
     apply_node_sysctl_hardening
 
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
+    if ! "$XRAY_BIN" run -test -config "$tmp_xray_config"; then
+        rm -f "$tmp_xray_config"
         error "Ошибка тестирования сгенерированной конфигурации Xray на Relay узле. Изменения не применены."
         return 1
     fi
+
+    mv -f "$tmp_xray_config" "$XRAY_CONFIG"
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     # Защита портов через UFW (строго без открытия Amnezia API всему миру)
     local extra_ufw_ports=()
@@ -1543,7 +1556,7 @@ routing = cfg.setdefault('routing', {})
 routing.setdefault('domainStrategy', 'IPIfNonMatch')
 rules = routing.setdefault('rules', [])
 insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
-has_geoip_private = any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) for r in rules)
+has_geoip_private = any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) and r.get('outboundTag') == 'block' for r in rules)
 if not has_geoip_private:
     rules.insert(insert_pos, {
         'type': 'field',

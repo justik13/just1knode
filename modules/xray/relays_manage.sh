@@ -394,7 +394,7 @@ for r in rules:
 
 # Запрет доступа к приватным и локальным адресам (SSRF, gRPC сокет 10085, cloud metadata)
 insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
-if not any(r.get('ip') == ['geoip:private'] for r in rules):
+if not any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) and r.get('outboundTag') in ('just1k-wl-block', 'block') for r in rules):
     rules.insert(insert_pos, {
         'type': 'field',
         'ip': ['geoip:private'],

@@ -372,32 +372,30 @@ if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
         'settings': {'response': {'type': 'none'}}
     })
 
-rules.append({
-    'type': 'field',
-    'inboundTag': ['just1k-wl-api-grpc'],
-    'outboundTag': 'just1k-wl-api'
-})
-
-# Запрет доступа к приватным и локальным адресам (SSRF, gRPC сокет 10085, cloud metadata)
-rules.append({
-    'type': 'field',
-    'ip': ['geoip:private'],
-    'outboundTag': 'just1k-wl-block'
-})
-
-# Запрет BitTorrent (P2P трафик) на уровне ядра Xray
-rules.append({
-    'type': 'field',
-    'protocol': ['bittorrent'],
-    'outboundTag': 'just1k-wl-block'
-})
-
-# Запрет исходящего SMTP (порт 25, защита от спама)
-rules.append({
-    'type': 'field',
-    'port': '25',
-    'outboundTag': 'just1k-wl-block'
-})
+security_rules = [
+    {
+        'type': 'field',
+        'inboundTag': ['just1k-wl-api-grpc'],
+        'outboundTag': 'just1k-wl-api'
+    },
+    {
+        'type': 'field',
+        'ip': ['geoip:private'],
+        'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'protocol': ['bittorrent'],
+        'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'port': '25',
+        'outboundTag': 'just1k-wl-block'
+    }
+]
+for s_idx, s_rule in enumerate(security_rules):
+    rules.insert(s_idx, s_rule)
 
 # Split-Routing: прямой выход в Рунет с московского IP Origin-сервера
 rules.append({

@@ -1031,6 +1031,37 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
                 )
 
                 if epoch_valid:
+                    try:
+                        entries = client_store.load_client_entries()
+                        stored_entry = entries.get(client_uuid)
+                        if stored_entry:
+                            svc_states = stored_entry.get("service_states") or {}
+                            svc_state = svc_states.get(effective_svc) if effective_svc else None
+                            stored_tombstone = stored_entry.get("tombstone", False) or (
+                                svc_state.get("tombstone", False) if svc_state else False
+                            )
+                            stored_ver = (
+                                svc_state.get("version")
+                                if (svc_state and svc_state.get("version") is not None)
+                                else stored_entry.get("version")
+                            )
+                            if stored_tombstone or (
+                                req.version is not None
+                                and stored_ver is not None
+                                and stored_ver > req.version
+                            ):
+                                logger.info(
+                                    "Cached idempotent op for key %s invalidated by client_store (tombstone=%s, stored_ver=%s, req_ver=%s)",
+                                    req.idempotency_key,
+                                    stored_tombstone,
+                                    stored_ver,
+                                    req.version,
+                                )
+                                epoch_valid = False
+                    except Exception as e:
+                        logger.warning("Could not verify client_store for cached key %s: %s", req.idempotency_key, e)
+
+                if epoch_valid:
                     logger.info("Returning cached durable operation for key %s", req.idempotency_key)
                     return {**cached, "idempotent": True}
                 logger.info(
@@ -1468,6 +1499,13 @@ async def delete_client(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to persist client tombstone to disk",
         ) from e
+
+    keys_to_evict = [
+        k for k, v in completed_idempotent_ops.items()
+        if v.get("client_id") == clean_uuid
+    ]
+    for k in keys_to_evict:
+        completed_idempotent_ops.pop(k, None)
 
     return {
         "status": "ok",
