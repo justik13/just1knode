@@ -143,18 +143,31 @@ class DurableIdempotencyStore:
 
     def evict_by_client_id(self, client_id: str) -> None:
         try:
+            norm_target = str(uuid_lib.UUID(client_id.strip())).lower()
+        except Exception:
+            norm_target = client_id.strip().lower()
+
+        try:
             with self._get_conn() as conn:
                 cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
                 keys = []
                 for k, v_str in cur.fetchall():
                     try:
                         data = json.loads(v_str)
-                        if isinstance(data, dict) and data.get("client_id") == client_id:
-                            keys.append(k)
+                        if isinstance(data, dict):
+                            raw_cid = data.get("client_id")
+                            if raw_cid:
+                                try:
+                                    norm_cid = str(uuid_lib.UUID(str(raw_cid).strip())).lower()
+                                except Exception:
+                                    norm_cid = str(raw_cid).strip().lower()
+                                if norm_cid == norm_target:
+                                    keys.append(k)
                     except Exception:
                         pass
                 if keys:
                     conn.executemany("DELETE FROM idempotent_ops WHERE idempotency_key = ?", [(k,) for k in keys])
+                    conn.commit()
         except Exception as e:
             logging.getLogger("xray_api").warning("Failed to evict idempotent ops for client %s: %s", client_id, e)
 

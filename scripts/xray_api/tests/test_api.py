@@ -1166,7 +1166,7 @@ def test_client_store_raises_on_empty_zero_byte_file():
 
 def test_delete_client_invalidates_idempotency_cache():
     from app import completed_idempotent_ops
-    client_uuid = "e3b0c442-98fc-1c14-9afbf4c8996fb924"
+    client_uuid = "e3b0c442-98fc-1c14-9afb-f4c8996fb924"
     idem_key = "idemp_test_delete_eviction_key"
 
     # Pre-populate completed idempotent ops with active state
