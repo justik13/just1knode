@@ -191,43 +191,62 @@ class ClientStore:
             if has_vless and not has_wl:
                 return "vless"
 
-        state_path = Path(os.getenv("JUST1K_STATE_PATH", "/etc/just1k/state.json"))
-        if state_path.exists():
-            try:
-                with open(state_path, "r", encoding="utf-8") as f:
-                    sdata = json.load(f)
-                    if isinstance(sdata, dict):
-                        role = sdata.get("role")
-                        has_vless = str(sdata.get("has_vless", "")) == "1"
-                        has_wl = str(sdata.get("has_wl", "")) == "1" or role == "origin"
-                        if has_wl and not has_vless:
-                            return "white_internet"
-                        if has_vless and not has_wl:
-                            return "vless"
-            except Exception:
-                pass
+        state_candidates = [
+            os.getenv("STATE_FILE_PATH"),
+            os.getenv("JUST1K_STATE_PATH"),
+            "/etc/just1knode/state.json",
+            "/etc/just1k/state.json",
+        ]
+        for sc in state_candidates:
+            if not sc:
+                continue
+            state_path = Path(sc)
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                        if isinstance(sdata, dict):
+                            role = sdata.get("role")
+                            has_vless = str(sdata.get("has_vless", "")) == "1"
+                            has_wl = str(sdata.get("has_wl", "")) == "1" or role == "origin"
+                            if has_wl and not has_vless:
+                                return "white_internet"
+                            if has_vless and not has_wl:
+                                return "vless"
+                    break
+                except Exception:
+                    pass
 
-        config_path = Path(os.getenv("XRAY_CONFIG_PATH", "/etc/xray/config.json"))
-        if config_path.exists():
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    cdata = json.load(f)
-                    inbounds = cdata.get("inbounds", [])
-                    tags = [ib.get("tag", "").lower() for ib in inbounds if isinstance(ib, dict)]
-                    has_wl = any(
-                        t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
-                        for t in tags
-                    )
-                    has_vless = any(
-                        t.startswith("just1k-vless-") or t == "just1k-vless-direct"
-                        for t in tags
-                    )
-                    if has_wl:
-                        return "white_internet"
-                    if has_vless:
-                        return "vless"
-            except Exception:
-                pass
+        config_candidates = [
+            os.getenv("XRAY_CONFIG_PATH"),
+            "/usr/local/etc/xray/config.json",
+            "/etc/xray/config.json",
+        ]
+        for cc in config_candidates:
+            if not cc:
+                continue
+            config_path = Path(cc)
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cdata = json.load(f)
+                        inbounds = cdata.get("inbounds", [])
+                        tags = [ib.get("tag", "").lower() for ib in inbounds if isinstance(ib, dict)]
+                        has_wl = any(
+                            t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                            for t in tags
+                        )
+                        has_vless = any(
+                            t.startswith("just1k-vless-") or t == "just1k-vless-direct"
+                            for t in tags
+                        )
+                        if has_wl:
+                            return "white_internet"
+                        if has_vless:
+                            return "vless"
+                    break
+                except Exception:
+                    pass
 
         return "vless"
 

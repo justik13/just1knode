@@ -490,27 +490,20 @@ run_doctor() {
         if ! [[ "$r_port" =~ ^[0-9]+$ ]] || (( r_port < 1 || r_port > 65535 )); then
             r_port="10443"
         fi
-        if ! ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" && ! python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
-            heal_and_update_relay_config >/dev/null 2>&1 || true
-            sleep 1
-        fi
         if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
         else
-            echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss"
+            echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss (выполните: just1knode heal)"
+            warnings=$((warnings + 1))
         fi
     fi
 
     if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
-        if ! python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
-            ensure_amnezia_api_service_and_env >/dev/null 2>&1 || true
-            sleep 1
-        fi
         if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
         else
-            echo -e "  ${RED}✗${NC} Локальный порт 4001 (amnezia-api) недоступен"
+            echo -e "  ${RED}✗${NC} Локальный порт 4001 (amnezia-api) недоступен (выполните: just1knode heal)"
             failed=$((failed + 1))
         fi
     fi
@@ -1052,10 +1045,13 @@ if os.path.exists(rf):
 
     if [[ $failed -eq 0 && $warnings -eq 0 ]]; then
         echo -e "\n${BOLD}${GREEN}Все проверки пройдены успешно! Узел полностью здоров.${NC}\n"
+        return 0
     elif [[ $failed -eq 0 ]]; then
         echo -e "\n${BOLD}${YELLOW}Проверки завершены с предупреждениями (предупреждений: ${warnings}).${NC}\n"
+        return 0
     else
         echo -e "\n${BOLD}${RED}Обнаружено ошибок: ${failed}, предупреждений: ${warnings}. Требуется внимание администратора.${NC}\n"
+        return 1
     fi
 }
 
@@ -1791,7 +1787,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 esac
                 ;;
             status) show_status ;;
-            doctor|test) run_doctor ;;
+            doctor|test) run_doctor || exit 1 ;;
             heal) heal_node_config ;;
             set-bot-ip|bot-ip)
                 set_origin_bot_ip "${2:-}"

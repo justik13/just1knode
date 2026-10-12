@@ -160,6 +160,9 @@ if [ "$restarted" = "1" ]; then
     else
         systemctl restart xray 2>/dev/null || true
     fi
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
 fi
 EOF
     chmod 755 "${le_dir}/renewal-hooks/deploy/20-just1knode-restart-xray.sh"
