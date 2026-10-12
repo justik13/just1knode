@@ -1176,7 +1176,7 @@ def test_delete_client_invalidates_idempotency_cache():
         "result": "applied",
         "state": "active",
         "version": 1,
-        "service": "vless",
+        "service": "white_internet",
         "verified_epoch": "epoch_test_fixture",
     }
 
@@ -1193,22 +1193,23 @@ def test_delete_client_invalidates_idempotency_cache():
         assert idem_key not in completed_idempotent_ops
 
         # Subsequent sync replay with same idempotency key must not return cached active
-        replay_res = client.post(
-            "/v1/clients/sync",
-            headers={"X-API-Key": "test-secret-key-12345"},
-            json={
-                "client_id": client_uuid,
-                "action": "upsert",
-                "state": "active",
-                "version": 1,
-                "service": "vless",
-                "idempotency_key": idem_key,
-            },
-        )
-        assert replay_res.status_code == 200
-        # Version 1 request is fenced because client was deleted at version 2
-        data = replay_res.json()
-        assert data.get("fenced") is True or data.get("result") == "already_newer"
+        with patch("app.get_target_inbounds", return_value=["inbound-de"]):
+            replay_res = client.post(
+                "/v1/clients/sync",
+                headers={"X-API-Key": "test-secret-key-12345"},
+                json={
+                    "client_id": client_uuid,
+                    "action": "upsert",
+                    "state": "active",
+                    "version": 1,
+                    "service": "white_internet",
+                    "idempotency_key": idem_key,
+                },
+            )
+            assert replay_res.status_code == 200
+            # Version 1 request is fenced because client was deleted at version 2
+            data = replay_res.json()
+            assert data.get("fenced") is True or data.get("result") == "already_newer"
 
 
 
