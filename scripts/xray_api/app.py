@@ -127,6 +127,37 @@ class DurableIdempotencyStore:
         except Exception:
             return []
 
+    def items(self) -> list[tuple[str, Dict[str, Any]]]:
+        try:
+            with self._get_conn() as conn:
+                cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
+                res = []
+                for k, v_str in cur.fetchall():
+                    try:
+                        res.append((k, json.loads(v_str)))
+                    except Exception:
+                        pass
+                return res
+        except Exception:
+            return []
+
+    def evict_by_client_id(self, client_id: str) -> None:
+        try:
+            with self._get_conn() as conn:
+                cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
+                keys = []
+                for k, v_str in cur.fetchall():
+                    try:
+                        data = json.loads(v_str)
+                        if isinstance(data, dict) and data.get("client_id") == client_id:
+                            keys.append(k)
+                    except Exception:
+                        pass
+                if keys:
+                    conn.executemany("DELETE FROM idempotent_ops WHERE idempotency_key = ?", [(k,) for k in keys])
+        except Exception as e:
+            logging.getLogger("xray_api").warning("Failed to evict idempotent ops for client %s: %s", client_id, e)
+
     def pop(self, key: str, default: Any = None) -> Any:
         try:
             val = self.get(key)
@@ -1500,12 +1531,7 @@ async def delete_client(
             detail="Failed to persist client tombstone to disk",
         ) from e
 
-    keys_to_evict = [
-        k for k, v in completed_idempotent_ops.items()
-        if v.get("client_id") == clean_uuid
-    ]
-    for k in keys_to_evict:
-        completed_idempotent_ops.pop(k, None)
+    completed_idempotent_ops.evict_by_client_id(clean_uuid)
 
     return {
         "status": "ok",
