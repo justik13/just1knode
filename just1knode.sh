@@ -49,32 +49,38 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
         JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
         
-        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            archive_url="${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
+        local_archive_urls=()
+        if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            local_archive_urls+=("${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz")
         else
-            archive_url="${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
+            local_archive_urls+=(
+                "${JUST1KNODE_REPO_URL}/archive/${JUST1KNODE_REF}.tar.gz"
+                "${JUST1KNODE_REPO_URL}/archive/refs/tags/${JUST1KNODE_REF}.tar.gz"
+                "${JUST1KNODE_REPO_URL}/archive/refs/heads/${JUST1KNODE_REF}.tar.gz"
+            )
         fi
         
         tmp_tar="$(mktemp /tmp/just1knode_boot.XXXXXX.tar.gz 2>/dev/null || mktemp)"
         tmp_extract="$(mktemp -d /tmp/just1knode_extract.XXXXXX 2>/dev/null || mktemp -d)"
         
         download_ok=0
-        if command -v curl >/dev/null 2>&1; then
-            if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar"; then
-                download_ok=1
+        for archive_url in "${local_archive_urls[@]}"; do
+            if command -v curl >/dev/null 2>&1; then
+                if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
+                    download_ok=1
+                    break
+                fi
+            elif command -v wget >/dev/null 2>&1; then
+                if wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
+                    download_ok=1
+                    break
+                fi
             fi
-        elif command -v wget >/dev/null 2>&1; then
-            if wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url"; then
-                download_ok=1
-            fi
-        else
-            echo "Ошибка: для установки требуется curl или wget." >&2
-            exit 1
-        fi
+        done
         
         if [[ $download_ok -ne 1 || ! -f "$tmp_tar" ]]; then
             rm -rf "$tmp_tar" "$tmp_extract"
-            echo "Ошибка: не удалось скачать архив репозитория ($archive_url)." >&2
+            echo "Ошибка: не удалось скачать архив репозитория (${local_archive_urls[*]})." >&2
             exit 1
         fi
         

@@ -980,8 +980,8 @@ select_relay_domain_interactive() {
         done
     fi
 
-    # СЦЕНАРИЙ 1: Неинтерактивный режим (скрипты / unattended cron)
-    if [[ ! -t 0 ]]; then
+    # СЦЕНАРИЙ 1: Неинтерактивный режим (скрипты / unattended cron / JUST1KNODE_NON_INTERACTIVE)
+    if [[ ! -t 0 || "${JUST1KNODE_NON_INTERACTIVE:-0}" == "1" || "${DEBIAN_FRONTEND:-}" == "noninteractive" ]]; then
         if [[ $has_cur_sni -eq 1 ]]; then
             # Если текущий SNI валиден — сохраняем его без изменений
             echo "$cur_sni"
