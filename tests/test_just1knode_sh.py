@@ -3627,6 +3627,9 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("deploy_vless_fallback_nginx", relay_sh)
         self.assertIn("'alpn': ['http/1.1']", relay_sh)
         self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
+        self.assertIn("server_tokens off;", relay_sh)
+        self.assertIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertIn("'minVersion': '1.2'", relay_sh)
 
         # 4. Doctor and firewall UFW regex invariants
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
