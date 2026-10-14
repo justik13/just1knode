@@ -506,6 +506,9 @@ server {
     listen 127.0.0.1:80 default_server;
     server_name _;
     server_tokens off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
     root /var/www/html;
     index index.html index.nginx-debian.html;
     location / {

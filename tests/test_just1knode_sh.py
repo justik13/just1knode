@@ -734,6 +734,8 @@ socket.getaddrinfo = _mock_gai
         self.assertIn("proxy_read_timeout 86400s;", origin_sh)
         self.assertIn("client_header_buffer_size 16k;", origin_sh)
         self.assertIn("proxy_pass http://xray_xhttp_default;", origin_sh)
+        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', origin_sh)
+        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', origin_sh)
 
         self.assertIn("'scMaxEachPostBytes': 1000000", relays_manage_sh)
         self.assertIn("'serverMaxHeaderBytes': 65536", relays_manage_sh)
@@ -3647,6 +3649,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("server_tokens off;", relay_sh)
         self.assertIn("Edge Gateway Infrastructure", relay_sh)
         self.assertIn("'minVersion': '1.2'", relay_sh)
+        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', relay_sh)
+        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', relay_sh)
 
         # 4. Doctor and firewall UFW regex invariants
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)

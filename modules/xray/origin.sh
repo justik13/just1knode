@@ -663,6 +663,10 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
     client_max_body_size 0;
     client_body_buffer_size 128k;
     keepalive_requests 100000;
@@ -1533,6 +1537,13 @@ server {{
         content = re.sub(r'server\s*\{[^}]*listen\s+443\s+ssl\s+default_server[^}]*\}', fix_catchall, content, flags=re.DOTALL)
 
     content = re.sub(r'server\s*\{[^}]*listen\s+8443\s+ssl[^}]*\}\n*', '', content, flags=re.DOTALL)
+
+    if 'Strict-Transport-Security' not in content:
+        content = re.sub(
+            r'(ssl_ciphers\s+HIGH:!aNULL:!MD5;\n)',
+            r'\1    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;\n    add_header X-Content-Type-Options "nosniff" always;\n    add_header X-Frame-Options "DENY" always;\n',
+            content
+        )
 
     if 'keepalive_requests' in content:
         content = re.sub(r'keepalive_requests\s+\d+;', 'keepalive_requests 100000;', content)
