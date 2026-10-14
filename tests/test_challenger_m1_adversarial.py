@@ -384,6 +384,24 @@ class TestXrayApiAdversarial(unittest.TestCase):
                 # Must have evicted the stale key
                 mock_internal.assert_awaited_once()
 
+    def test_durable_idempotency_store_persistence_and_permissions(self):
+        """DurableIdempotencyStore must persist to SQLite and maintain 0o660 permissions."""
+        db_path = Path(self.temp_dir) / "test_idem.db"
+        store = self.app_module.DurableIdempotencyStore(db_path)
+        store["key1"] = {"result": "success", "client_id": "test-client-1"}
+        self.assertEqual(store["key1"]["result"], "success")
+        self.assertIn("key1", store)
+        self.assertEqual(len(store), 1)
+
+        if os.name != "nt":
+            mode = db_path.stat().st_mode
+            self.assertTrue(bool(mode & 0o660))
+
+        # Evict by client_id
+        store.evict_by_client_id("test-client-1")
+        self.assertNotIn("key1", store)
+        self.assertEqual(len(store), 0)
+
     def test_sync_client_rollback_restores_initial_states_on_partial_failure(self):
         """Rollback must restore each inbound's exact initial state rather than blindly inverting."""
         client_uuid = "22222222-2222-2222-2222-222222222222"

@@ -51,6 +51,10 @@ class DurableIdempotencyStore:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_idempotent_ops_created ON idempotent_ops(created_at)"
                 )
+            try:
+                self.db_path.chmod(0o660)
+            except Exception:
+                pass
         except Exception as e:
             logging.getLogger("xray_api").warning(
                 "Failed to initialize idempotency db at %s: %s", self.db_path, e

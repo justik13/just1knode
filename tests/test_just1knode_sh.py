@@ -2154,6 +2154,13 @@ run_doctor
 
     def test_init_state_dir_sets_sgid_and_permissions(self):
         self._prepare_base_env()
+        idemp_db = self.state_dir / "idempotency.db"
+        idemp_wal = self.state_dir / "idempotency.db-wal"
+        idemp_db.write_text("dummy", encoding="utf-8")
+        idemp_wal.write_text("dummy", encoding="utf-8")
+        os.chmod(idemp_db, 0o600)
+        os.chmod(idemp_wal, 0o600)
+
         res = self._run_shell_snippet("init_state_dir")
         self.assertEqual(res.returncode, 0)
         st = os.stat(self.state_dir)
@@ -2172,6 +2179,16 @@ run_doctor
             )
             self.assertEqual(
                 st_file.st_mode & 0o0007, 0, "State file must have zero permissions for others"
+            )
+
+        for p in (idemp_db, idemp_wal):
+            st_idemp = os.stat(p)
+            self.assertTrue(
+                bool(st_idemp.st_mode & 0o0660),
+                f"{p.name} must have rw permissions for owner and group",
+            )
+            self.assertEqual(
+                st_idemp.st_mode & 0o0007, 0, f"{p.name} must have zero permissions for others"
             )
 
     def test_detect_existing_nginx_sites_in_just1knode(self):
