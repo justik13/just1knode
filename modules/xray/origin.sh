@@ -1541,7 +1541,7 @@ server {{
     if 'Strict-Transport-Security' not in content:
         content = re.sub(
             r'(ssl_ciphers\s+HIGH:!aNULL:!MD5;\n)',
-            r'\1    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;\n    add_header X-Content-Type-Options "nosniff" always;\n    add_header X-Frame-Options "DENY" always;\n',
+            r'\1    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;\n    add_header X-Content-Type-Options \"nosniff\" always;\n    add_header X-Frame-Options \"DENY\" always;\n',
             content
         )
 
