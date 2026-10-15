@@ -394,8 +394,18 @@ update_node() {
                     rm -rf "$tmp_tar" "$tmp_dir"
                     error "Не удалось скопировать модули в ${node_dir}. Обновление прервано."
                 fi
+                local fetched_sha=""
                 if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-                    timeout 5s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' > "${node_dir}/COMMIT" 2>/dev/null || true
+                    fetched_sha="$(timeout 5s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)"
+                    if [[ ! "$fetched_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                        fetched_sha="$(timeout 5s git ls-remote "$repo_url" "$ref" 2>/dev/null | awk '{print $1}' || true)"
+                    fi
+                fi
+                if [[ ! "$fetched_sha" =~ ^[0-9a-f]{40}$ && "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                    fetched_sha="$ref"
+                fi
+                if [[ "$fetched_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                    printf '%s\n' "$fetched_sha" > "${node_dir}/COMMIT" 2>/dev/null || true
                 fi
                 if [[ -f "${node_dir}/just1knode.sh" ]]; then
                     chmod +x "${node_dir}/just1knode.sh" 2>/dev/null || true

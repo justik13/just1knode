@@ -103,8 +103,12 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/amnezia_api"
             cp -a "$tmp_extract/scripts/amnezia_api/." "$INSTALL_DIR/scripts/amnezia_api/"
         fi
+        local bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-            timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
+            bootstrap_sha="$(timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' || true)"
+        fi
+        if [[ "$bootstrap_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' "$bootstrap_sha" > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
         fi
         rm -rf "$tmp_tar" "$tmp_extract"
     fi
@@ -180,6 +184,8 @@ check_node_update_on_entry() {
         local_sha="$(tr -d '[:space:]' < "${SCRIPT_DIR}/COMMIT" 2>/dev/null || true)"
     elif [[ -n "${JUST1KNODE_LOCAL_SHA:-}" ]]; then
         local_sha="${JUST1KNODE_LOCAL_SHA}"
+    elif [[ -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+        local_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
     fi
 
     if [[ "$local_sha" =~ ^[0-9a-f]{40}$ ]] && command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
