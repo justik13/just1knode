@@ -5,9 +5,11 @@
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/just1knode}"
 BACKUP_RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-10}"
+LAST_BACKUP_PATH=""
 
 create_backup() {
     local target="$1"
+    LAST_BACKUP_PATH=""
     if [[ -f "$target" ]]; then
         mkdir -p "$BACKUP_DIR"
         chmod 700 "$BACKUP_DIR" 2>/dev/null || true
@@ -15,6 +17,7 @@ create_backup() {
         bkp="${BACKUP_DIR}/$(basename "$target")_$(date +%Y%m%d_%H%M%S).bak"
         cp -p "$target" "$bkp"
         chmod 600 "$bkp" 2>/dev/null || true
+        LAST_BACKUP_PATH="$bkp"
         log "Создан защитный бэкап: $bkp"
 
         # Ограничение накопления резервных копий (Retention Policy)

@@ -635,8 +635,13 @@ heal_node_firewall_and_stealth() {
             ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         fi
 
-        # Гарантированно устраняем уязвимость: удаляем любое публичное Anywhere правило для 8444
-        if ! is_ssh_port "8444"; then
+        # Защита xray-api (порт 8444 активен ТОЛЬКО при наличии автономного just1k-vless-api.conf либо на узлах без Amnezia Nginx)
+        local cur_awg_port
+        cur_awg_port="$(get_state_val "awg_port" "8443")"
+        [[ -z "$cur_awg_port" || "$cur_awg_port" == "-" ]] && cur_awg_port="8443"
+
+        # Гарантированно устраняем уязвимость: удаляем публичное Anywhere правило для 8444 (если 8444 не используется Amnezia)
+        if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then
             if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
                 ufw delete allow 8444 >/dev/null 2>&1 || true
@@ -644,10 +649,10 @@ heal_node_firewall_and_stealth() {
             fi
         fi
 
-        # Защита xray-api (порт 8444 активен ТОЛЬКО при наличии автономного just1k-vless-api.conf либо на узлах без Amnezia Nginx)
-        if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
-            # На узлах с Amnezia API слушается на порту 8443 (включая /v1/ для xray-api), удаляем мертвое правило 8444
-            if ! is_ssh_port "8444"; then
+        if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then
+            # На узлах с Amnezia API слушается на порту awg_port (включая /v1/ для xray-api).
+            # Удаляем неиспользуемое правило 8444 ТОЛЬКО если Amnezia не слушает 8444!
+            if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then
                 local v_bot_ip
                 v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
                 if [[ -n "$v_bot_ip" ]]; then

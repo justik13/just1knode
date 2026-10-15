@@ -3686,11 +3686,52 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('rm -f "$def_site"', relay_sh)
 
     def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
-        """Verify heal_node_firewall and install_vless do not expose dead 8444 when Amnezia Nginx is active."""
+        """Verify heal_node_firewall and install_vless do not expose dead 8444 when Amnezia Nginx is active, but preserve 8444 if awg_port is 8444."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then', common_sh)
-        self.assertIn('Amnezia Nginx (порт 8443 /v1/)', relay_sh)
+        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
+        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then', common_sh)
+        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"', relay_sh)
+        self.assertIn('Amnezia Nginx (порт ${amnezia_check_p} /v1/)', relay_sh)
+
+    def test_vless_transactional_rollback_and_nginx_restore(self):
+        """Verify install_vless_direct_node has robust transactional rollback and commit-on-success."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('rollback_vless_installation()', relay_sh)
+        self.assertIn('if ! systemctl restart xray; then', relay_sh)
+        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
+        self.assertIn('if ! setup_xray_api_proxy "$dest_server"; then', relay_sh)
+        self.assertIn('set_state_val "has_vless" "$orig_has_vless"', relay_sh)
+        self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
+        # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
+        idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
+        idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
+        self.assertGreater(idx_commit, idx_api, "has_vless=1 must be set after setup_xray_api_proxy succeeds")
+
+    def test_setup_xray_api_proxy_warn_and_return_error(self):
+        """Verify setup_xray_api_proxy warns and returns 1 on failure instead of exit 1 via error()."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        api_proxy_code = relay_sh.split('setup_xray_api_proxy() {')[1].split('setup_dual_xray_api()')[0]
+        self.assertNotIn('error "Служба xray-api не смогла запуститься', api_proxy_code)
+        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси', api_proxy_code)
+        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API', api_proxy_code)
+        self.assertIn('warn "Служба xray-api не смогла запуститься', api_proxy_code)
+
+    def test_deploy_and_uninstall_vless_nginx_default_site_lifecycle(self):
+        """Verify deploy_vless_fallback_nginx rolls back on nginx -t failure and uninstall restores default site."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        # deploy rollback
+        self.assertIn('warn "Nginx: ошибка синтаксиса при подключении just1k-fallback80.conf. Откат fallback хоста..."', relay_sh)
+        # uninstall restore
+        self.assertIn('cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default"', relay_sh)
+        self.assertIn('ln -sf "/etc/nginx/sites-available/default" "/etc/nginx/sites-enabled/default"', relay_sh)
+
+    def test_create_backup_tracks_last_backup_path(self):
+        """Verify create_backup records LAST_BACKUP_PATH without bypassing retention."""
+        backup_sh = (NODE_ROOT / "lib" / "backup.sh").read_text(encoding="utf-8")
+        self.assertIn('LAST_BACKUP_PATH=""', backup_sh)
+        self.assertIn('LAST_BACKUP_PATH="$bkp"', backup_sh)
+        self.assertIn('BACKUP_RETENTION_COUNT', backup_sh)
 
 
 if __name__ == "__main__":
