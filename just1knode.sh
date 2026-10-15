@@ -103,6 +103,14 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/amnezia_api"
             cp -a "$tmp_extract/scripts/amnezia_api/." "$INSTALL_DIR/scripts/amnezia_api/"
         fi
+        bootstrap_sha=""
+        if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+            bootstrap_sha="$(timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' || true)"
+        fi
+        if [[ "$bootstrap_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' "$bootstrap_sha" > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
+        fi
+        unset bootstrap_sha
         rm -rf "$tmp_tar" "$tmp_extract"
     fi
     
@@ -128,10 +136,12 @@ if [[ -f "$VERSION_FILE" ]]; then
     JUST1KNODE_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 fi
 
-# Git-коммит рядом с VERSION: доступен при запуске из репозитория.
-# На проде (/opt/just1knode без .git) пусто — тогда показываем только версию.
+# Git-коммит рядом с VERSION: доступен при запуске из репозитория или из файла COMMIT.
+# На проде (/opt/just1knode без .git) считывается из COMMIT.
 JUST1KNODE_COMMIT=""
-if [[ -n "${SCRIPT_DIR:-}" ]]; then
+if [[ -f "${SCRIPT_DIR}/COMMIT" ]]; then
+    JUST1KNODE_COMMIT="$(tr -d '[:space:]' < "${SCRIPT_DIR}/COMMIT" 2>/dev/null | cut -c1-7)"
+elif [[ -n "${SCRIPT_DIR:-}" ]]; then
     JUST1KNODE_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
 fi
 
@@ -158,18 +168,41 @@ print_node_version_box_line() {
     printf '│%*s%s%*s│\n' "$pad_left" "" "$label" "$pad_right" ""
 }
 
-# Best-effort проверка новой версии при входе в меню. Только информация:
-# один короткий запрос к VERSION на main и сравнение, не вызывает update_node.
-# Уведомляет только когда remote строго новее локальной (semver-направление);
-# равные, более старые и невалидные значения молча пропускаются.
+# Best-effort проверка новой версии при входе в меню. Строго read-only:
+# опрашивает origin/main через git ls-remote, не меняет репозиторий, не вызывает update_node.
+# Уведомляет только когда remote SHA отличается от локального;
+# при совпадении SHA или ошибках (нет сети/timeout) молча пропускается (fail-safe).
 check_node_update_on_entry() {
-    local repo_url ref remote_ver newest
+    local repo_url ref
     repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
     ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
     if [[ "$repo_url" != "https://github.com/justik13/just1knode" || "$ref" != "main" ]]; then
         return 0
     fi
+
+    local local_sha=""
+    if [[ -f "${SCRIPT_DIR}/COMMIT" ]]; then
+        local_sha="$(tr -d '[:space:]' < "${SCRIPT_DIR}/COMMIT" 2>/dev/null || true)"
+    elif [[ -n "${JUST1KNODE_LOCAL_SHA:-}" ]]; then
+        local_sha="${JUST1KNODE_LOCAL_SHA}"
+    elif [[ -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+        local_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    fi
+
+    if [[ "$local_sha" =~ ^[0-9a-f]{40}$ ]] && command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+        local remote_sha
+        remote_sha="$(timeout 5s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)"
+        if [[ "$remote_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            if [[ "$remote_sha" != "$local_sha" ]]; then
+                echo -e "  ${YELLOW}⚠️  Доступны изменения в GitHub origin/${ref}. Воспользуйтесь пунктом «Обновить утилиту».${NC}"
+            fi
+            return 0
+        fi
+    fi
+
+    # Fallback на проверку VERSION через curl (для чистых установок без файла COMMIT и без git)
     command -v curl >/dev/null 2>&1 || return 0
+    local remote_ver newest
     remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
     [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0

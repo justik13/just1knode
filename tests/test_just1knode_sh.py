@@ -1685,6 +1685,7 @@ run_doctor
 
     def test_node_update_check_detects_newer_remote(self):
         """check_node_update_on_entry warns when remote VERSION differs (mocked curl)."""
+        self._create_mock_script("git", "#!/bin/sh\nexit 1\n")
         self._create_mock_script("curl", "#!/bin/sh\necho '99.99.99'\n")
         res = self._run_shell_snippet("check_node_update_on_entry")
         self.assertEqual(res.returncode, 0)
@@ -1692,6 +1693,7 @@ run_doctor
 
     def test_node_update_check_silent_when_up_to_date(self):
         """check_node_update_on_entry stays silent when remote VERSION matches."""
+        self._create_mock_script("git", "#!/bin/sh\nexit 1\n")
         current = (NODE_ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self._create_mock_script("curl", f"#!/bin/sh\necho '{current}'\n")
         res = self._run_shell_snippet("check_node_update_on_entry")
@@ -1700,6 +1702,7 @@ run_doctor
 
     def test_node_update_check_silent_when_remote_older(self):
         """No 'new version' notice when remote VERSION is older than local."""
+        self._create_mock_script("git", "#!/bin/sh\nexit 1\n")
         self._create_mock_script("curl", "#!/bin/sh\necho '0.0.0'\n")
         res = self._run_shell_snippet("check_node_update_on_entry")
         self.assertEqual(res.returncode, 0)
@@ -1707,11 +1710,55 @@ run_doctor
 
     def test_node_update_check_silent_for_invalid_remote(self):
         """Malformed remote VERSION values are ignored, never rendered."""
+        self._create_mock_script("git", "#!/bin/sh\nexit 1\n")
         for bad in ["2.1.2-beta", "garbage", "", "v2.1.3", "999"]:
             self._create_mock_script("curl", f"#!/bin/sh\necho '{bad}'\n")
             res = self._run_shell_snippet("check_node_update_on_entry")
             self.assertEqual(res.returncode, 0, f"failed for remote={bad!r}: {res.stderr}")
             self.assertEqual(res.stdout.strip(), "", f"notice shown for remote={bad!r}")
+
+    def test_node_update_check_detects_commit_diff(self):
+        """check_node_update_on_entry warns when remote commit differs from local SHA."""
+        self._create_mock_script(
+            "git",
+            "#!/bin/sh\nprintf '1111111111111111111111111111111111111111\\trefs/heads/main\\n'\n",
+        )
+        self._create_mock_script("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        res = self._run_shell_snippet(
+            "check_node_update_on_entry",
+            extra_env={"JUST1KNODE_LOCAL_SHA": "0" * 40},
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Доступны изменения в GitHub origin/main", res.stdout)
+
+    def test_node_update_check_silent_when_commit_identical(self):
+        """check_node_update_on_entry silent when remote commit matches local SHA."""
+        self._create_mock_script(
+            "git",
+            "#!/bin/sh\nprintf '0000000000000000000000000000000000000000\\trefs/heads/main\\n'\n",
+        )
+        self._create_mock_script("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        res = self._run_shell_snippet(
+            "check_node_update_on_entry",
+            extra_env={"JUST1KNODE_LOCAL_SHA": "0" * 40},
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout.strip(), "")
+
+    def test_node_update_check_detects_commit_diff_from_git_repo(self):
+        """check_node_update_on_entry warns when running in git repo and remote differs."""
+        script = """#!/bin/sh
+case "$*" in
+    *rev-parse*HEAD*) printf '0000000000000000000000000000000000000000\\n' ;;
+    *ls-remote*) printf '1111111111111111111111111111111111111111\\trefs/heads/main\\n' ;;
+    *) exit 1 ;;
+esac
+"""
+        self._create_mock_script("git", script)
+        self._create_mock_script("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        res = self._run_shell_snippet("check_node_update_on_entry")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Доступны изменения в GitHub origin/main", res.stdout)
 
     # -------------------------------------------------------------------------
     # Functional Validation: Origin Node Installation & Complete Artifacts
