@@ -3856,6 +3856,25 @@ with open(path, 'w', encoding='utf-8') as f:
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
+    def test_vless_domain_management_and_candidate_discovery(self):
+        """Verify VLESS domain candidate auto-discovery prioritizes valid DNS/mtime and CLI/menu allows domain setup."""
+        relay_sh = (REPO_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
+
+        # 1. Candidate discovery must use detect_relay_domain_candidates and not alphabetical glob
+        self.assertIn('auto_domain="$(detect_relay_domain_candidates "$my_ip"', relay_sh)
+        self.assertNotIn('for c_dir in "${cert_dirs[@]}"; do', relay_sh)
+
+        # 2. setup_vless_domain function exists in relay.sh
+        self.assertIn("setup_vless_domain()", relay_sh)
+
+        # 3. just1knode.sh menu has option [2] for VLESS domain configuration
+        self.assertIn("setup_vless_domain; read -rp", just1knode_sh)
+
+        # 4. just1knode.sh CLI dispatcher routes vless domain
+        self.assertIn("domain|set-domain|change-domain) setup_vless_domain", just1knode_sh)
+        self.assertIn("vless-domain|setup-vless-domain)", just1knode_sh)
+
 
 if __name__ == "__main__":
     unittest.main()
