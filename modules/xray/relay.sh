@@ -578,7 +578,22 @@ setup_xray_api_proxy() {
             cp -a "$amnezia_enabled" "$amnezia_nginx" 2>/dev/null || true
         fi
         local amnezia_bak="${amnezia_nginx}.user.bak"
-        if ! grep -q "location /v1/" "$amnezia_nginx"; then
+        local needs_v1_injection=0
+        if python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        content = f.read()
+    parts = re.split(r'(\bserver\s*\{)', content)
+    missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))
+    sys.exit(0 if missing else 1)
+except Exception:
+    sys.exit(1)
+" "$amnezia_nginx" 2>/dev/null; then
+            needs_v1_injection=1
+        fi
+
+        if [[ $needs_v1_injection -eq 1 ]]; then
             cp -p "$amnezia_nginx" "$amnezia_bak" 2>/dev/null || true
             mkdir -p /etc/nginx/conf.d
             if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
@@ -588,7 +603,7 @@ limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;
 EOF
             fi
             python3 -c "
-import sys
+import re, sys
 path = sys.argv[1]
 with open(path, 'r', encoding='utf-8') as f:
     content = f.read()
@@ -607,14 +622,33 @@ v1_block = '''    location /v1/ {
         proxy_send_timeout 30s;
     }
 
-    location / {'''
-if 'location / {' in content:
-    new_content = content.replace('location / {', v1_block, 1)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(new_content)
+'''
+
+parts = re.split(r'(\bserver\s*\{)', content)
+new_parts = []
+for i, part in enumerate(parts):
+    if i % 2 == 0 and i > 0:
+        if 'location / {' in part and 'location /v1/' not in part:
+            part = part.replace('location / {', v1_block + '    location / {', 1)
+    new_parts.append(part)
+
+new_content = ''.join(new_parts)
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(new_content)
 " "$amnezia_nginx" 2>/dev/null || true
-            if ! grep -q "location /v1/" "$amnezia_nginx"; then
-                warn "Nginx: не удалось внедрить маршрут /v1/ в $amnezia_nginx"
+
+            if python3 -c "
+import re, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        content = f.read()
+    parts = re.split(r'(\bserver\s*\{)', content)
+    missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))
+    sys.exit(0 if missing else 1)
+except Exception:
+    sys.exit(0)
+" "$amnezia_nginx" 2>/dev/null; then
+                warn "Nginx: не удалось внедрить маршрут /v1/ во все блоки server в $amnezia_nginx"
                 if [[ -f "$amnezia_bak" ]]; then
                     cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
                     rm -f "$amnezia_bak" 2>/dev/null || true
