@@ -821,17 +821,30 @@ install_xray_relay_node() {
     if [[ -z "$dest_server" ]]; then
         local auto_domain=""
         local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
-        local cert_dirs=("${le_dir}"/live/*)
-        for c_dir in "${cert_dirs[@]}"; do
-            if [[ -f "${c_dir}/fullchain.pem" ]]; then
-                local cand
-                cand="$(basename "$c_dir")"
-                if [[ "$cand" != "README" && "$cand" != "*" ]]; then
-                    auto_domain="$cand"
-                    break
-                fi
-            fi
-        done
+        if [[ -n "$my_ip" ]]; then
+            auto_domain="$(detect_relay_domain_candidates "$my_ip" | head -n 1 || true)"
+        fi
+        if [[ -z "$auto_domain" && -d "${le_dir}/live" ]]; then
+            auto_domain="$(python3 -c "
+import os, glob, sys
+le_dir = sys.argv[1]
+cands = []
+for d in glob.glob(os.path.join(le_dir, 'live', '*')):
+    if not os.path.isdir(d): continue
+    dom = os.path.basename(d)
+    if dom in ('README', '*'): continue
+    fc = os.path.join(d, 'fullchain.pem')
+    pk = os.path.join(d, 'privkey.pem')
+    if os.path.isfile(fc) and os.path.isfile(pk):
+        try:
+            cands.append((os.path.getmtime(fc), dom))
+        except Exception:
+            pass
+cands.sort(key=lambda x: x[0], reverse=True)
+if cands:
+    print(cands[0][1])
+" "$le_dir" 2>/dev/null || true)"
+        fi
 
         echo -e "\n${BOLD}=== НАСТРОЙКА ДОМЕНА ДЛЯ СВЯЗИ ORIGIN ➔ RELAY (VLESS TLS) ===${NC}"
         echo -e "Для исключения блокировок ТСПУ по сверке SNI ➔ DNS (nDPI NDPI_UNRESOLVED_HOSTNAME)"
