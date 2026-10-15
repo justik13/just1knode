@@ -562,6 +562,8 @@ setup_xray_api_proxy() {
             cp -a "$amnezia_enabled" "$amnezia_nginx" 2>/dev/null || true
         fi
         if ! grep -q "location /v1/" "$amnezia_nginx"; then
+            local amnezia_bak="${amnezia_nginx}.user.bak"
+            cp -p "$amnezia_nginx" "$amnezia_bak" 2>/dev/null || true
             mkdir -p /etc/nginx/conf.d
             if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
                 cat > "/etc/nginx/conf.d/amnezia-ratelimit.conf" <<'EOF'
@@ -597,13 +599,22 @@ if 'location / {' in content:
 " "$amnezia_nginx" 2>/dev/null || true
             if ! grep -q "location /v1/" "$amnezia_nginx"; then
                 warn "Nginx: не удалось внедрить маршрут /v1/ в $amnezia_nginx"
+                if [[ -f "$amnezia_bak" ]]; then
+                    cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                    rm -f "$amnezia_bak" 2>/dev/null || true
+                fi
                 return 1
             fi
             ln -sf "$amnezia_nginx" "$amnezia_enabled" 2>/dev/null || true
             if ! nginx -t >/dev/null 2>&1; then
                 warn "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси xray-api (/v1/)."
+                if [[ -f "$amnezia_bak" ]]; then
+                    cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                    rm -f "$amnezia_bak" 2>/dev/null || true
+                fi
                 return 1
             fi
+            rm -f "$amnezia_bak" 2>/dev/null || true
             systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
             log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
         else
@@ -653,7 +664,7 @@ EOF
             ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
             if ! nginx -t >/dev/null 2>&1; then
                 warn "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
-                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf
+                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
                 return 1
             fi
             systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
@@ -2046,8 +2057,8 @@ else:
 with open(out_f, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 " "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file" "$tmp_cfg"; then
-        error "Ошибка генерации конфигурации Xray для VLESS. Исходный файл не изменен."
         rm -f "$tmp_cfg" 2>/dev/null || true
+        error "Ошибка генерации конфигурации Xray для VLESS. Исходный файл не изменен."
         return 1
     fi
 
@@ -2065,6 +2076,11 @@ with open(out_f, 'w', encoding='utf-8') as f:
             rm -f "$XRAY_CONFIG" 2>/dev/null || true
         fi
 
+        # Откат правила UFW для 443 (если 443 не использовался ранее для Relay)
+        if [[ "$orig_has_vless" != "1" && "$(get_state_val "relay_port" "")" != "443" ]]; then
+            ufw delete allow 443/tcp >/dev/null 2>&1 || true
+        fi
+
         # Откат fallback хоста Nginx
         rm -f /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
         if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "/etc/nginx/sites-enabled/default" ]]; then
@@ -2074,6 +2090,15 @@ with open(out_f, 'w', encoding='utf-8') as f:
             if nginx -t >/dev/null 2>&1; then
                 systemctl reload nginx 2>/dev/null || true
             fi
+        fi
+
+        # Откат автономного виртуального хоста VLESS API Nginx
+        rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+
+        # Остановка xray-api, если на сервере не настроен Relay
+        if [[ "$(get_state_val "has_relay" "0")" != "1" ]]; then
+            systemctl stop xray-api 2>/dev/null || true
+            systemctl disable xray-api 2>/dev/null || true
         fi
 
         # Восстановление состояния state.json

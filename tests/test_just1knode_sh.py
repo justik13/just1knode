@@ -3703,6 +3703,9 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('if ! setup_xray_api_proxy "$dest_server"; then', relay_sh)
         self.assertIn('set_state_val "has_vless" "$orig_has_vless"', relay_sh)
         self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
+        self.assertIn('ufw delete allow 443/tcp', relay_sh)
+        self.assertIn('systemctl stop xray-api', relay_sh)
+        self.assertIn('local amnezia_bak="${amnezia_nginx}.user.bak"', relay_sh)
         # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
         idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
         idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
