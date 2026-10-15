@@ -3669,6 +3669,29 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('JUST1KNODE_NON_INTERACTIVE', relay_sh)
         self.assertIn('! -t 0', relay_sh)
 
+    def test_xray_tmp_config_uses_json_suffix_and_format_flag(self):
+        """Verify temporary Xray configs have .tmp.json suffix and run -test passes -format json."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('local tmp_xray_config="${XRAY_CONFIG}.tmp.json"', relay_sh)
+        self.assertIn('local tmp_cfg="${XRAY_CONFIG}.tmp.json"', relay_sh)
+        self.assertNotIn('local tmp_xray_config="${XRAY_CONFIG}.tmp"', relay_sh)
+        self.assertNotIn('local tmp_cfg="${XRAY_CONFIG}.tmp"', relay_sh)
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_xray_config"', relay_sh)
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_cfg"', relay_sh)
+
+    def test_deploy_vless_fallback_nginx_disables_default_site(self):
+        """Verify deploy_vless_fallback_nginx disables conflicting package default site before linking."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('local def_site="/etc/nginx/sites-enabled/default"', relay_sh)
+        self.assertIn('rm -f "$def_site"', relay_sh)
+
+    def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
+        """Verify heal_node_firewall and install_vless do not expose dead 8444 when Amnezia Nginx is active."""
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then', common_sh)
+        self.assertIn('Amnezia Nginx (порт 8443 /v1/)', relay_sh)
+
 
 if __name__ == "__main__":
     unittest.main()

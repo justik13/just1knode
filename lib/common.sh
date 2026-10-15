@@ -644,17 +644,9 @@ heal_node_firewall_and_stealth() {
             fi
         fi
 
-        # Защита xray-api (порт 8444 активен если есть just1k-vless-api.conf, роль vless или активен компонент VLESS)
-        if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$role" == "vless" || "$cur_has_vless" == "1" ]]; then
-            local v_bot_ip
-            v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
-                if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
-                    ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
-                fi
-            fi
-        elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" && "$cur_has_vless" != "1" && "$role" != "vless" ]]; then
-            # На узлах чисто Amnezia (без VLESS) API слушается только на 8443 (/v1/), удаляем мертвое правило 8444
+        # Защита xray-api (порт 8444 активен ТОЛЬКО при наличии автономного just1k-vless-api.conf либо на узлах без Amnezia Nginx)
+        if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+            # На узлах с Amnezia API слушается на порту 8443 (включая /v1/ для xray-api), удаляем мертвое правило 8444
             if ! is_ssh_port "8444"; then
                 local v_bot_ip
                 v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
@@ -663,6 +655,14 @@ heal_node_firewall_and_stealth() {
                 fi
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
                 ufw delete allow 8444 >/dev/null 2>&1 || true
+            fi
+        elif [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$role" == "vless" || "$cur_has_vless" == "1" ]]; then
+            local v_bot_ip
+            v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
+                if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
+                    ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
+                fi
             fi
         fi
     fi

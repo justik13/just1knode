@@ -516,6 +516,11 @@ server {
     }
 }
 EOF
+    local def_site="/etc/nginx/sites-enabled/default"
+    if [[ -f "$def_site" || -L "$def_site" ]]; then
+        cp -L "$def_site" "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
+        rm -f "$def_site" 2>/dev/null || true
+    fi
     ln -sf "$fb_conf" /etc/nginx/sites-enabled/just1k-fallback80.conf 2>/dev/null || true
     if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
@@ -859,7 +864,7 @@ print('[]')
     fi
 
     log "Формирование конфигурации Relay ноды (VLESS ${sec_mode^^})..."
-    local tmp_xray_config="${XRAY_CONFIG}.tmp"
+    local tmp_xray_config="${XRAY_CONFIG}.tmp.json"
     cat > "$tmp_xray_config" <<EOF
 {
   "log": {
@@ -981,7 +986,7 @@ EOF
 
     apply_node_sysctl_hardening
 
-    if ! "$XRAY_BIN" run -test -config "$tmp_xray_config"; then
+    if ! "$XRAY_BIN" run -test -format json -config "$tmp_xray_config"; then
         rm -f "$tmp_xray_config"
         error "Ошибка тестирования сгенерированной конфигурации Xray на Relay узле. Изменения не применены."
         return 1
@@ -1887,9 +1892,13 @@ install_vless_direct_node() {
     fi
     if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
         set_state_val "bot_ip" "$bot_ip"
-        log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
+        if [[ -f "/etc/nginx/sites-available/just1k-amnezia.conf" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+            log "Фаервол UFW: API доступен через Amnezia Nginx (порт 8443 /v1/) строго для BOT_IP: ${bot_ip}"
+        else
+            log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
+        fi
     else
-        warn "BOT_IP не указан или невалиден. API 8444 будет закрыт от внешнего мира в UFW (Fail-Closed)."
+        warn "BOT_IP не указан или невалиден. API будет закрыт от внешнего мира в UFW (Fail-Closed)."
     fi
 
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
@@ -1901,7 +1910,15 @@ install_vless_direct_node() {
     fi
 
     install_xray_binaries
-    create_backup "$XRAY_CONFIG"
+    local bkp_cfg=""
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        mkdir -p "${BACKUP_DIR:-/var/backups/just1knode}"
+        chmod 700 "${BACKUP_DIR:-/var/backups/just1knode}" 2>/dev/null || true
+        bkp_cfg="${BACKUP_DIR:-/var/backups/just1knode}/$(basename "$XRAY_CONFIG")_$(date +%Y%m%d_%H%M%S).bak"
+        cp -p "$XRAY_CONFIG" "$bkp_cfg"
+        chmod 600 "$bkp_cfg" 2>/dev/null || true
+        log "Создан защитный бэкап: $bkp_cfg"
+    fi
 
     local tls_cert_dir="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}"
     local tls_cert_file="${tls_cert_dir}/vless_fullchain.pem"
@@ -1911,7 +1928,7 @@ install_vless_direct_node() {
         tls_key_file="${tls_cert_dir}/privkey.pem"
     fi
 
-    local tmp_cfg="${XRAY_CONFIG}.tmp"
+    local tmp_cfg="${XRAY_CONFIG}.tmp.json"
     if ! python3 -c "
 import json, os, sys
 cfg_file, cert_f, key_f, out_f = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -2001,7 +2018,7 @@ with open(out_f, 'w', encoding='utf-8') as f:
 
     ensure_xray_config_permissions "$tmp_cfg"
 
-    if ! "$XRAY_BIN" run -test -config "$tmp_cfg"; then
+    if ! "$XRAY_BIN" run -test -format json -config "$tmp_cfg"; then
         error "Ошибка валидации сгенерированной конфигурации Xray для VLESS. Откат к исходной."
         rm -f "$tmp_cfg" 2>/dev/null || true
         return 1
@@ -2020,7 +2037,16 @@ with open(out_f, 'w', encoding='utf-8') as f:
     set_state_val "role" "node"
 
     deploy_vless_fallback_nginx
-    setup_xray_api_proxy "$dest_server"
+    if ! setup_xray_api_proxy "$dest_server"; then
+        error "Ошибка настройки прокси/службы xray-api. Откат конфигурации Xray..."
+        if [[ -n "$bkp_cfg" && -f "$bkp_cfg" ]]; then
+            cp -f "$bkp_cfg" "$XRAY_CONFIG"
+            ensure_xray_config_permissions "$XRAY_CONFIG"
+            systemctl restart xray 2>/dev/null || true
+        fi
+        set_state_val "has_vless" "0"
+        return 1
+    fi
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
     echo ""
