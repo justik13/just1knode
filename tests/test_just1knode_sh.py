@@ -544,8 +544,9 @@ exit 0
                 self.assertFalse(ib["sniffing"]["routeOnly"])
                 self.assertIn("quic", ib["sniffing"]["destOverride"])
 
-        # 5. Check BitTorrent and SMTP:25 blocking rules on Origin
+        # 5. Check geoip:private, BitTorrent and SMTP:25 blocking rules on Origin
         origin_rules = updated["routing"]["rules"]
+        self.assertTrue(any(r.get("ip") == ["geoip:private"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "geoip:private block rule must be present on Origin")
         self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
 
@@ -733,6 +734,8 @@ socket.getaddrinfo = _mock_gai
         self.assertIn("proxy_read_timeout 86400s;", origin_sh)
         self.assertIn("client_header_buffer_size 16k;", origin_sh)
         self.assertIn("proxy_pass http://xray_xhttp_default;", origin_sh)
+        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', origin_sh)
+        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', origin_sh)
 
         self.assertIn("'scMaxEachPostBytes': 1000000", relays_manage_sh)
         self.assertIn("'serverMaxHeaderBytes': 65536", relays_manage_sh)
@@ -933,10 +936,11 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('update_node_post "$target" "${is_menu:-0}"', core_sh)
 
     def test_ensure_xray_api_healthy_guards_relay_nodes(self):
-        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes."""
+        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes without vless."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         self.assertIn('role="$(get_state_val "role" "")"', common_sh)
-        self.assertIn('if [[ "$role" != "origin" ]]; then\n        return 0\n    fi', common_sh)
+        self.assertIn('cur_has_v="$(get_state_val "has_vless" "0")"', common_sh)
+        self.assertIn('if [[ "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
@@ -2152,6 +2156,13 @@ run_doctor
 
     def test_init_state_dir_sets_sgid_and_permissions(self):
         self._prepare_base_env()
+        idemp_db = self.state_dir / "idempotency.db"
+        idemp_wal = self.state_dir / "idempotency.db-wal"
+        idemp_db.write_text("dummy", encoding="utf-8")
+        idemp_wal.write_text("dummy", encoding="utf-8")
+        os.chmod(idemp_db, 0o600)
+        os.chmod(idemp_wal, 0o600)
+
         res = self._run_shell_snippet("init_state_dir")
         self.assertEqual(res.returncode, 0)
         st = os.stat(self.state_dir)
@@ -2170,6 +2181,16 @@ run_doctor
             )
             self.assertEqual(
                 st_file.st_mode & 0o0007, 0, "State file must have zero permissions for others"
+            )
+
+        for p in (idemp_db, idemp_wal):
+            st_idemp = os.stat(p)
+            self.assertTrue(
+                bool(st_idemp.st_mode & 0o0660),
+                f"{p.name} must have rw permissions for owner and group",
+            )
+            self.assertEqual(
+                st_idemp.st_mode & 0o0007, 0, f"{p.name} must have zero permissions for others"
             )
 
     def test_detect_existing_nginx_sites_in_just1knode(self):
@@ -2314,8 +2335,9 @@ ensure_xrayapi_user
         else:
             self.assertTrue(bool(st & 0o600))
 
-        # Verify BitTorrent and SMTP:25 filtering and blackhole block outbound injected
+        # Verify geoip:private, BitTorrent and SMTP:25 filtering and blackhole block outbound injected
         rules = updated_cfg.get("routing", {}).get("rules", [])
+        self.assertTrue(any("geoip:private" in r.get("ip", []) and r.get("outboundTag") == "block" for r in rules), "geoip:private block rule must be present on Relay")
         self.assertTrue(any("bittorrent" in r.get("protocol", []) for r in rules), "BitTorrent protocol rule must be present")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "block" for r in rules), "SMTP:25 block rule must be present on Relay")
         self.assertTrue(any(ob.get("tag") == "block" and ob.get("protocol") == "blackhole" for ob in updated_cfg.get("outbounds", [])), "Blackhole outbound must be present")
@@ -2657,12 +2679,10 @@ remove_traffic_watchdog_timer
     def test_amnezia_antiabuse_persistence_and_doctor_invariants(self):
         """Verify anti-abuse persistence, update_node integration, and doctor auto-heal invariants."""
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        self.assertIn('elif [[ "$role" == "dual" ]]; then', core_sh)
-        self.assertIn('heal_and_update_relay_config\n        apply_amnezia_abuse_protection', core_sh)
         self.assertIn('elif [[ "$role" == "awg" ]]; then\n        apply_amnezia_abuse_protection', core_sh)
 
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('log "Режим узла обновлен до: DUAL (Совмещенный Relay + AmneziaWG)"\n        apply_amnezia_abuse_protection', relay_sh)
+        self.assertIn('apply_amnezia_abuse_protection', relay_sh)
 
         main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn("anti-abuse|antiabuse|apply-abuse-protection)", main_sh)
@@ -2948,33 +2968,26 @@ remove_traffic_watchdog_timer
 
 
     def test_validate_ip_ipv4_and_ipv6_behaviour(self):
-        """Verify validate_ip logic handles both IPv4 and IPv6 properly."""
-        import ipaddress
-
-        def mock_validate_ip(ip_str: str) -> bool:
-            if not ip_str or not isinstance(ip_str, str):
-                return False
-            try:
-                addr = ipaddress.ip_address(ip_str.strip())
-                return not addr.is_multicast and not addr.is_unspecified and not addr.is_reserved
-            except ValueError:
-                return False
+        """Verify real validate_ip bash function handles both IPv4 and IPv6 properly."""
+        def run_validate_ip(ip_str: str) -> bool:
+            res = self._run_shell_snippet(f'validate_ip "{ip_str}"')
+            return res.returncode == 0
 
         # Valid IPv4
-        self.assertTrue(mock_validate_ip("192.168.1.1"))
-        self.assertTrue(mock_validate_ip("1.1.1.1"))
-        self.assertTrue(mock_validate_ip("185.220.101.5"))
+        self.assertTrue(run_validate_ip("192.168.1.1"))
+        self.assertTrue(run_validate_ip("1.1.1.1"))
+        self.assertTrue(run_validate_ip("185.220.101.5"))
 
         # Valid IPv6
-        self.assertTrue(mock_validate_ip("2001:db8::1"))
-        self.assertTrue(mock_validate_ip("2a00:1450:4010:c08::71"))
+        self.assertTrue(run_validate_ip("2001:db8::1"))
+        self.assertTrue(run_validate_ip("2a00:1450:4010:c08::71"))
 
         # Invalid IP addresses
-        self.assertFalse(mock_validate_ip("256.1.1.1"))
-        self.assertFalse(mock_validate_ip("0.0.0.0"))
-        self.assertFalse(mock_validate_ip("255.255.255.255"))
-        self.assertFalse(mock_validate_ip("::"))
-        self.assertFalse(mock_validate_ip("not-an-ip"))
+        self.assertFalse(run_validate_ip("256.1.1.1"))
+        self.assertFalse(run_validate_ip("0.0.0.0"))
+        self.assertFalse(run_validate_ip("255.255.255.255"))
+        self.assertFalse(run_validate_ip("::"))
+        self.assertFalse(run_validate_ip("not-an-ip"))
 
     def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
         """Verify uninstall_node and uninstall_amnezia_component remove awg_port and bot_ip from UFW."""
@@ -3523,8 +3536,10 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'geosite:category-ru'", origin_sh)
         self.assertIn("'geosite:tld-ru'", origin_sh)
         self.assertIn("'outboundTag': 'just1k-wl-direct'", origin_sh)
+        self.assertIn("'geoip:private'", origin_sh)
         self.assertIn("insert_idx = rules.index(dom_rule) + 1", relays_manage_sh)
         self.assertIn("'geosite:category-ru'", relays_manage_sh)
+        self.assertIn("'geoip:private'", relays_manage_sh)
 
     def test_state_and_watchdog_locks_use_o_nofollow_and_fchmod(self):
         """Invariant: state.sh, traffic_watchdog.sh and traffic_watchdog.py must use O_NOFOLLOW and fd-based fchmod."""
@@ -3609,6 +3624,50 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # add_relay_node and rename_relay_node normalization
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
         self.assertIn('ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
+
+    def test_migrate_legacy_state_and_vless_invariants(self):
+        """Verify legacy state migration, root:xrayapi permissions, and anti-probing fallbacks."""
+        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+
+        # 1. State migration invariants
+        self.assertIn("migrate_legacy_state()", state_sh)
+        self.assertIn("migrate_legacy_state", core_sh)
+        self.assertIn("get_node_status()", state_sh)
+
+        # 2. Xray config permission invariants
+        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
+        self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
+
+        # 3. Fallback and anti-probing invariants
+        self.assertIn("deploy_vless_fallback_nginx", relay_sh)
+        self.assertIn("'alpn': ['http/1.1']", relay_sh)
+        self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
+        self.assertIn("server_tokens off;", relay_sh)
+        self.assertIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertIn("'minVersion': '1.2'", relay_sh)
+        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', relay_sh)
+        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', relay_sh)
+
+        # 4. Doctor and firewall UFW regex invariants
+        self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
+        self.assertIn("just1k-vless-api.conf", common_sh)
+        self.assertIn("just1k-amnezia.conf", common_sh)
+
+    def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
+        """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        self.assertIn('local xray_cache_dest="${node_dir}/scripts/xray_api"', core_sh)
+        self.assertIn('"${repo_url}/archive/refs/tags/${ref}.tar.gz"', core_sh)
+
+    def test_select_relay_domain_non_interactive_guard(self):
+        """Verify select_relay_domain_interactive guards against blocking read under non-interactive update."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('JUST1KNODE_NON_INTERACTIVE', relay_sh)
+        self.assertIn('! -t 0', relay_sh)
 
 
 if __name__ == "__main__":

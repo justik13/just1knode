@@ -125,3 +125,63 @@ def test_probe_user_presence_and_verify_absent_lifecycle():
     assert client.verify_user_absent(tag, user_uuid) is True
     assert not mock_stub.AlterInbound.called
 
+
+def test_add_user_reapplies_flow_on_already_exists():
+    import grpc
+    client = XrayGrpcClient()
+    mock_channel = MagicMock()
+    mock_stub = MagicMock()
+
+    call_count = 0
+
+    def alter_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            rpc_err = grpc.RpcError()
+            rpc_err.details = lambda: "User already exists."
+            raise rpc_err
+        return MagicMock()
+
+    mock_stub.AlterInbound.side_effect = alter_side_effect
+
+    with patch.object(client, "_get_channel", return_value=mock_channel):
+        with patch("xray.app.proxyman.command.command_pb2_grpc.HandlerServiceStub", return_value=mock_stub):
+            with patch.object(client, "remove_user", return_value=True) as mock_remove:
+                user_uuid = "a2b9d4e1-73c5-4812-b964-f3e7b85a1902"
+                res = client.add_user("inbound-de", user_uuid, flow="xtls-rprx-vision")
+                assert res is True
+                assert mock_remove.called
+                assert call_count == 2
+                assert client.probe_user_presence("inbound-de", user_uuid) is True
+
+
+def test_add_user_reapplies_flow_raises_on_retry_failure():
+    import grpc
+    import pytest
+    client = XrayGrpcClient()
+    mock_channel = MagicMock()
+    mock_stub = MagicMock()
+
+    call_count = 0
+
+    def alter_side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        rpc_err = grpc.RpcError()
+        rpc_err.details = lambda: "User already exists." if call_count == 1 else "Internal error on re-add."
+        raise rpc_err
+
+    mock_stub.AlterInbound.side_effect = alter_side_effect
+
+    with patch.object(client, "_get_channel", return_value=mock_channel):
+        with patch("xray.app.proxyman.command.command_pb2_grpc.HandlerServiceStub", return_value=mock_stub):
+            with patch.object(client, "remove_user", return_value=True) as mock_remove:
+                user_uuid = "a2b9d4e1-73c5-4812-b964-f3e7b85a1902"
+                with pytest.raises(grpc.RpcError):
+                    client.add_user("inbound-de", user_uuid, flow="xtls-rprx-vision")
+                assert mock_remove.called
+                assert call_count == 2
+                assert client.probe_user_presence("inbound-de", user_uuid) is False
+
+

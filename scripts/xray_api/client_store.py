@@ -40,8 +40,12 @@ class ClientStore:
 
     def load_client_entries(self) -> Dict[str, Dict[str, Any]]:
         """Loads all client metadata entries {uuid: {is_active: bool, version: int, updated_at: float}}."""
-        if not self.file_path.exists() or self.file_path.stat().st_size == 0:
+        if not self.file_path.exists():
             return {}
+        if self.file_path.stat().st_size == 0:
+            raise ClientStoreCorruptedError(
+                f"Client store file exists but is empty (0 bytes): {self.file_path}"
+            )
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -162,65 +166,291 @@ class ClientStore:
             except Exception:
                 pass
 
+    @staticmethod
+    def canonicalize_service(service: Optional[str]) -> Optional[str]:
+        if not service:
+            return None
+        s = str(service).strip().lower()
+        if s in ("wl", "white_internet"):
+            return "white_internet"
+        if s in ("vless", "xray_vless"):
+            return "vless"
+        return s
+
+    def _detect_default_service(self) -> str:
+        """Detects default service namespace ('white_internet' or 'vless') based on node configuration."""
+        raw_env = os.getenv("XRAY_INBOUND_TAGS")
+        if raw_env:
+            tags = [t.strip().lower() for t in raw_env.split(",") if t.strip()]
+            has_wl = any(
+                t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                for t in tags
+            )
+            has_vless = any(
+                t.startswith("just1k-vless-") or t == "just1k-vless-direct"
+                for t in tags
+            )
+            if has_wl and not has_vless:
+                return "white_internet"
+            if has_vless and not has_wl:
+                return "vless"
+
+        state_candidates = [
+            os.getenv("STATE_FILE_PATH"),
+            os.getenv("JUST1K_STATE_PATH"),
+            "/etc/just1knode/state.json",
+            "/etc/just1k/state.json",
+        ]
+        for sc in state_candidates:
+            if not sc:
+                continue
+            state_path = Path(sc)
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                        if isinstance(sdata, dict):
+                            role = sdata.get("role")
+                            has_vless = str(sdata.get("has_vless", "")) == "1"
+                            has_wl = str(sdata.get("has_wl", "")) == "1" or role == "origin"
+                            if has_wl and not has_vless:
+                                return "white_internet"
+                            if has_vless and not has_wl:
+                                return "vless"
+                    break
+                except Exception:
+                    pass
+
+        config_candidates = [
+            os.getenv("XRAY_CONFIG_PATH"),
+            "/usr/local/etc/xray/config.json",
+            "/etc/xray/config.json",
+        ]
+        for cc in config_candidates:
+            if not cc:
+                continue
+            config_path = Path(cc)
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cdata = json.load(f)
+                        inbounds = cdata.get("inbounds", [])
+                        tags = [ib.get("tag", "").lower() for ib in inbounds if isinstance(ib, dict)]
+                        has_wl = any(
+                            t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                            for t in tags
+                        )
+                        has_vless = any(
+                            t.startswith("just1k-vless-") or t == "just1k-vless-direct"
+                            for t in tags
+                        )
+                        if has_wl:
+                            return "white_internet"
+                        if has_vless:
+                            return "vless"
+                    break
+                except Exception:
+                    pass
+
+        return "vless"
+
+    def _extract_or_migrate_service_states(self, existing_entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract existing service_states dict or migrate legacy entry without service_states."""
+        curr_service_states = existing_entry.get("service_states")
+        if isinstance(curr_service_states, dict):
+            return dict(curr_service_states)
+
+        curr_service_states = {}
+        if existing_entry:
+            raw_services = existing_entry.get("services") or []
+            if not isinstance(raw_services, list):
+                raw_services = [raw_services] if raw_services else []
+            legacy_services = [s for s in raw_services if s]
+            raw_svc = existing_entry.get("service")
+            if raw_svc and raw_svc not in legacy_services:
+                legacy_services.append(raw_svc)
+            if not legacy_services:
+                legacy_services = [self._detect_default_service()]
+            legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
+            legacy_ver = existing_entry.get("version", 0)
+            legacy_tomb = bool(existing_entry.get("tombstone", False))
+            for s in legacy_services:
+                canon_s = self.canonicalize_service(s) or s
+                if canon_s:
+                    curr_service_states[canon_s] = {
+                        "is_active": legacy_act,
+                        "version": legacy_ver,
+                        "tombstone": legacy_tomb,
+                    }
+        return curr_service_states
+
     def add_client(
         self,
         client_uuid: str,
         version: Optional[int] = None,
         email: Optional[str] = None,
+        service: Optional[str] = None,
     ) -> None:
         self._ensure_dir()
         lock_fd = self._acquire_lock()
         try:
             entries = self.load_client_entries()
-            curr_ver = (
-                entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
+            existing_entry = entries.get(client_uuid, {})
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
+
+            svc_name = (
+                self.canonicalize_service(service)
+                or existing_entry.get("service")
+                or self._detect_default_service()
             )
-            new_ver = version if version is not None else max(curr_ver + 1, 1)
-            entry: Dict[str, Any] = {
+            svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
+            new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+
+            curr_service_states[svc_name] = {
                 "is_active": True,
-                "version": new_ver,
+                "version": new_svc_ver,
+                "tombstone": False,
                 "updated_at": time.time(),
             }
-            if email:
-                entry["email"] = email
+
+            active_services = [
+                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+            global_ver = max(
+                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
+                default=new_svc_ver,
+            )
+
+            entry: Dict[str, Any] = {
+                "is_active": bool(active_services),
+                "version": global_ver,
+                "services": active_services,
+                "service": svc_name,
+                "service_states": curr_service_states,
+                "tombstone": False,
+                "updated_at": time.time(),
+            }
+            if email or existing_entry.get("email"):
+                entry["email"] = email or existing_entry.get("email")
             entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client addition to disk: {client_uuid}")
         finally:
             self._release_lock(lock_fd)
 
-    def remove_client(self, client_uuid: str, version: Optional[int] = None) -> None:
+    def remove_client(
+        self, client_uuid: str, version: Optional[int] = None, service: Optional[str] = None
+    ) -> None:
         self._ensure_dir()
         lock_fd = self._acquire_lock()
         try:
             entries = self.load_client_entries()
-            curr_ver = (
-                entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
+            existing_entry = entries.get(client_uuid, {})
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
+
+            svc_name = self.canonicalize_service(service)
+            if svc_name:
+                svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
+                new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+                curr_service_states[svc_name] = {
+                    "is_active": False,
+                    "version": new_svc_ver,
+                    "tombstone": False,
+                    "updated_at": time.time(),
+                }
+            else:
+                # Deactivate all known services on unspecified service removal
+                for s in list(curr_service_states.keys()):
+                    svc_curr_ver = curr_service_states[s].get("version", 0)
+                    new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+                    curr_service_states[s] = {
+                        "is_active": False,
+                        "version": new_svc_ver,
+                        "tombstone": False,
+                        "updated_at": time.time(),
+                    }
+
+            active_services = [
+                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+            global_ver = max(
+                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
+                default=(version or 1),
             )
-            new_ver = version if version is not None else max(curr_ver + 1, 1)
-            entries[client_uuid] = {
-                "is_active": False,
-                "version": new_ver,
+
+            entry: Dict[str, Any] = {
+                "is_active": bool(active_services),
+                "version": global_ver,
+                "services": active_services,
+                "service_states": curr_service_states,
                 "updated_at": time.time(),
             }
+            if active_services:
+                entry["service"] = active_services[-1]
+            elif existing_entry.get("service"):
+                entry["service"] = existing_entry["service"]
+            if existing_entry.get("email"):
+                entry["email"] = existing_entry["email"]
+            entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deactivation to disk: {client_uuid}")
         finally:
             self._release_lock(lock_fd)
 
-    def delete_client(self, client_uuid: str, version: Optional[int] = None) -> None:
+    def delete_client(
+        self, client_uuid: str, version: Optional[int] = None, service: Optional[str] = None
+    ) -> None:
         self._ensure_dir()
         lock_fd = self._acquire_lock()
         try:
             entries = self.load_client_entries()
-            curr_ver = (
-                entries.get(client_uuid, {}).get("version", 0) if client_uuid in entries else 0
+            existing_entry = entries.get(client_uuid, {})
+            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
+            svc_name = self.canonicalize_service(service)
+            if svc_name:
+                svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
+                new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+                curr_service_states[svc_name] = {
+                    "is_active": False,
+                    "version": new_svc_ver,
+                    "tombstone": True,
+                    "updated_at": time.time(),
+                }
+            else:
+                services_to_tombstone = (
+                    list(curr_service_states.keys())
+                    if curr_service_states
+                    else ["vless", "white_internet"]
+                )
+                for s in services_to_tombstone:
+                    svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
+                    new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+                    curr_service_states[s] = {
+                        "is_active": False,
+                        "version": new_svc_ver,
+                        "tombstone": True,
+                        "updated_at": time.time(),
+                    }
+
+            active_services = [
+                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+            global_ver = max(
+                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
+                default=(version or 1),
             )
-            new_ver = version if version is not None else max(curr_ver + 1, 1)
+            is_global_tombstone = not bool(active_services) and (
+                all(st.get("tombstone") for st in curr_service_states.values())
+                if curr_service_states
+                else True
+            )
+
             entries[client_uuid] = {
-                "is_active": False,
-                "version": new_ver,
-                "tombstone": True,
+                "is_active": bool(active_services),
+                "version": global_ver,
+                "services": active_services,
+                "service_states": curr_service_states,
+                "tombstone": is_global_tombstone,
                 "updated_at": time.time(),
             }
             if not self.save_client_entries(entries):

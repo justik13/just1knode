@@ -121,7 +121,11 @@ install_xray_origin_node() {
 
     local prev_role
     prev_role="$(get_node_status)"
-    if [[ "$prev_role" == "awg" || "$prev_role" == "relay" || "$prev_role" == "dual" ]]; then
+    local has_a has_r has_v
+    has_a="$(get_state_val "has_awg" "0")"
+    has_r="$(get_state_val "has_relay" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+    if [[ "$prev_role" == "node" || "$prev_role" == "awg" || "$prev_role" == "relay" || "$has_a" == "1" || "$has_r" == "1" || "$has_v" == "1" ]]; then
         error "На узле уже активна роль '${prev_role}'. Origin (Белый Интернет) требует выделенный изолированный сервер."
         return 1
     fi
@@ -368,25 +372,30 @@ if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
         'settings': {'response': {'type': 'none'}}
     })
 
-rules.append({
-    'type': 'field',
-    'inboundTag': ['just1k-wl-api-grpc'],
-    'outboundTag': 'just1k-wl-api'
-})
-
-# Запрет BitTorrent (P2P трафик) на уровне ядра Xray
-rules.append({
-    'type': 'field',
-    'protocol': ['bittorrent'],
-    'outboundTag': 'just1k-wl-block'
-})
-
-# Запрет исходящего SMTP (порт 25, защита от спама)
-rules.append({
-    'type': 'field',
-    'port': '25',
-    'outboundTag': 'just1k-wl-block'
-})
+security_rules = [
+    {
+        'type': 'field',
+        'inboundTag': ['just1k-wl-api-grpc'],
+        'outboundTag': 'just1k-wl-api'
+    },
+    {
+        'type': 'field',
+        'ip': ['geoip:private'],
+        'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'protocol': ['bittorrent'],
+        'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'port': '25',
+        'outboundTag': 'just1k-wl-block'
+    }
+]
+for s_idx, s_rule in enumerate(security_rules):
+    rules.insert(s_idx, s_rule)
 
 # Split-Routing: прямой выход в Рунет с московского IP Origin-сервера
 rules.append({
@@ -654,6 +663,10 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
     client_max_body_size 0;
     client_body_buffer_size 128k;
     keepalive_requests 100000;
@@ -746,15 +759,24 @@ set_origin_bot_ip() {
     local target_port="8444"
     local role_descr="Origin API (порт 8444)"
 
+    local has_a has_v
+    has_a="$(get_state_val "has_awg" "0")"
+    has_v="$(get_state_val "has_vless" "0")"
+
     if [[ "$role" == "origin" ]]; then
         target_port="8444"
         role_descr="Origin API (порт 8444)"
-    elif [[ "$role" == "awg" || "$role" == "dual" ]]; then
-        target_port="$(get_state_val "awg_port" "8443")"
-        role_descr="AmneziaWG API (порт ${target_port})"
+    elif [[ "$role" == "awg" || "$role" == "node" || "$has_a" == "1" || "$has_v" == "1" || "$role" == "vless" ]]; then
+        if [[ "$has_a" == "1" || "$role" == "awg" ]]; then
+            target_port="$(get_state_val "awg_port" "8443")"
+            role_descr="AmneziaWG API (порт ${target_port})"
+        else
+            target_port="8444"
+            role_descr="Xray API (порт 8444)"
+        fi
     else
         release_just1knode_lock
-        error "Функция доступна только на узлах с ролью Origin, AmneziaWG или Dual (текущая роль: ${role:-не установлена})."
+        error "Функция доступна только на настроенных узлах (Origin, AmneziaWG или VLESS)."
         return 1
     fi
 
@@ -1073,6 +1095,14 @@ if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag
     rules.insert(1, {
         'type': 'field',
         'port': '25',
+        'outboundTag': 'just1k-wl-block'
+    })
+
+# 4.1d. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
+if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
+    rules.insert(1, {
+        'type': 'field',
+        'ip': ['geoip:private'],
         'outboundTag': 'just1k-wl-block'
     })
 
@@ -1507,6 +1537,13 @@ server {{
         content = re.sub(r'server\s*\{[^}]*listen\s+443\s+ssl\s+default_server[^}]*\}', fix_catchall, content, flags=re.DOTALL)
 
     content = re.sub(r'server\s*\{[^}]*listen\s+8443\s+ssl[^}]*\}\n*', '', content, flags=re.DOTALL)
+
+    if 'Strict-Transport-Security' not in content:
+        content = re.sub(
+            r'(ssl_ciphers\s+HIGH:!aNULL:!MD5;\n)',
+            r'\1    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;\n    add_header X-Content-Type-Options \"nosniff\" always;\n    add_header X-Frame-Options \"DENY\" always;\n',
+            content
+        )
 
     if 'keepalive_requests' in content:
         content = re.sub(r'keepalive_requests\s+\d+;', 'keepalive_requests 100000;', content)

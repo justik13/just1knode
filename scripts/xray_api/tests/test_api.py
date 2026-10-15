@@ -62,6 +62,9 @@ def test_auth_enforcement():
             assert data["xray_running"] is True
             assert data["grpc_ok"] is True
             assert "sub_path_prefix" in data
+            assert "services" in data
+            assert "capabilities" in data
+            assert "vless_domain" in data
 
 
 def test_sub_path_prefix_resolution(tmp_path):
@@ -209,8 +212,10 @@ def test_startup_reconciliation_db_authority():
             return_value=(100, 1000, "boot-1", "epoch_1"),
         ):
             health_after = client.get("/v1/health", headers=VALID_HEADERS).json()
-            assert health_after["sync_status"] == "synchronized"
-            assert health_after["synchronized"] is True
+            assert health_after["sync_status"] == "unsynchronized"
+            assert health_after["synchronized"] is False
+            assert health_after["last_synced_at"] is not None
+            assert node_sync_state["last_client_sync_at"] is not None
             assert uuid_active in client_store.load_clients()
             assert uuid_stale not in client_store.load_clients()
 
@@ -308,17 +313,29 @@ def test_client_sync_version_fencing():
             assert res.json()["result"] == "applied"
             assert res.json()["version"] == 5
 
-    # Try sync older version 4 (should be fenced/ignored)
-    with patch.object(grpc_client, "remove_user", return_value=True) as mock_remove:
+    # Try sync older version 4 with same state (should be fenced/ignored)
+    with patch.object(grpc_client, "add_user", return_value=True) as mock_add:
         res = client.post(
             "/v1/clients/sync",
-            json={"client_id": uuid, "desired_state": "disabled", "version": 4},
+            json={"client_id": uuid, "desired_state": "active", "version": 4},
             headers=VALID_HEADERS,
         )
         assert res.status_code == 200
         assert res.json()["result"] == "already_newer"
         assert res.json().get("fenced") is True
-        assert mock_remove.call_count == 0  # Not executed!
+        assert mock_add.call_count == 0  # Not executed!
+
+    # Stale version (4 < 5) must be strictly fenced even if desired_state differs (active -> disabled)
+    with patch.object(grpc_client, "remove_user", return_value=True) as mock_remove:
+        res_trans = client.post(
+            "/v1/clients/sync",
+            json={"client_id": uuid, "desired_state": "disabled", "version": 4},
+            headers=VALID_HEADERS,
+        )
+        assert res_trans.status_code == 200
+        assert res_trans.json()["result"] == "already_newer"
+        assert res_trans.json().get("fenced") is True
+        assert mock_remove.call_count == 0
 
 
 def test_client_delete_version_fencing():
@@ -794,6 +811,449 @@ def test_xray_api_idempotency_inflight_lock_eviction():
             app._inflight_op_locks.clear()
 
     asyncio.run(_test())
+
+def test_get_inbound_flow_logic():
+    """get_inbound_flow returns xtls-rprx-vision for VLESS direct and empty for other inbounds."""
+    from app import get_inbound_flow
+
+    assert get_inbound_flow("just1k-vless-direct") == "xtls-rprx-vision"
+    assert get_inbound_flow("just1k-vless-custom") == "xtls-rprx-vision"
+    assert get_inbound_flow("just1k-wl-default") == ""
+    assert get_inbound_flow("inbound-tls") == ""
+    assert get_inbound_flow("inbound-reality") == ""
+
+
+def test_sync_client_passes_flow_to_vless_direct():
+    """Client sync passes flow='xtls-rprx-vision' for just1k-vless-direct inbound."""
+    calls = []
+
+    def mock_ensure(tag, uid, desired_state="active", flow=""):
+        calls.append((tag, uid, desired_state, flow))
+        return True
+
+    with patch.object(grpc_client, "ensure_user_state", side_effect=mock_ensure):
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            with patch("app.get_target_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
+                with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_123"):
+                    res = client.post(
+                        "/v1/clients/sync",
+                        headers=VALID_HEADERS,
+                        json={
+                            "client_id": "11111111-2222-3333-4444-555555555555",
+                            "desired_state": "active",
+                        },
+                    )
+                    assert res.status_code == 200
+                    assert len(calls) == 2
+                    assert calls[0] == (
+                        "just1k-vless-direct",
+                        "11111111-2222-3333-4444-555555555555",
+                        "active",
+                        "xtls-rprx-vision",
+                    )
+                    assert calls[1] == (
+                        "just1k-wl-default",
+                        "11111111-2222-3333-4444-555555555555",
+                        "active",
+                        "",
+                    )
+
+
+def test_epoch_change_invalidates_active_users_cache():
+    """Epoch drift/change clears in-memory active users set and re-populates only active persisted clients."""
+    from app import sync_active_users_with_epoch
+
+    grpc_client._active_users = {("just1k-vless-direct", "stale-client-uuid")}
+    grpc_client._active_users_epoch = "epoch_111"
+
+    with patch("app.restore_persisted_clients_to_xray") as mock_restore:
+        with patch.object(grpc_client, "is_healthy", return_value=True):
+            # Same epoch: no-op
+            sync_active_users_with_epoch("epoch_111")
+            assert ("just1k-vless-direct", "stale-client-uuid") in grpc_client._active_users
+            mock_restore.assert_not_called()
+
+            # New epoch: clears active users and restores
+            sync_active_users_with_epoch("epoch_222")
+            assert ("just1k-vless-direct", "stale-client-uuid") not in grpc_client._active_users
+            assert grpc_client._active_users_epoch == "epoch_222"
+            mock_restore.assert_called_once()
+
+            # When gRPC is unhealthy, restoration is deferred and epoch is NOT marked as synced
+            mock_restore.reset_mock()
+            with patch.object(grpc_client, "is_healthy", return_value=False):
+                sync_active_users_with_epoch("epoch_333")
+                mock_restore.assert_not_called()
+                assert grpc_client._active_users_epoch == "epoch_222"
+
+
+def test_multi_service_state_isolation():
+    """Clients registered for multiple services maintain independent state and persist correctly."""
+    uuid = "44444444-5555-6666-7777-888888888888"
+
+    # Add for white_internet first
+    client_store.add_client(uuid, version=1, service="white_internet")
+    c = client_store.load_client_entries().get(uuid)
+    assert c is not None
+    assert c["service_states"]["white_internet"]["is_active"] is True
+    assert c["service_states"]["white_internet"]["version"] == 1
+
+    # Add for vless next
+    client_store.add_client(uuid, version=2, service="vless")
+    c = client_store.load_client_entries().get(uuid)
+    assert c["service_states"]["white_internet"]["is_active"] is True
+    assert c["service_states"]["vless"]["is_active"] is True
+    assert c["service_states"]["vless"]["version"] == 2
+
+    # Disable vless - white_internet must remain active
+    client_store.remove_client(uuid, version=3, service="vless")
+    c = client_store.load_client_entries().get(uuid)
+    assert c["service_states"]["white_internet"]["is_active"] is True
+    assert c["service_states"]["vless"]["is_active"] is False
+    assert c["service_states"]["vless"]["version"] == 3
+
+    # Delete vless service only
+    client_store.delete_client(uuid, version=4, service="vless")
+    c = client_store.load_client_entries().get(uuid)
+    assert c["service_states"]["vless"]["tombstone"] is True
+    assert c["service_states"]["vless"]["is_active"] is False
+    assert c["service_states"]["white_internet"]["is_active"] is True
+
+    # Delete white_internet service -> entry tombstoned or completely removed
+    client_store.delete_client(uuid, version=5, service="white_internet")
+    c_final = client_store.load_client_entries().get(uuid)
+    assert c_final is None or c_final.get("tombstone") is True
+
+
+def test_get_target_inbounds_service_isolation_fail_closed():
+    """F13: Service-specific target inbounds fail-closed and never cross-pollinate namespaces."""
+    with patch("app.get_all_managed_inbounds", return_value=["just1k-wl-default"]):
+        # Requesting vless when only white_internet exists must return empty list (fail-closed)
+        vless_inbounds = get_target_inbounds(service="vless")
+        assert vless_inbounds == []
+
+        # Requesting white_internet returns matched
+        wl_inbounds = get_target_inbounds(service="white_internet")
+        assert wl_inbounds == ["just1k-wl-default"]
+
+    with patch("app.get_all_managed_inbounds", return_value=["just1k-vless-direct"]):
+        # Requesting white_internet when only vless exists must return empty list
+        assert get_target_inbounds(service="white_internet") == []
+        assert get_target_inbounds(service="vless") == ["just1k-vless-direct"]
+
+
+def test_inventory_service_scoped_evaluation():
+    """F14: Inventory respects service parameter and avoids false partial status on dual nodes."""
+    client_uuid = "22222222-3333-4444-5555-666666666666"
+
+    # User is only present in just1k-wl-default, not in just1k-vless-direct
+    def mock_probe(tag, cid):
+        return tag == "just1k-wl-default" and cid == client_uuid
+
+    with patch.object(grpc_client, "probe_user_presence", side_effect=mock_probe):
+        with patch("app.get_all_managed_inbounds", return_value=["just1k-vless-direct", "just1k-wl-default"]):
+            with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_inv"):
+                # Without service scoping: client is in wl but not in vless -> observed as partial
+                res_all = client.post(
+                    "/v1/clients/inventory",
+                    headers=VALID_HEADERS,
+                    json={"client_ids": [client_uuid]},
+                )
+                assert res_all.status_code == 200
+                assert res_all.json()["inventory"][client_uuid]["observed_state"] == "partial"
+
+                # With service="white_internet": client is evaluated ONLY against white_internet -> active!
+                res_wl = client.post(
+                    "/v1/clients/inventory",
+                    headers=VALID_HEADERS,
+                    json={"client_ids": [client_uuid], "service": "white_internet"},
+                )
+                assert res_wl.status_code == 200
+                assert res_wl.json()["inventory"][client_uuid]["observed_state"] == "active"
+
+
+def test_client_sync_does_not_mark_node_sync_state_synchronized():
+    """P2.3: Single client sync updates timestamps but does NOT change global node_sync_state to synchronized."""
+    node_sync_state["status"] = "unsynchronized"
+    node_sync_state["last_synced_at"] = None
+    node_sync_state["last_client_sync_at"] = None
+
+    uuid = "99999999-8888-7777-6666-555555555555"
+    with patch.object(grpc_client, "ensure_user_state", return_value=True):
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            res = client.post(
+                "/v1/clients/sync",
+                json={"client_id": uuid, "desired_state": "active", "version": 1},
+                headers=VALID_HEADERS,
+            )
+            assert res.status_code == 200
+            assert node_sync_state["status"] == "unsynchronized"
+            assert node_sync_state["last_synced_at"] is not None
+            assert node_sync_state["last_client_sync_at"] is not None
+
+
+def test_legacy_client_migration_defaults_to_vless(tmp_path):
+    """P2.8: Legacy entry without services or service field migrates with default service 'vless'."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid = "33333333-2222-1111-0000-aaaaaaaaaaaa"
+    raw_entries = {
+        uuid: {
+            "is_active": True,
+            "version": 5,
+        }
+    }
+    store.save_client_entries(raw_entries)
+
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-vless-direct"}):
+        # Calling add_client for a new service or same triggers migration
+        store.add_client(uuid, version=6, service="vless")
+        loaded = store.load_client_entries().get(uuid)
+        assert loaded is not None
+        assert "vless" in loaded["service_states"]
+        assert loaded["service_states"]["vless"]["is_active"] is True
+        assert loaded["service_states"]["vless"]["version"] == 6
+
+        # Verify removing another legacy entry without services deactivates default 'vless'
+        uuid2 = "77777777-6666-5555-4444-bbbbbbbbbbbb"
+        raw_entries2 = {
+            uuid2: {
+                "is_active": True,
+                "version": 2,
+            }
+        }
+        store.save_client_entries(raw_entries2)
+        store.remove_client(uuid2, version=3, service="vless")
+        loaded2 = store.load_client_entries().get(uuid2)
+        assert loaded2 is not None
+        assert "vless" in loaded2["service_states"]
+        assert loaded2["service_states"]["vless"]["is_active"] is False
+
+
+def test_legacy_client_migration_defaults_to_white_internet_on_wl_node(tmp_path):
+    """P2.8: Legacy entry on White Internet node migrates with default service 'white_internet'."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid = "55555555-4444-3333-2222-cccccccccccc"
+    raw_entries = {
+        uuid: {
+            "is_active": True,
+            "version": 3,
+        }
+    }
+    store.save_client_entries(raw_entries)
+
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "inbound-de,inbound-nl"}):
+        store.remove_client(uuid, version=4, service="white_internet")
+        loaded = store.load_client_entries().get(uuid)
+        assert loaded is not None
+        assert "white_internet" in loaded["service_states"]
+        assert loaded["service_states"]["white_internet"]["is_active"] is False
+        assert loaded["is_active"] is False
+
+
+def test_legacy_client_migration_with_none_or_empty_service_defaults_properly(tmp_path):
+    """P2.8: Legacy entry with None or empty service/services migrates to default service without null keys."""
+    from client_store import ClientStore
+    store_file = tmp_path / "clients.json"
+    store = ClientStore(store_file)
+
+    uuid1 = "11111111-1111-1111-1111-111111111111"
+    uuid2 = "22222222-2222-2222-2222-222222222222"
+    raw_entries = {
+        uuid1: {
+            "is_active": True,
+            "version": 1,
+            "service": None,
+            "services": [],
+        },
+        uuid2: {
+            "is_active": True,
+            "version": 2,
+            "services": [None],
+        },
+    }
+    store.save_client_entries(raw_entries)
+
+    with patch.dict(os.environ, {"XRAY_INBOUND_TAGS": "just1k-vless-direct"}):
+        store.add_client(uuid1, version=3, service="vless")
+        loaded1 = store.load_client_entries().get(uuid1)
+        assert loaded1 is not None
+        assert "null" not in loaded1.get("service_states", {})
+        assert None not in loaded1.get("service_states", {})
+        assert "vless" in loaded1["service_states"]
+        assert loaded1["service_states"]["vless"]["version"] == 3
+
+        store.remove_client(uuid2, version=4, service="vless")
+        loaded2 = store.load_client_entries().get(uuid2)
+        assert loaded2 is not None
+        assert "null" not in loaded2.get("service_states", {})
+        assert None not in loaded2.get("service_states", {})
+        assert "vless" in loaded2["service_states"]
+        assert loaded2["service_states"]["vless"]["is_active"] is False
+
+
+def test_service_version_fencing_isolation_between_services():
+    """Client with existing VLESS state (version 5, tombstone: true) syncs to white_internet with version 1 as applied."""
+    client_uuid = "88888888-9999-aaaa-bbbb-cccccccccccc"
+    raw_entries = {
+        client_uuid: {
+            "version": 5,
+            "tombstone": True,
+            "is_active": False,
+            "service_states": {
+                "vless": {
+                    "version": 5,
+                    "tombstone": True,
+                    "is_active": False,
+                }
+            },
+        }
+    }
+    client_store.save_client_entries(raw_entries)
+
+    with patch.object(grpc_client, "ensure_user_state", return_value=True):
+        with patch.object(grpc_client, "probe_user_presence", return_value=True):
+            with patch("app.get_target_inbounds", return_value=["inbound-de"]):
+                with patch.object(epoch_manager, "get_current_running_epoch", return_value="epoch_iso"):
+                    res = client.post(
+                        "/v1/clients/sync",
+                        headers=VALID_HEADERS,
+                        json={
+                            "client_id": client_uuid,
+                            "desired_state": "active",
+                            "version": 1,
+                            "service": "white_internet",
+                        },
+                    )
+                    assert res.status_code == 200
+                    data = res.json()
+                    assert data["result"] == "applied"
+                    assert data["state"] == "active"
+                    assert data["version"] == 1
+                    assert data["service"] == "white_internet"
+                    assert data.get("fenced") is not True
+
+                    # Verify persisted client store has independent service states
+                    persisted = client_store.load_client_entries().get(client_uuid)
+                    assert persisted is not None
+                    assert persisted["service_states"]["vless"]["version"] == 5
+                    assert persisted["service_states"]["vless"]["tombstone"] is True
+                    assert persisted["service_states"]["white_internet"]["version"] == 1
+                    assert persisted["service_states"]["white_internet"]["is_active"] is True
+
+
+def test_client_store_raises_on_empty_zero_byte_file():
+    import pytest
+    from client_store import ClientStore, ClientStoreCorruptedError
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f_path = f.name
+    try:
+        # File exists with 0 bytes
+        assert os.path.exists(f_path)
+        assert os.path.getsize(f_path) == 0
+        store = ClientStore(file_path=f_path)
+        with pytest.raises(ClientStoreCorruptedError):
+            store.load_client_entries()
+    finally:
+        if os.path.exists(f_path):
+            os.remove(f_path)
+
+
+def test_delete_client_invalidates_idempotency_cache():
+    from app import completed_idempotent_ops
+    client_uuid = "e3b0c442-98fc-1c14-9afb-f4c8996fb924"
+    idem_key = "idemp_test_delete_eviction_key"
+
+    client_store.add_client(client_uuid, version=1, service="white_internet")
+
+    # Pre-populate completed idempotent ops with active state
+    completed_idempotent_ops[idem_key] = {
+        "status": "ok",
+        "client_id": client_uuid,
+        "result": "applied",
+        "state": "active",
+        "version": 1,
+        "service": "white_internet",
+        "verified_epoch": "epoch_test_fixture",
+    }
+
+    with patch("app.grpc_client.remove_user", return_value=True):
+        # DELETE the client
+        res = client.delete(
+            f"/v1/clients/{client_uuid}?version=2",
+            headers={"X-API-Key": "test-secret-key-12345"},
+        )
+        assert res.status_code == 200
+        assert res.json()["result"] == "applied"
+
+        # Cached op should be evicted
+        assert idem_key not in completed_idempotent_ops
+
+        # Subsequent sync replay with same idempotency key must not return cached active
+        with (
+            patch("app.get_target_inbounds", return_value=["inbound-de"]),
+            patch.object(grpc_client, "add_user", return_value=True),
+            patch.object(grpc_client, "probe_user_presence", return_value=True),
+        ):
+            replay_res = client.post(
+                "/v1/clients/sync",
+                headers={"X-API-Key": "test-secret-key-12345"},
+                json={
+                    "client_id": client_uuid,
+                    "action": "upsert",
+                    "state": "active",
+                    "version": 1,
+                    "service": "white_internet",
+                    "idempotency_key": idem_key,
+                },
+            )
+            assert replay_res.status_code == 200
+            # Version 1 request is fenced because client was deleted at version 2
+            data = replay_res.json()
+            assert data.get("fenced") is True or data.get("result") == "already_newer"
+
+
+def test_health_self_heals_clients_on_epoch_drift():
+    """Verify GET /v1/health triggers sync_active_users_with_epoch when running epoch changes."""
+    with (
+        patch.object(grpc_client, "is_healthy", return_value=True),
+        patch.object(
+            epoch_manager,
+            "get_process_and_epoch",
+            return_value=(999, 1234, "boot-99", "epoch_new_after_restart"),
+        ),
+        patch("app.sync_active_users_with_epoch") as mock_sync,
+    ):
+        res = client.get("/v1/health", headers=VALID_HEADERS)
+        assert res.status_code == 200
+        mock_sync.assert_called_once_with("epoch_new_after_restart")
+
+
+def test_inbound_isolation_excludes_relay_tunnels():
+    """Verify is_wl_inbound_tag and resolve_effective_service exclude inbound-tls/reality."""
+    from app import is_wl_inbound_tag, resolve_effective_service, get_target_inbounds
+
+    assert not is_wl_inbound_tag("inbound-tls")
+    assert not is_wl_inbound_tag("inbound-reality")
+    assert not is_wl_inbound_tag("from-origin")
+    assert is_wl_inbound_tag("just1k-wl-default")
+    assert is_wl_inbound_tag("just1k-wl-direct")
+    assert is_wl_inbound_tag("inbound-de")
+
+    with patch("app.get_all_managed_inbounds", return_value=["inbound-tls", "just1k-vless-direct"]):
+        # When only inbound-tls and vless are present, must resolve to vless direct, NOT white_internet
+        assert resolve_effective_service() == "vless"
+        vless_inbounds = get_target_inbounds()
+        assert vless_inbounds == ["just1k-vless-direct"]
+
+
+
+
 
 
 
