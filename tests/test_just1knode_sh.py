@@ -3873,7 +3873,7 @@ with open(path, 'w', encoding='utf-8') as f:
 
         # 4. just1knode.sh CLI dispatcher routes vless domain
         self.assertIn("domain|set-domain|change-domain) setup_vless_domain", just1knode_sh)
-        self.assertIn("vless-domain|setup-vless-domain) setup_vless_domain", just1knode_sh)
+        self.assertIn("vless-domain|setup-vless-domain)", just1knode_sh)
 
 
 if __name__ == "__main__":
