@@ -171,11 +171,33 @@ check_node_update_on_entry() {
     fi
     command -v curl >/dev/null 2>&1 || return 0
     remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
-    [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
-    newest="$(printf '%s\n%s\n' "$JUST1KNODE_VERSION" "$remote_ver" | sort -V | tail -n 1)"
-    if [[ "$newest" == "$remote_ver" && "$remote_ver" != "$JUST1KNODE_VERSION" ]]; then
-        echo -e "  ${YELLOW}⚠️  Доступна новая версия just1knode: v${remote_ver} (у вас v${JUST1KNODE_VERSION}). Воспользуйтесь пунктом «Обновить утилиту».${NC}"
+    if [[ ! "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        remote_ver="$(curl -fsSL --max-time 5 "https://github.com/justik13/just1knode/raw/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        newest="$(printf '%s\n%s\n' "$JUST1KNODE_VERSION" "$remote_ver" | sort -V | tail -n 1)"
+        if [[ "$newest" == "$remote_ver" && "$remote_ver" != "$JUST1KNODE_VERSION" ]]; then
+            echo -e "  ${YELLOW}⚠️  Доступна новая версия just1knode: v${remote_ver} (у вас v${JUST1KNODE_VERSION}). Воспользуйтесь пунктом «Обновить утилиту».${NC}"
+            return 0
+        fi
+    fi
+
+    # Если репозиторий развернут через Git: проверка новых коммитов через git ls-remote (100% read-only)
+    if [[ -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+        local local_sha remote_sha
+        local_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+        if [[ "$local_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            if command -v timeout >/dev/null 2>&1; then
+                remote_sha=$(timeout 5s git -C "$SCRIPT_DIR" ls-remote origin "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)
+            else
+                remote_sha=$(git -C "$SCRIPT_DIR" ls-remote origin "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)
+            fi
+            if [[ "$remote_sha" =~ ^[0-9a-f]{40}$ ]] && [[ "$remote_sha" != "$local_sha" ]]; then
+                if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+                    echo -e "  ${YELLOW}⚠️  Доступно обновление just1knode в origin/${ref}. Воспользуйтесь пунктом «Обновить утилиту».${NC}"
+                fi
+            fi
+        fi
     fi
     return 0
 }

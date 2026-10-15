@@ -1713,6 +1713,20 @@ run_doctor
             self.assertEqual(res.returncode, 0, f"failed for remote={bad!r}: {res.stderr}")
             self.assertEqual(res.stdout.strip(), "", f"notice shown for remote={bad!r}")
 
+    def test_node_update_check_uses_fallback_endpoint_when_raw_fails(self):
+        """When raw.githubusercontent.com fails/blocked, fallback to github.com/raw/ delivers version."""
+        script = """#!/bin/sh
+case "$*" in
+    *raw.githubusercontent.com*) exit 22 ;;
+    *github.com*raw*) echo "99.99.99" ;;
+    *) exit 1 ;;
+esac
+"""
+        self._create_mock_script("curl", script)
+        res = self._run_shell_snippet("check_node_update_on_entry")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("99.99.99", res.stdout)
+
     # -------------------------------------------------------------------------
     # Functional Validation: Origin Node Installation & Complete Artifacts
     # -------------------------------------------------------------------------
