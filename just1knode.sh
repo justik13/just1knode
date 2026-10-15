@@ -103,13 +103,14 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/amnezia_api"
             cp -a "$tmp_extract/scripts/amnezia_api/." "$INSTALL_DIR/scripts/amnezia_api/"
         fi
-        local bootstrap_sha=""
+        bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
             bootstrap_sha="$(timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' || true)"
         fi
         if [[ "$bootstrap_sha" =~ ^[0-9a-f]{40}$ ]]; then
             printf '%s\n' "$bootstrap_sha" > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
         fi
+        unset bootstrap_sha
         rm -rf "$tmp_tar" "$tmp_extract"
     fi
     
