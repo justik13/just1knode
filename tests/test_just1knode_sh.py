@@ -1713,19 +1713,33 @@ run_doctor
             self.assertEqual(res.returncode, 0, f"failed for remote={bad!r}: {res.stderr}")
             self.assertEqual(res.stdout.strip(), "", f"notice shown for remote={bad!r}")
 
-    def test_node_update_check_uses_fallback_endpoint_when_raw_fails(self):
-        """When raw.githubusercontent.com fails/blocked, fallback to github.com/raw/ delivers version."""
-        script = """#!/bin/sh
-case "$*" in
-    *raw.githubusercontent.com*) exit 22 ;;
-    *github.com*raw*) echo "99.99.99" ;;
-    *) exit 1 ;;
-esac
-"""
-        self._create_mock_script("curl", script)
-        res = self._run_shell_snippet("check_node_update_on_entry")
+    def test_node_update_check_detects_commit_diff(self):
+        """check_node_update_on_entry warns when remote commit differs from local SHA."""
+        self._create_mock_script(
+            "git",
+            "#!/bin/sh\nprintf '1111111111111111111111111111111111111111\\trefs/heads/main\\n'\n",
+        )
+        self._create_mock_script("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        res = self._run_shell_snippet(
+            "check_node_update_on_entry",
+            extra_env={"JUST1KNODE_LOCAL_SHA": "0" * 40},
+        )
         self.assertEqual(res.returncode, 0)
-        self.assertIn("99.99.99", res.stdout)
+        self.assertIn("Доступны изменения в GitHub origin/main", res.stdout)
+
+    def test_node_update_check_silent_when_commit_identical(self):
+        """check_node_update_on_entry silent when remote commit matches local SHA."""
+        self._create_mock_script(
+            "git",
+            "#!/bin/sh\nprintf '0000000000000000000000000000000000000000\\trefs/heads/main\\n'\n",
+        )
+        self._create_mock_script("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        res = self._run_shell_snippet(
+            "check_node_update_on_entry",
+            extra_env={"JUST1KNODE_LOCAL_SHA": "0" * 40},
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout.strip(), "")
 
     # -------------------------------------------------------------------------
     # Functional Validation: Origin Node Installation & Complete Artifacts
