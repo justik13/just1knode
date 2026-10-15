@@ -3687,13 +3687,16 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('rm -f "$def_site"', relay_sh)
 
     def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
-        """Verify heal_node_firewall and install_vless do not expose dead 8444 when Amnezia Nginx is active, but preserve 8444 if awg_port is 8444."""
+        """Verify heal_node_firewall preserves 8444 when VLESS is active, and removes dead 8444 when only Amnezia is active."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
+        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then', common_sh)
+        self.assertIn('elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
         self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then', common_sh)
-        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"', relay_sh)
-        self.assertIn('Amnezia Nginx (порт ${amnezia_check_p} /v1/)', relay_sh)
+        self.assertIn('just1k-vless-api.conf', relay_sh)
+        self.assertIn('listen 8444 ssl http2;', relay_sh)
+        self.assertIn('show_vless_bot_credentials', relay_sh)
+        self.assertIn('api_endpoint="https://${v_dom}:8444"', relay_sh)
 
     def test_vless_transactional_rollback_and_nginx_restore(self):
         """Verify install_vless_direct_node has robust transactional rollback and commit-on-success."""

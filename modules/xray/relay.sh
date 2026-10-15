@@ -677,25 +677,36 @@ except Exception:
         fi
         rm -f "$amnezia_bak" 2>/dev/null || true
         log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
-    elif [[ ! -f "$amnezia_nginx" && ! -f "$amnezia_enabled" ]]; then
-        local v_dom
-        v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
-        local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
-        local cert_file="${le_dir}/live/${v_dom}/fullchain.pem"
-        local key_file="${le_dir}/live/${v_dom}/privkey.pem"
-        if [[ ! -f "$cert_file" ]]; then
-            cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_fullchain.pem"
-            key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_privkey.pem"
-        fi
-        if [[ ! -f "$cert_file" ]]; then
-            cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/fullchain.pem"
-            key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/privkey.pem"
-        fi
+    fi
 
-        local vless_api_nginx="/etc/nginx/sites-available/just1k-vless-api.conf"
-        if [[ -f "$cert_file" && -f "$key_file" && -n "$v_dom" ]]; then
-            mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-            cat > "$vless_api_nginx" <<EOF
+    # 2. Автономный виртуальный хост VLESS API на порту 8444
+    local v_dom
+    v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local cert_file="${le_dir}/live/${v_dom}/fullchain.pem"
+    local key_file="${le_dir}/live/${v_dom}/privkey.pem"
+    if [[ ! -f "$cert_file" ]]; then
+        cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_fullchain.pem"
+        key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/vless_privkey.pem"
+    fi
+    if [[ ! -f "$cert_file" ]]; then
+        cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/fullchain.pem"
+        key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/privkey.pem"
+    fi
+    if [[ ! -f "$cert_file" && -f "$amnezia_nginx" ]]; then
+        local amnezia_cert amnezia_key
+        amnezia_cert="$(grep -E "ssl_certificate\s+" "$amnezia_nginx" | head -n1 | awk '{print $2}' | tr -d ';')"
+        amnezia_key="$(grep -E "ssl_certificate_key\s+" "$amnezia_nginx" | head -n1 | awk '{print $2}' | tr -d ';')"
+        if [[ -f "$amnezia_cert" && -f "$amnezia_key" ]]; then
+            cert_file="$amnezia_cert"
+            key_file="$amnezia_key"
+        fi
+    fi
+
+    local vless_api_nginx="/etc/nginx/sites-available/just1k-vless-api.conf"
+    if [[ -f "$cert_file" && -f "$key_file" && -n "$v_dom" ]]; then
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+        cat > "$vless_api_nginx" <<EOF
 server {
     listen 8444 ssl http2;
     listen [::]:8444 ssl http2;
@@ -718,45 +729,32 @@ server {
     }
 }
 EOF
-            ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
-            if ! nginx -t >/dev/null 2>&1; then
-                warn "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
-                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
-                return 1
-            fi
-            if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
-                warn "Nginx: не удалось применить конфигурацию для VLESS API ($vless_api_nginx)."
-                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
-                return 1
-            fi
-            log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
-        else
-            warn "Nginx: не найдены SSL сертификаты или домен для автономного VLESS API ($v_dom)."
+        ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
+        if ! nginx -t >/dev/null 2>&1; then
+            warn "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
+            rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
             return 1
         fi
+        if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
+            warn "Nginx: не удалось применить конфигурацию для VLESS API ($vless_api_nginx)."
+            rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+            return 1
+        fi
+        log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
+    else
+        warn "Nginx: не найдены SSL сертификаты или домен для автономного VLESS API ($v_dom)."
+        return 1
     fi
 
     local cur_awg_port
     cur_awg_port="$(get_state_val "awg_port" "8443")"
     [[ -z "$cur_awg_port" || "$cur_awg_port" == "-" ]] && cur_awg_port="8443"
 
-    if [[ -f "$amnezia_nginx" || -f "$amnezia_enabled" ]]; then
-        local dead_bot_ip
-        dead_bot_ip="$(get_state_val "bot_ip" "")"
-        if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-            if [[ -n "$dead_bot_ip" ]]; then
-                ufw delete allow from "$dead_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
-            fi
-            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8444 >/dev/null 2>&1 || true
-        fi
-    elif [[ -f /etc/nginx/sites-enabled/just1k-vless-api.conf ]]; then
-        local bot_ip
-        bot_ip="$(get_state_val "bot_ip" "")"
-        if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8444 >/dev/null 2>&1 || true
-        fi
+    local bot_ip
+    bot_ip="$(get_state_val "bot_ip" "")"
+    if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+        ufw delete allow 8444 >/dev/null 2>&1 || true
         if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
             ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
         else
@@ -2002,7 +2000,7 @@ install_vless_direct_node() {
         amnezia_check_p="$(get_state_val "awg_port" "8443")"
         [[ -z "$amnezia_check_p" || "$amnezia_check_p" == "-" ]] && amnezia_check_p="8443"
         if [[ -f "/etc/nginx/sites-available/just1k-amnezia.conf" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
-            log "Фаервол UFW: API доступен через Amnezia Nginx (порт ${amnezia_check_p} /v1/) строго для BOT_IP: ${bot_ip}"
+            log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip} (AmneziaWG API на порту ${amnezia_check_p})"
         else
             log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
         fi
@@ -2241,15 +2239,12 @@ show_vless_bot_credentials() {
     check_root
     init_state_dir
 
-    local v_dom x_key a_url
+    local v_dom x_key
     v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "")")"
     x_key="$(get_state_val "xray_api_key" "$(get_state_val "awg_api_key" "")")"
-    a_url="$(get_state_val "awg_api_url" "")"
 
     local api_endpoint
-    if [[ -n "$a_url" ]]; then
-        api_endpoint="${a_url}"
-    elif [[ -n "$v_dom" ]]; then
+    if [[ -n "$v_dom" ]]; then
         api_endpoint="https://${v_dom}:8444"
     else
         local my_ip
