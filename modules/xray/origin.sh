@@ -487,7 +487,10 @@ with open(config_file, 'w', encoding='utf-8') as f:
     deploy_xray_systemd_service
     systemctl restart xray
 
-    deploy_xray_api_service "$api_key" "$cdn_domain"
+    if ! deploy_xray_api_service "$api_key" "$cdn_domain"; then
+        error "Не удалось развернуть службу xray-api."
+        return 1
+    fi
 
     log "Настройка Nginx (OPTIONS->POST, Zero-Buffering, CDN Ingress)..."
     mkdir -p "${NGINX_CONF_DIR}/conf.d" "${NGINX_CONF_DIR}/sites-available" "${NGINX_CONF_DIR}/sites-enabled" "${CERTBOT_DIR}" "${WWW_HTML_DIR}" "$NGINX_RELAYS_DIR"

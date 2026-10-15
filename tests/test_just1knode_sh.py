@@ -3736,6 +3736,32 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('LAST_BACKUP_PATH="$bkp"', backup_sh)
         self.assertIn('BACKUP_RETENTION_COUNT', backup_sh)
 
+    def test_vless_non_destructive_rollback_and_modular_api_hardening(self):
+        """Verify api.sh has no fatal error exits, rollback preserves existing configs and handles reload failures."""
+        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+
+        # 1. No exit-1 error calls inside modules/xray/api.sh
+        self.assertNotIn('error "', api_sh)
+
+        # 2. Non-destructive rollback in relay.sh
+        self.assertIn('local orig_had_fallback80=0', relay_sh)
+        self.assertIn('local orig_had_vless_api=0', relay_sh)
+        self.assertIn('if [[ "$orig_had_fallback80" -eq 0 ]]; then', relay_sh)
+        self.assertIn('if [[ "$orig_had_vless_api" -eq 0 ]]; then', relay_sh)
+        self.assertIn('if [[ "$orig_has_vless" != "1" && "$(get_state_val "has_relay" "0")" != "1" ]]; then', relay_sh)
+        self.assertIn('warn "Критическая ошибка: не удалось перезапустить Xray при откате', relay_sh)
+
+        # 3. Commit-on-success error handling
+        self.assertIn('if ! set_state_val "has_vless" "1" || ! set_state_val "vless_domain" "$dest_server" || ! set_state_val "role" "node"; then', relay_sh)
+
+        # 4. Origin checks deploy_xray_api_service
+        self.assertIn('if ! deploy_xray_api_service "$api_key" "$cdn_domain"; then', origin_sh)
+
+        # 5. setup_relay_node checks deploy_vless_fallback_nginx
+        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
+
 
 if __name__ == "__main__":
     unittest.main()
