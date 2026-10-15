@@ -1952,17 +1952,30 @@ install_vless_direct_node() {
     if [[ -z "$dest_server" ]]; then
         local auto_domain=""
         local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
-        local cert_dirs=("${le_dir}"/live/*)
-        for c_dir in "${cert_dirs[@]}"; do
-            if [[ -f "${c_dir}/fullchain.pem" ]]; then
-                local cand
-                cand="$(basename "$c_dir")"
-                if [[ "$cand" != "README" && "$cand" != "*" ]]; then
-                    auto_domain="$cand"
-                    break
-                fi
-            fi
-        done
+        if [[ -n "$my_ip" ]]; then
+            auto_domain="$(detect_relay_domain_candidates "$my_ip" | head -n 1 || true)"
+        fi
+        if [[ -z "$auto_domain" && -d "${le_dir}/live" ]]; then
+            auto_domain="$(python3 -c "
+import os, glob, sys
+le_dir = sys.argv[1]
+cands = []
+for d in glob.glob(os.path.join(le_dir, 'live', '*')):
+    if not os.path.isdir(d): continue
+    dom = os.path.basename(d)
+    if dom in ('README', '*'): continue
+    fc = os.path.join(d, 'fullchain.pem')
+    pk = os.path.join(d, 'privkey.pem')
+    if os.path.isfile(fc) and os.path.isfile(pk):
+        try:
+            cands.append((os.path.getmtime(fc), dom))
+        except Exception:
+            pass
+cands.sort(key=lambda x: x[0], reverse=True)
+if cands:
+    print(cands[0][1])
+" "$le_dir" 2>/dev/null || true)"
+        fi
 
         echo -e "\n${BOLD}=== НАСТРОЙКА ДОМЕНА ДЛЯ VLESS TLS (ПОРТ 443) ===${NC}"
         echo -e "Для клиентских подключений VLESS TLS требуется персональный домен."
@@ -2258,6 +2271,44 @@ show_vless_bot_credentials() {
     echo -e "  API Key / Токен: ${BOLD}${YELLOW}${x_key:-не сгенерирован}${NC}"
     echo ""
     echo -e "Для добавления в бот перейдите в: ${BOLD}/admin ➔ Серверы ➔ Добавить сервер${NC}"
+}
+
+setup_vless_domain() {
+    title "НАСТРОЙКА / СМЕНА ДОМЕНА VLESS TLS"
+    check_root
+    init_state_dir
+
+    local new_domain="${1:-}"
+    local my_ip
+    my_ip="$(get_public_ipv4 || true)"
+
+    if [[ -z "$new_domain" ]]; then
+        local auto_domain=""
+        if [[ -n "$my_ip" ]]; then
+            auto_domain="$(detect_relay_domain_candidates "$my_ip" | head -n 1 || true)"
+        fi
+        echo -e "\n${BOLD}=== ВЫБОР ДОМЕНА ДЛЯ VLESS TLS ===${NC}"
+        local cur_dom
+        cur_dom="$(get_state_val "vless_domain" "")"
+        if [[ -n "$cur_dom" ]]; then
+            echo -e "Текущий настроенный домен: ${BOLD}${CYAN}${cur_dom}${NC}"
+        fi
+        if [[ -n "$auto_domain" && "$auto_domain" != "$cur_dom" ]]; then
+            echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
+            read -rp "Использовать этот домен [Enter = ${auto_domain}]: " dest_in || true
+            new_domain="${dest_in:-$auto_domain}"
+        else
+            read -rp "Введите новый домен VLESS (например: your-vless.domain.com): " dest_in || true
+            new_domain="${dest_in:-}"
+        fi
+    fi
+
+    if [[ -z "$new_domain" ]]; then
+        error "Домен обязателен для настройки VLESS TLS."
+        return 1
+    fi
+
+    install_vless_direct_node "$new_domain"
 }
 
 uninstall_vless_component() {

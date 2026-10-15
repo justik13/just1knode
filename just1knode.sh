@@ -1619,12 +1619,14 @@ main_menu() {
                     if [[ "$cur_has_v" == "1" ]]; then
                         echo -e "\n${BOLD}=== УПРАВЛЕНИЕ VLESS TLS ===${NC}"
                         echo "[1] Показать данные для Telegram-бота (/admin)"
-                        echo "[2] Удалить VLESS TLS с этого сервера"
+                        echo "[2] 🌐 Настроить / сменить домен VLESS TLS"
+                        echo "[3] Удалить VLESS TLS с этого сервера"
                         echo "[0] Назад"
-                        read -rp "Выбор [0-2]: " v_choice
+                        read -rp "Выбор [0-3]: " v_choice
                         case "$v_choice" in
                             1) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                            2) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
+                            2) setup_vless_domain; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
                         esac
                     else
                         install_vless_direct_node
@@ -1736,9 +1738,13 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             setup-domain|relay-domain|setup_domain)
                 setup_relay_domain "${2:-}"
                 ;;
+            vless-domain|setup-vless-domain)
+                setup_vless_domain "${2:-}"
+                ;;
             tls|vless)
                 case "${2:-}" in
                     install|setup) install_vless_direct_node "${3:-}" ;;
+                    domain|set-domain|change-domain) setup_vless_domain "${3:-}" ;;
                     status) show_status ;;
                     creds|bot) show_vless_bot_credentials ;;
                     bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
