@@ -3779,6 +3779,80 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
         self.assertIn("suffix='.tmp.json'", relay_sh)
 
+    def test_setup_xray_api_proxy_injects_v1_into_all_nginx_server_blocks(self):
+        """Verify setup_xray_api_proxy iterates over all server blocks and injects /v1/ into each."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn("parts = re.split(r'(\\bserver\\s*\\{)', content)", relay_sh)
+        self.assertIn("missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))", relay_sh)
+
+        # Test the injection logic directly on a simulated multi-server config
+        simulated_nginx = """# 0. Catch-All
+server {
+    listen 8443 ssl default_server;
+    server_name _;
+    return 444;
+}
+
+# Domain 1 (Amnezia)
+server {
+    listen 8443 ssl;
+    server_name nl.just1k.pro;
+    location / {
+        proxy_pass http://127.0.0.1:4001;
+    }
+}
+
+# Domain 2 (VLESS)
+server {
+    listen 8443 ssl;
+    server_name nl.just1k.best;
+    location / {
+        proxy_pass http://127.0.0.1:4001;
+    }
+}
+"""
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as tf:
+            tf.write(simulated_nginx)
+            temp_path = tf.name
+
+        try:
+            py_code = """
+import re, sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    content = f.read()
+v1_block = '''    location /v1/ {
+        proxy_pass http://127.0.0.1:5001;
+    }
+
+'''
+
+parts = re.split(r'(\\bserver\\s*\\{)', content)
+new_parts = []
+for i, part in enumerate(parts):
+    if i % 2 == 0 and i > 0:
+        if 'location / {' in part and 'location /v1/' not in part:
+            part = part.replace('location / {', v1_block + '    location / {', 1)
+    new_parts.append(part)
+
+new_content = ''.join(new_parts)
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(new_content)
+"""
+            res = subprocess.run([sys.executable, "-c", py_code, temp_path], capture_output=True, text=True, check=False)
+            self.assertEqual(res.returncode, 0)
+
+            result_content = Path(temp_path).read_text(encoding="utf-8")
+            # Must contain location /v1/ in both server blocks (pro and best)
+            self.assertEqual(result_content.count("location /v1/"), 2)
+            # Re-running must be idempotent and not duplicate
+            res2 = subprocess.run([sys.executable, "-c", py_code, temp_path], capture_output=True, text=True, check=False)
+            self.assertEqual(res2.returncode, 0)
+            result_content2 = Path(temp_path).read_text(encoding="utf-8")
+            self.assertEqual(result_content2.count("location /v1/"), 2)
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
