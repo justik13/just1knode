@@ -938,9 +938,10 @@ socket.getaddrinfo = _mock_gai
     def test_ensure_xray_api_healthy_guards_relay_nodes(self):
         """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes without vless."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        self.assertIn('local force="${1:-0}"', common_sh)
         self.assertIn('role="$(get_state_val "role" "")"', common_sh)
         self.assertIn('cur_has_v="$(get_state_val "has_vless" "0")"', common_sh)
-        self.assertIn('if [[ "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
+        self.assertIn('if [[ "$force" != "1" && "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
@@ -3668,6 +3669,115 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('JUST1KNODE_NON_INTERACTIVE', relay_sh)
         self.assertIn('! -t 0', relay_sh)
+
+    def test_xray_tmp_config_uses_json_suffix_and_format_flag(self):
+        """Verify temporary Xray configs have .tmp.json suffix and run -test passes -format json."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('local tmp_xray_config="${XRAY_CONFIG}.tmp.json"', relay_sh)
+        self.assertIn('local tmp_cfg="${XRAY_CONFIG}.tmp.json"', relay_sh)
+        self.assertNotIn('local tmp_xray_config="${XRAY_CONFIG}.tmp"', relay_sh)
+        self.assertNotIn('local tmp_cfg="${XRAY_CONFIG}.tmp"', relay_sh)
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_xray_config"', relay_sh)
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_cfg"', relay_sh)
+
+    def test_deploy_vless_fallback_nginx_disables_default_site(self):
+        """Verify deploy_vless_fallback_nginx disables conflicting package default site before linking."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('local def_site="/etc/nginx/sites-enabled/default"', relay_sh)
+        self.assertIn('rm -f "$def_site"', relay_sh)
+
+    def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
+        """Verify heal_node_firewall and install_vless do not expose dead 8444 when Amnezia Nginx is active, but preserve 8444 if awg_port is 8444."""
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
+        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then', common_sh)
+        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"', relay_sh)
+        self.assertIn('Amnezia Nginx (порт ${amnezia_check_p} /v1/)', relay_sh)
+
+    def test_vless_transactional_rollback_and_nginx_restore(self):
+        """Verify install_vless_direct_node has robust transactional rollback and commit-on-success."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('rollback_vless_installation()', relay_sh)
+        self.assertIn('if ! systemctl restart xray; then', relay_sh)
+        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
+        self.assertIn('if ! setup_xray_api_proxy "$dest_server"; then', relay_sh)
+        self.assertIn('set_state_val "has_vless" "$orig_has_vless"', relay_sh)
+        self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
+        self.assertIn('ufw delete allow 443/tcp', relay_sh)
+        self.assertIn('systemctl stop xray-api', relay_sh)
+        self.assertIn('local amnezia_bak="${amnezia_nginx}.user.bak"', relay_sh)
+        # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
+        idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
+        idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
+        self.assertGreater(idx_commit, idx_api, "has_vless=1 must be set after setup_xray_api_proxy succeeds")
+
+    def test_setup_xray_api_proxy_warn_and_return_error(self):
+        """Verify setup_xray_api_proxy warns and returns 1 on failure instead of exit 1 via error()."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        api_proxy_code = relay_sh.split('setup_xray_api_proxy() {')[1].split('setup_dual_xray_api()')[0]
+        self.assertNotIn('error "Служба xray-api не смогла запуститься', api_proxy_code)
+        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси', api_proxy_code)
+        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API', api_proxy_code)
+        self.assertIn('warn "Служба xray-api не смогла запуститься', api_proxy_code)
+
+    def test_deploy_and_uninstall_vless_nginx_default_site_lifecycle(self):
+        """Verify deploy_vless_fallback_nginx rolls back on nginx -t failure and uninstall restores default site."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        # deploy rollback
+        self.assertIn('warn "Nginx: ошибка синтаксиса при подключении just1k-fallback80.conf. Откат fallback хоста..."', relay_sh)
+        # uninstall restore
+        self.assertIn('cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default"', relay_sh)
+        self.assertIn('ln -sf "/etc/nginx/sites-available/default" "/etc/nginx/sites-enabled/default"', relay_sh)
+
+    def test_create_backup_tracks_last_backup_path(self):
+        """Verify create_backup records LAST_BACKUP_PATH without bypassing retention."""
+        backup_sh = (NODE_ROOT / "lib" / "backup.sh").read_text(encoding="utf-8")
+        self.assertIn('LAST_BACKUP_PATH=""', backup_sh)
+        self.assertIn('LAST_BACKUP_PATH="$bkp"', backup_sh)
+        self.assertIn('BACKUP_RETENTION_COUNT', backup_sh)
+
+    def test_vless_non_destructive_rollback_and_modular_api_hardening(self):
+        """Verify api.sh has no fatal error exits, rollback preserves existing configs and handles reload failures."""
+        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+
+        # 1. No exit-1 error calls inside modules/xray/api.sh
+        self.assertNotIn('error "', api_sh)
+
+        # 2. Non-destructive rollback in relay.sh
+        self.assertIn('local orig_had_fallback80=0', relay_sh)
+        self.assertIn('local orig_had_vless_api=0', relay_sh)
+        self.assertIn('if [[ "$orig_had_fallback80" -eq 0 ]]; then', relay_sh)
+        self.assertIn('if [[ "$orig_had_vless_api" -eq 0 ]]; then', relay_sh)
+        self.assertIn('if [[ "$orig_has_vless" != "1" && "$(get_state_val "has_relay" "0")" != "1" ]]; then', relay_sh)
+        self.assertIn('warn "Критическая ошибка: не удалось перезапустить Xray при откате', relay_sh)
+
+        # 3. Commit-on-success error handling
+        self.assertIn('if ! set_state_val "has_vless" "1" || ! set_state_val "vless_domain" "$dest_server" || ! set_state_val "role" "node"; then', relay_sh)
+
+        # 4. Origin checks deploy_xray_api_service
+        self.assertIn('if ! deploy_xray_api_service "$api_key" "$cdn_domain"; then', origin_sh)
+
+        # 5. setup_relay_node checks deploy_vless_fallback_nginx
+        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
+
+        # 6. ensure_xray_api_healthy force check and setup_xray_api_proxy call
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn('local force="${1:-0}"', common_sh)
+        self.assertIn('if ! ensure_xray_api_healthy 1; then', relay_sh)
+
+        # 7. install_nginx_if_missing in install_vless_direct_node
+        self.assertIn('install_nginx_if_missing', relay_sh)
+
+        # 8. amnezia_bak restoration on reload/restart failure
+        self.assertIn('if [[ -f "$amnezia_bak" ]]; then\n                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true', relay_sh)
+
+        # 9. Format json in run_doctor and tmp.json in heal_and_update_relay_config
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
+        self.assertIn("suffix='.tmp.json'", relay_sh)
 
 
 if __name__ == "__main__":

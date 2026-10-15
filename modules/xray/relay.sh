@@ -516,10 +516,36 @@ server {
     }
 }
 EOF
-    ln -sf "$fb_conf" /etc/nginx/sites-enabled/just1k-fallback80.conf 2>/dev/null || true
-    if nginx -t >/dev/null 2>&1; then
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    local def_site="/etc/nginx/sites-enabled/default"
+    if [[ -f "$def_site" || -L "$def_site" ]]; then
+        if ! cp -L "$def_site" "/etc/nginx/sites-available/default.user.bak" 2>/dev/null; then
+            warn "Nginx: не удалось создать резервную копию default сайта перед отключением."
+            return 1
+        fi
+        rm -f "$def_site" 2>/dev/null || true
     fi
+    ln -sf "$fb_conf" /etc/nginx/sites-enabled/just1k-fallback80.conf 2>/dev/null || true
+    if ! nginx -t >/dev/null 2>&1; then
+        warn "Nginx: ошибка синтаксиса при подключении just1k-fallback80.conf. Откат fallback хоста..."
+        rm -f /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
+        if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "$def_site" ]]; then
+            cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default" 2>/dev/null || true
+            ln -sf "/etc/nginx/sites-available/default" "$def_site" 2>/dev/null || true
+            rm -f "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
+        warn "Nginx: не удалось применить конфигурацию службы для just1k-fallback80.conf."
+        rm -f /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
+        if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "$def_site" ]]; then
+            cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default" 2>/dev/null || true
+            ln -sf "/etc/nginx/sites-available/default" "$def_site" 2>/dev/null || true
+            rm -f "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    return 0
 }
 
 setup_xray_api_proxy() {
@@ -533,25 +559,35 @@ setup_xray_api_proxy() {
         x_api_key="$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
     fi
     set_state_val "xray_api_key" "$x_api_key"
-    deploy_xray_api_service "$x_api_key" ""
+    if ! deploy_xray_api_service "$x_api_key" ""; then
+        warn "Служба xray-api не смогла быть развернута."
+        return 1
+    fi
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now xray-api 2>/dev/null || true
-    if ! ensure_xray_api_healthy; then
-        error "Служба xray-api не смогла запуститься или не прошла проверку работоспособности."
+    if ! ensure_xray_api_healthy 1; then
+        warn "Служба xray-api не смогла запуститься или не прошла проверку работоспособности."
         return 1
     fi
 
     # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx Amnezia
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
-    if [[ -f "$amnezia_nginx" ]] && ! grep -q "location /v1/" "$amnezia_nginx"; then
-        mkdir -p /etc/nginx/conf.d
-        if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
-            cat > "/etc/nginx/conf.d/amnezia-ratelimit.conf" <<'EOF'
+    local amnezia_enabled="/etc/nginx/sites-enabled/just1k-amnezia.conf"
+    if [[ -f "$amnezia_nginx" || -f "$amnezia_enabled" ]]; then
+        if [[ ! -f "$amnezia_nginx" && -f "$amnezia_enabled" ]]; then
+            cp -a "$amnezia_enabled" "$amnezia_nginx" 2>/dev/null || true
+        fi
+        local amnezia_bak="${amnezia_nginx}.user.bak"
+        if ! grep -q "location /v1/" "$amnezia_nginx"; then
+            cp -p "$amnezia_nginx" "$amnezia_bak" 2>/dev/null || true
+            mkdir -p /etc/nginx/conf.d
+            if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
+                cat > "/etc/nginx/conf.d/amnezia-ratelimit.conf" <<'EOF'
 # JUST1KNODE: AmneziaWG API Rate Limiting Zone
 limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;
 EOF
-        fi
-        python3 -c "
+            fi
+            python3 -c "
 import sys
 path = sys.argv[1]
 with open(path, 'r', encoding='utf-8') as f:
@@ -577,13 +613,37 @@ if 'location / {' in content:
     with open(path, 'w', encoding='utf-8') as f:
         f.write(new_content)
 " "$amnezia_nginx" 2>/dev/null || true
+            if ! grep -q "location /v1/" "$amnezia_nginx"; then
+                warn "Nginx: не удалось внедрить маршрут /v1/ в $amnezia_nginx"
+                if [[ -f "$amnezia_bak" ]]; then
+                    cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                    rm -f "$amnezia_bak" 2>/dev/null || true
+                fi
+                return 1
+            fi
+        fi
+
+        ln -sf "$amnezia_nginx" "$amnezia_enabled" 2>/dev/null || true
         if ! nginx -t >/dev/null 2>&1; then
-            error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси xray-api (/v1/)."
+            warn "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси xray-api (/v1/)."
+            if [[ -f "$amnezia_bak" ]]; then
+                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                rm -f "$amnezia_bak" 2>/dev/null || true
+            fi
             return 1
         fi
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+
+        if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
+            warn "Nginx: не удалось применить конфигурацию для Amnezia Nginx."
+            if [[ -f "$amnezia_bak" ]]; then
+                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                rm -f "$amnezia_bak" 2>/dev/null || true
+            fi
+            return 1
+        fi
+        rm -f "$amnezia_bak" 2>/dev/null || true
         log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
-    elif [[ ! -f "$amnezia_nginx" ]]; then
+    elif [[ ! -f "$amnezia_nginx" && ! -f "$amnezia_enabled" ]]; then
         local v_dom
         v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
         local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
@@ -626,19 +686,30 @@ server {
 EOF
             ln -sf "$vless_api_nginx" /etc/nginx/sites-enabled/just1k-vless-api.conf 2>/dev/null || true
             if ! nginx -t >/dev/null 2>&1; then
-                error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
-                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf
+                warn "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API ($vless_api_nginx)."
+                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
                 return 1
             fi
-            systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+            if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
+                warn "Nginx: не удалось применить конфигурацию для VLESS API ($vless_api_nginx)."
+                rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+                return 1
+            fi
             log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
+        else
+            warn "Nginx: не найдены SSL сертификаты или домен для автономного VLESS API ($v_dom)."
+            return 1
         fi
     fi
 
-    if [[ -f "$amnezia_nginx" ]]; then
+    local cur_awg_port
+    cur_awg_port="$(get_state_val "awg_port" "8443")"
+    [[ -z "$cur_awg_port" || "$cur_awg_port" == "-" ]] && cur_awg_port="8443"
+
+    if [[ -f "$amnezia_nginx" || -f "$amnezia_enabled" ]]; then
         local dead_bot_ip
         dead_bot_ip="$(get_state_val "bot_ip" "")"
-        if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
             if [[ -n "$dead_bot_ip" ]]; then
                 ufw delete allow from "$dead_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
             fi
@@ -834,7 +905,6 @@ print('[]')
     local cur_has_vless
     cur_has_vless="$(get_state_val "has_vless" "0")"
     if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
-        deploy_vless_fallback_nginx
         direct_inbound_json=",
     {
       \"tag\": \"just1k-vless-direct\",
@@ -859,7 +929,7 @@ print('[]')
     fi
 
     log "Формирование конфигурации Relay ноды (VLESS ${sec_mode^^})..."
-    local tmp_xray_config="${XRAY_CONFIG}.tmp"
+    local tmp_xray_config="${XRAY_CONFIG}.tmp.json"
     cat > "$tmp_xray_config" <<EOF
 {
   "log": {
@@ -981,7 +1051,7 @@ EOF
 
     apply_node_sysctl_hardening
 
-    if ! "$XRAY_BIN" run -test -config "$tmp_xray_config"; then
+    if ! "$XRAY_BIN" run -test -format json -config "$tmp_xray_config"; then
         rm -f "$tmp_xray_config"
         error "Ошибка тестирования сгенерированной конфигурации Xray на Relay узле. Изменения не применены."
         return 1
@@ -989,6 +1059,12 @@ EOF
 
     mv -f "$tmp_xray_config" "$XRAY_CONFIG"
     ensure_xray_config_permissions "$XRAY_CONFIG"
+
+    if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
+        if ! deploy_vless_fallback_nginx; then
+            warn "Nginx: не удалось настроить fallback для VLESS при переконфигурации Relay."
+        fi
+    fi
 
     # Защита портов через UFW (строго без открытия Amnezia API всему миру)
     local extra_ufw_ports=()
@@ -1759,7 +1835,7 @@ cfg['dns'] = {
 }
 
 d = os.path.dirname(os.path.abspath(cfg_file))
-t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
     f.flush()
@@ -1780,7 +1856,7 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
 
     apply_node_sysctl_hardening
 
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
+    if ! "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"; then
         manifest_rollback
         error "Ошибка валидации Xray Relay после оптимизации! Выполнен полный откат."
     fi
@@ -1833,6 +1909,7 @@ install_vless_direct_node() {
     fi
 
     install_base_deps
+    install_nginx_if_missing
     apply_node_sysctl_hardening
 
     local dest_server="${1:-}"
@@ -1887,9 +1964,16 @@ install_vless_direct_node() {
     fi
     if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
         set_state_val "bot_ip" "$bot_ip"
-        log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
+        local amnezia_check_p
+        amnezia_check_p="$(get_state_val "awg_port" "8443")"
+        [[ -z "$amnezia_check_p" || "$amnezia_check_p" == "-" ]] && amnezia_check_p="8443"
+        if [[ -f "/etc/nginx/sites-available/just1k-amnezia.conf" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
+            log "Фаервол UFW: API доступен через Amnezia Nginx (порт ${amnezia_check_p} /v1/) строго для BOT_IP: ${bot_ip}"
+        else
+            log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
+        fi
     else
-        warn "BOT_IP не указан или невалиден. API 8444 будет закрыт от внешнего мира в UFW (Fail-Closed)."
+        warn "BOT_IP не указан или невалиден. API будет закрыт от внешнего мира в UFW (Fail-Closed)."
     fi
 
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
@@ -1901,7 +1985,27 @@ install_vless_direct_node() {
     fi
 
     install_xray_binaries
-    create_backup "$XRAY_CONFIG"
+    local orig_xray_exists=0
+    local orig_bkp_cfg=""
+    if [[ -f "$XRAY_CONFIG" ]]; then
+        orig_xray_exists=1
+        create_backup "$XRAY_CONFIG"
+        orig_bkp_cfg="${LAST_BACKUP_PATH:-}"
+    fi
+    local orig_has_vless
+    orig_has_vless="$(get_state_val "has_vless" "0")"
+    local orig_vless_domain
+    orig_vless_domain="$(get_state_val "vless_domain" "")"
+    local orig_role
+    orig_role="$(get_state_val "role" "")"
+    local orig_had_fallback80=0
+    if [[ -f "/etc/nginx/sites-available/just1k-fallback80.conf" || -L "/etc/nginx/sites-enabled/just1k-fallback80.conf" ]]; then
+        orig_had_fallback80=1
+    fi
+    local orig_had_vless_api=0
+    if [[ -f "/etc/nginx/sites-available/just1k-vless-api.conf" || -L "/etc/nginx/sites-enabled/just1k-vless-api.conf" ]]; then
+        orig_had_vless_api=1
+    fi
 
     local tls_cert_dir="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}"
     local tls_cert_file="${tls_cert_dir}/vless_fullchain.pem"
@@ -1911,7 +2015,7 @@ install_vless_direct_node() {
         tls_key_file="${tls_cert_dir}/privkey.pem"
     fi
 
-    local tmp_cfg="${XRAY_CONFIG}.tmp"
+    local tmp_cfg="${XRAY_CONFIG}.tmp.json"
     if ! python3 -c "
 import json, os, sys
 cfg_file, cert_f, key_f, out_f = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1994,16 +2098,67 @@ else:
 with open(out_f, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
 " "$XRAY_CONFIG" "$tls_cert_file" "$tls_key_file" "$tmp_cfg"; then
-        error "Ошибка генерации конфигурации Xray для VLESS. Исходный файл не изменен."
         rm -f "$tmp_cfg" 2>/dev/null || true
+        error "Ошибка генерации конфигурации Xray для VLESS. Исходный файл не изменен."
         return 1
     fi
 
     ensure_xray_config_permissions "$tmp_cfg"
 
-    if ! "$XRAY_BIN" run -test -config "$tmp_cfg"; then
-        error "Ошибка валидации сгенерированной конфигурации Xray для VLESS. Откат к исходной."
+    local rollback_vless_installation
+    rollback_vless_installation() {
+        warn "Выполняется откат конфигурации и служб VLESS к исходному состоянию..."
+        if [[ "$orig_xray_exists" -eq 1 && -n "$orig_bkp_cfg" && -f "$orig_bkp_cfg" ]]; then
+            cp -f "$orig_bkp_cfg" "$XRAY_CONFIG"
+            ensure_xray_config_permissions "$XRAY_CONFIG"
+            if ! systemctl restart xray 2>/dev/null; then
+                warn "Критическая ошибка: не удалось перезапустить Xray при откате к предыдущей конфигурации!"
+            fi
+        elif [[ "$orig_xray_exists" -eq 0 ]]; then
+            systemctl stop xray 2>/dev/null || true
+            rm -f "$XRAY_CONFIG" 2>/dev/null || true
+        fi
+
+        # Откат правила UFW для 443 (если 443 не использовался ранее для VLESS или Relay)
+        if [[ "$orig_has_vless" != "1" && "$(get_state_val "relay_port" "")" != "443" ]]; then
+            ufw delete allow 443/tcp >/dev/null 2>&1 || true
+        fi
+
+        # Откат fallback хоста Nginx (только если его не было до текущей установки)
+        if [[ "$orig_had_fallback80" -eq 0 ]]; then
+            rm -f /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
+            if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "/etc/nginx/sites-enabled/default" ]]; then
+                cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default" 2>/dev/null || true
+                ln -sf "/etc/nginx/sites-available/default" "/etc/nginx/sites-enabled/default" 2>/dev/null || true
+                rm -f "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
+                if nginx -t >/dev/null 2>&1; then
+                    systemctl reload nginx 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        # Откат автономного виртуального хоста VLESS API Nginx (только если его не было до текущей установки)
+        if [[ "$orig_had_vless_api" -eq 0 ]]; then
+            rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf 2>/dev/null || true
+        fi
+
+        # Остановка xray-api, если на сервере ранее не было VLESS и не настроен Relay
+        if [[ "$orig_has_vless" != "1" && "$(get_state_val "has_relay" "0")" != "1" ]]; then
+            systemctl stop xray-api 2>/dev/null || true
+            systemctl disable xray-api 2>/dev/null || true
+        fi
+
+        # Восстановление состояния state.json
+        set_state_val "has_vless" "$orig_has_vless"
+        set_state_val "vless_domain" "$orig_vless_domain"
+        if [[ -n "$orig_role" ]]; then
+            set_state_val "role" "$orig_role"
+        fi
+    }
+
+    if ! "$XRAY_BIN" run -test -format json -config "$tmp_cfg"; then
         rm -f "$tmp_cfg" 2>/dev/null || true
+        error "Ошибка валидации сгенерированной конфигурации Xray для VLESS. Исходная конфигурация не изменена."
         return 1
     fi
 
@@ -2013,14 +2168,34 @@ with open(out_f, 'w', encoding='utf-8') as f:
     ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
 
     deploy_xray_systemd_service
-    systemctl restart xray
+    if ! systemctl restart xray; then
+        warn "Служба Xray не смогла перезапуститься с новой конфигурацией VLESS."
+        rollback_vless_installation
+        error "Ошибка запуска Xray с конфигурацией VLESS. Выполнен откат к исходному состоянию."
+        return 1
+    fi
 
-    set_state_val "has_vless" "1"
-    set_state_val "vless_domain" "$dest_server"
-    set_state_val "role" "node"
+    if ! deploy_vless_fallback_nginx; then
+        warn "Сбой настройки маскировочного Nginx Fallback."
+        rollback_vless_installation
+        error "Ошибка настройки Nginx Fallback. Выполнен откат к исходному состоянию."
+        return 1
+    fi
 
-    deploy_vless_fallback_nginx
-    setup_xray_api_proxy "$dest_server"
+    if ! setup_xray_api_proxy "$dest_server"; then
+        warn "Ошибка настройки прокси/службы xray-api."
+        rollback_vless_installation
+        error "Ошибка настройки xray-api. Выполнен откат к исходному состоянию."
+        return 1
+    fi
+
+    # Фиксация состояния только при гарантированном успехе (Commit-on-Success)
+    if ! set_state_val "has_vless" "1" || ! set_state_val "vless_domain" "$dest_server" || ! set_state_val "role" "node"; then
+        warn "Ошибка сохранения состояния VLESS в state.json."
+        rollback_vless_installation
+        error "Ошибка фиксации состояния VLESS. Выполнен откат к исходному состоянию."
+        return 1
+    fi
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
     echo ""
@@ -2083,6 +2258,14 @@ uninstall_vless_component() {
     fi
 
     rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
+    if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "/etc/nginx/sites-enabled/default" ]]; then
+        if [[ ! -f /etc/nginx/sites-enabled/just1k-origin.conf ]]; then
+            cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default" 2>/dev/null || true
+            ln -sf "/etc/nginx/sites-available/default" "/etc/nginx/sites-enabled/default" 2>/dev/null || true
+            rm -f "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
+            log "Nginx: восстановлен исходный сайт default из default.user.bak"
+        fi
+    fi
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
     if [[ "$cur_has_r_init" != "1" && -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
         python3 -c "

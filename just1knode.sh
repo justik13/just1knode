@@ -516,7 +516,7 @@ run_doctor() {
 
     if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
         log "3. Проверка конфигурации Xray..."
-        if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
+        if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
         else
             echo -e "  ${RED}✗${NC} Ошибка конфигурации Xray"

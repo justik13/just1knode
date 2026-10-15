@@ -24,7 +24,8 @@ ensure_xrayapi_user() {
         fi
     fi
     if ! id -u xrayapi >/dev/null 2>&1; then
-        error "Не удалось создать системного пользователя xrayapi"
+        warn "Не удалось создать системного пользователя xrayapi"
+        return 1
     fi
 }
 
@@ -69,13 +70,13 @@ deploy_xray_api_sources() {
         done
         if [[ $download_ok -ne 1 ]]; then
             rm -rf "$tmp_tar" "$tmp_extracted"
-            error "Не удалось загрузить архив репозитория для развертывания xray-api ($JUST1KNODE_REF)."
+            warn "Не удалось загрузить архив репозитория для развертывания xray-api ($JUST1KNODE_REF)."
             return 1
         fi
 
         if ! tar -xzf "$tmp_tar" -C "$tmp_extracted" --strip-components=1 --no-same-owner 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_extracted"
-            error "Не удалось распаковать архив репозитория для xray-api."
+            warn "Не удалось распаковать архив репозитория для xray-api."
             return 1
         fi
         if [[ -d "${tmp_extracted}/scripts/xray_api" ]]; then
@@ -84,7 +85,7 @@ deploy_xray_api_sources() {
         rm -rf "$tmp_tar" "$tmp_extracted"
     fi
     if [[ ! -f "${XRAY_API_DIR}/app.py" ]]; then
-        error "Исходный файл ${XRAY_API_DIR}/app.py не найден после установки xray-api."
+        warn "Исходный файл ${XRAY_API_DIR}/app.py не найден после установки xray-api."
         return 1
     fi
     chown -R root:xrayapi "${XRAY_API_DIR}" 2>/dev/null || true
@@ -92,15 +93,23 @@ deploy_xray_api_sources() {
 }
 
 setup_xray_api_venv() {
-    ensure_xrayapi_user
+    if ! ensure_xrayapi_user; then
+        return 1
+    fi
     mkdir -p "${XRAY_API_DIR}"
     if [[ ! -d "${XRAY_API_DIR}/venv" || ! -f "${XRAY_API_DIR}/venv/bin/uvicorn" ]]; then
         log "Создание venv в ${XRAY_API_DIR}/venv..."
-        python3 -m venv "${XRAY_API_DIR}/venv"
+        if ! python3 -m venv "${XRAY_API_DIR}/venv"; then
+            warn "Не удалось создать venv для xray-api."
+            return 1
+        fi
     fi
     if [[ -f "${XRAY_API_DIR}/requirements.txt" ]]; then
         log "Установка зафиксированных зависимостей xray-api..."
-        "${XRAY_API_DIR}/venv/bin/pip" install --no-cache-dir -r "${XRAY_API_DIR}/requirements.txt"
+        if ! "${XRAY_API_DIR}/venv/bin/pip" install --no-cache-dir -r "${XRAY_API_DIR}/requirements.txt"; then
+            warn "Не удалось установить зависимости pip для xray-api."
+            return 1
+        fi
     else
         warn "Файл ${XRAY_API_DIR}/requirements.txt не найден, пропуск pip install."
     fi
@@ -110,10 +119,16 @@ deploy_xray_api_service() {
     local api_key="$1"
     local cdn_domain="${2:-}"
 
-    ensure_xrayapi_user
+    if ! ensure_xrayapi_user; then
+        return 1
+    fi
     mkdir -p "${XRAY_API_ETC}" "${STATE_DIR}" "${XRAY_API_LIB}"
-    deploy_xray_api_sources
-    setup_xray_api_venv
+    if ! deploy_xray_api_sources; then
+        return 1
+    fi
+    if ! setup_xray_api_venv; then
+        return 1
+    fi
 
     cat > "${XRAY_API_CONFIG_ENV}" <<EOF
 XRAY_API_KEY=${api_key}
