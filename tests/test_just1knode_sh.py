@@ -3762,6 +3762,22 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 5. setup_relay_node checks deploy_vless_fallback_nginx
         self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
 
+        # 6. ensure_xray_api_healthy force check and setup_xray_api_proxy call
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn('local force="${1:-0}"', common_sh)
+        self.assertIn('if ! ensure_xray_api_healthy 1; then', relay_sh)
+
+        # 7. install_nginx_if_missing in install_vless_direct_node
+        self.assertIn('install_nginx_if_missing', relay_sh)
+
+        # 8. amnezia_bak restoration on reload/restart failure
+        self.assertIn('if [[ -f "$amnezia_bak" ]]; then\n                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true', relay_sh)
+
+        # 9. Format json in run_doctor and tmp.json in heal_and_update_relay_config
+        self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
+        self.assertIn("suffix='.tmp.json'", relay_sh)
+
 
 if __name__ == "__main__":
     unittest.main()

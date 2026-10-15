@@ -340,6 +340,7 @@ get_public_ipv4() {
 }
 
 ensure_xray_api_healthy() {
+    local force="${1:-0}"
     # Функция вызывается на узлах, где установлен агент xray-api (Origin / модульный узел с VLESS).
     if [[ ! -f /etc/systemd/system/xray-api.service && ! -f /lib/systemd/system/xray-api.service ]]; then
         return 0
@@ -349,7 +350,7 @@ ensure_xray_api_healthy() {
     local role cur_has_v
     role="$(get_state_val "role" "")"
     cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$role" != "origin" && "$cur_has_v" != "1" ]]; then
+    if [[ "$force" != "1" && "$role" != "origin" && "$cur_has_v" != "1" ]]; then
         return 0
     fi
 

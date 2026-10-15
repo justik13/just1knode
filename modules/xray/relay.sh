@@ -565,7 +565,7 @@ setup_xray_api_proxy() {
     fi
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now xray-api 2>/dev/null || true
-    if ! ensure_xray_api_healthy; then
+    if ! ensure_xray_api_healthy 1; then
         warn "Служба xray-api не смогла запуститься или не прошла проверку работоспособности."
         return 1
     fi
@@ -632,12 +632,16 @@ if 'location / {' in content:
             fi
             return 1
         fi
-        rm -f "$amnezia_bak" 2>/dev/null || true
 
         if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
             warn "Nginx: не удалось применить конфигурацию для Amnezia Nginx."
+            if [[ -f "$amnezia_bak" ]]; then
+                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
+                rm -f "$amnezia_bak" 2>/dev/null || true
+            fi
             return 1
         fi
+        rm -f "$amnezia_bak" 2>/dev/null || true
         log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
     elif [[ ! -f "$amnezia_nginx" && ! -f "$amnezia_enabled" ]]; then
         local v_dom
@@ -692,6 +696,9 @@ EOF
                 return 1
             fi
             log "Nginx: развернут автономный виртуальный хост VLESS API на порту 8444 (➔ 127.0.0.1:5001)."
+        else
+            warn "Nginx: не найдены SSL сертификаты или домен для автономного VLESS API ($v_dom)."
+            return 1
         fi
     fi
 
@@ -1828,7 +1835,7 @@ cfg['dns'] = {
 }
 
 d = os.path.dirname(os.path.abspath(cfg_file))
-t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
     f.flush()
@@ -1849,7 +1856,7 @@ print('[+] Xray Relay config успешно оптимизирован (UseIPv4 
 
     apply_node_sysctl_hardening
 
-    if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
+    if ! "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"; then
         manifest_rollback
         error "Ошибка валидации Xray Relay после оптимизации! Выполнен полный откат."
     fi
@@ -1902,6 +1909,7 @@ install_vless_direct_node() {
     fi
 
     install_base_deps
+    install_nginx_if_missing
     apply_node_sysctl_hardening
 
     local dest_server="${1:-}"
