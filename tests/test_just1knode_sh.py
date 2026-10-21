@@ -20,6 +20,7 @@ JUST1KNODE_SH = (REPO_ROOT / "just1knode.sh") if (REPO_ROOT / "just1knode.sh").e
 REQUIREMENTS_TXT = REPO_ROOT / "scripts" / "xray_api" / "requirements.txt"
 
 
+@unittest.skipIf(sys.platform == "win32", "Shell behavioural tests run strictly on Linux CI")
 class TestJust1kNodeScript(unittest.TestCase):
     @classmethod
     def _bp(cls, p: Path | str) -> str:
