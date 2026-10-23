@@ -1794,6 +1794,9 @@ esac
         self.assertEqual(
             default_ib["streamSettings"]["xhttpSettings"]["path"], f"{secret_path}/default"
         )
+        self.assertEqual(
+            default_ib["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"]
+        )
 
         outbound_tags = [ob["tag"] for ob in xray_conf["outbounds"]]
         self.assertIn("just1k-wl-direct", outbound_tags)
@@ -1876,6 +1879,9 @@ esac
             de_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "queryInHeader"
         )
         self.assertEqual(de_ib["streamSettings"]["xhttpSettings"]["path"], "/stream/de")
+        self.assertEqual(
+            de_ib["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"]
+        )
 
         outbound_tags = [ob["tag"] for ob in xray_conf["outbounds"]]
         self.assertIn("just1k-wl-outbound-de", outbound_tags)
@@ -3923,6 +3929,16 @@ with open(path, 'w', encoding='utf-8') as f:
         # 4. just1knode.sh CLI dispatcher routes vless domain
         self.assertIn("domain|set-domain|change-domain) setup_vless_domain", just1knode_sh)
         self.assertIn("vless-domain|setup-vless-domain)", just1knode_sh)
+
+    def test_xray_origin_client_inbounds_trusted_x_forwarded_for(self):
+        """Verify origin and relay inbound templates configure trustedXForwardedFor for Nginx."""
+        origin_sh = (REPO_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (REPO_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+
+        self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", origin_sh)
+        self.assertIn("ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']", origin_sh)
+        self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", relays_manage_sh)
+
 
 
 if __name__ == "__main__":

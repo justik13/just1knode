@@ -338,6 +338,9 @@ inbounds.append({
     'settings': {'clients': [], 'decryption': 'none'},
     'streamSettings': {
         'network': 'xhttp',
+        'sockopt': {
+            'trustedXForwardedFor': ['X-Forwarded-For']
+        },
         'xhttpSettings': {
             'mode': 'packet-up',
             'path': f'{secret_path}/default',
@@ -999,6 +1002,9 @@ if not def_ib:
         'settings': {'clients': [], 'decryption': 'none'},
         'streamSettings': {
             'network': 'xhttp',
+            'sockopt': {
+                'trustedXForwardedFor': ['X-Forwarded-For']
+            },
             'xhttpSettings': {
                 'mode': 'packet-up',
                 'path': secret_base + '/default',
@@ -1036,7 +1042,9 @@ for ib in inbounds:
 for ib in inbounds:
     tag = ib.get('tag', '')
     if tag == 'just1k-wl-default' or tag.startswith('just1k-wl-inbound-'):
-        xs = ib.setdefault('streamSettings', {}).setdefault('xhttpSettings', {})
+        ss = ib.setdefault('streamSettings', {})
+        ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']
+        xs = ss.setdefault('xhttpSettings', {})
         xs['uplinkHTTPMethod'] = 'GET'
         xs['uplinkDataPlacement'] = 'header'
         xs['uplinkDataKey'] = 'data'
