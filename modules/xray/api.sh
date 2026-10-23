@@ -165,7 +165,7 @@ EOF
 
     cat > "${SYSTEMD_SYSTEM_DIR}/xray-api.service" <<EOF
 [Unit]
-Description=Just1kBot Xray API Agent
+Description=Just1kNode Xray API Agent
 After=network.target xray.service
 Wants=xray.service
 PartOf=xray.service
