@@ -322,6 +322,9 @@ new_ib = {
     'settings': {'clients': [], 'decryption': 'none'},
     'streamSettings': {
         'network': 'xhttp',
+        'sockopt': {
+            'trustedXForwardedFor': ['X-Forwarded-For']
+        },
         'xhttpSettings': {
             'mode': 'packet-up',
             'path': in_path,
