@@ -34,69 +34,55 @@ from fastapi import Depends, FastAPI, HTTPException, Header, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+AWG_MANDATORY_BASE_KEYS = (
+    "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
+)
 AWG3_1_EXCLUSIVE_KEYS = (
     "RandomTrailers",
     "DisableCookies",
 )
+AWG3_0_EXCLUSIVE_KEYS = (
+    "HeaderProtectionKey",
+    "ContentPaddingAddition",
+    "RekeyAfterTime",
+    "RekeyTimeout",
+    "RejectAfterTime",
+    "KeepaliveTimeout",
+    "MaxHandshakeAttempts",
+)
+AWG3_EXCLUSIVE_KEYS = AWG3_1_EXCLUSIVE_KEYS + AWG3_0_EXCLUSIVE_KEYS
 
-try:
-    from utils.vpn_parser import (
-        AWG_MANDATORY_BASE_KEYS,
-        AWG3_0_EXCLUSIVE_KEYS,
-        AWG3_1_EXCLUSIVE_KEYS,
-        AWG3_EXCLUSIVE_KEYS,
-        detect_awg_version,
-    )
-except ImportError:
-    # Standalone mode on isolated node VPS
-    AWG_MANDATORY_BASE_KEYS = (
-        "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
-    )
-    AWG3_1_EXCLUSIVE_KEYS = (
-        "RandomTrailers",
-        "DisableCookies",
-    )
-    AWG3_0_EXCLUSIVE_KEYS = (
-        "HeaderProtectionKey",
-        "ContentPaddingAddition",
-        "RekeyAfterTime",
-        "RekeyTimeout",
-        "RejectAfterTime",
-        "KeepaliveTimeout",
-        "MaxHandshakeAttempts",
-    )
-    AWG3_EXCLUSIVE_KEYS = AWG3_1_EXCLUSIVE_KEYS + AWG3_0_EXCLUSIVE_KEYS
 
-    def detect_awg_version(params: dict[str, Any]) -> str:
-        """Detect AWG protocol version ('3.1', '3.0', '2.0') adhering to Any-Tech-ARCHITECT specifications."""
-        if not isinstance(params, dict):
-            return "2.0"
-
-        def has(k: str) -> bool:
-            v = params.get(k)
-            if v is None or v == "":
-                v = params.get(k.upper())
-            if v is None:
-                return False
-            # For toggle/integer keys (RandomTrailers, DisableCookies), "0", "false", "off", "no", "disabled" mean disabled
-            if k in ("RandomTrailers", "DisableCookies") and str(v).strip().lower() in (
-                "0",
-                "false",
-                "off",
-                "no",
-                "disabled",
-                "",
-            ):
-                return False
-            return str(v).strip() != ""
-
-        pv = str(params.get("protocol_version", "")).strip()
-        if any(has(k) for k in AWG3_1_EXCLUSIVE_KEYS) or pv == "3.1":
-            return "3.1"
-        if any(has(k) for k in AWG3_0_EXCLUSIVE_KEYS) or pv in ("3", "3.0"):
-            return "3.0"
-
+def detect_awg_version(params: dict[str, Any]) -> str:
+    """Detect AWG protocol version ('3.1', '3.0', '2.0') adhering to Any-Tech-ARCHITECT specifications."""
+    if not isinstance(params, dict):
         return "2.0"
+
+    def has(k: str) -> bool:
+        v = params.get(k)
+        if v is None or v == "":
+            v = params.get(k.upper())
+        if v is None:
+            return False
+        # For toggle/integer keys (RandomTrailers, DisableCookies), "0", "false", "off", "no", "disabled" mean disabled
+        if k in ("RandomTrailers", "DisableCookies") and str(v).strip().lower() in (
+            "0",
+            "false",
+            "off",
+            "no",
+            "disabled",
+            "",
+        ):
+            return False
+        return str(v).strip() != ""
+
+    pv = str(params.get("protocol_version", "")).strip()
+    if any(has(k) for k in AWG3_1_EXCLUSIVE_KEYS) or pv == "3.1":
+        return "3.1"
+    if any(has(k) for k in AWG3_0_EXCLUSIVE_KEYS) or pv in ("3", "3.0"):
+        return "3.0"
+
+    return "2.0"
 
 
 def is_awg3_detected(params: dict[str, Any]) -> bool:
