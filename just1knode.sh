@@ -609,11 +609,12 @@ run_doctor() {
 
     log "5. Проверка SSL сертификатов Let's Encrypt..."
     local check_domains=()
-    local d_cand
+    local d_cand d_cand_lower already existing key domain
     for key in "domain" "vless_domain" "awg_domain" "sni"; do
         d_cand="$(get_state_val "$key" "")"
-        if [[ -n "$d_cand" && "$d_cand" != "-" && "$d_cand" != "none" ]]; then
-            local already=0
+        d_cand_lower="${d_cand,,}"
+        if [[ -n "$d_cand" && "$d_cand" != "-" && "$d_cand_lower" != "none" && "$d_cand_lower" != "null" ]]; then
+            already=0
             for existing in "${check_domains[@]}"; do
                 if [[ "$existing" == "$d_cand" ]]; then
                     already=1

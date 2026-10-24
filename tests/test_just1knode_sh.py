@@ -3578,6 +3578,37 @@ COMMIT
         self.assertIn('dport 25 -j REJECT --reject-with tcp-reset', amnezia_sh)
         self.assertIn('string \\"BitTorrent protocol\\"', amnezia_sh)
 
+    def test_modular_awg_node_doctor_and_status_skips_xray_behavioral(self):
+        """Verify run_doctor on modular AWG-only node skips Xray Core and Xray config check."""
+        self._prepare_base_env()
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+
+        res = self._run_shell_snippet("run_doctor")
+        self.assertNotIn("3. Проверка конфигурации Xray...", res.stdout)
+        self.assertNotIn("Ошибка конфигурации Xray", res.stdout)
+
+    def test_doctor_ssl_multi_domain_and_dedup_behavioral(self):
+        """Verify run_doctor checks all unique domains and filters null/none values."""
+        self._prepare_base_env()
+        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
+            json.dump({
+                "role": "node",
+                "domain": "vless.test.example",
+                "vless_domain": "vless.test.example",
+                "awg_domain": "awg.test.example",
+                "sni": "None",
+            }, f)
+
+        res = self._run_shell_snippet("run_doctor")
+        # Both unique domains must be checked
+        self.assertIn("vless.test.example", res.stdout)
+        self.assertIn("awg.test.example", res.stdout)
+        # Deduplication: vless.test.example checked once
+        self.assertEqual(res.stdout.count("vless.test.example"), 1)
+        # Case-insensitive null/none filtered out: None must not be checked as domain
+        self.assertNotIn("домена None", res.stdout)
+
 
 class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
     """Regression shield for node routing rules, fail-closed security, and lock primitives."""
@@ -3969,6 +4000,8 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
         self.assertIn('for domain in "${check_domains[@]}"; do', just1knode_sh)
         self.assertIn('cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"', just1knode_sh)
+        self.assertIn('local d_cand d_cand_lower already existing key domain', just1knode_sh)
+        self.assertIn('"$d_cand_lower" != "none" && "$d_cand_lower" != "null"', just1knode_sh)
 
 
 
