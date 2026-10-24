@@ -38,6 +38,8 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         if [[ -d "/app/scripts/xray_api" ]]; then
             mkdir -p "${XRAY_API_DIR:-/opt/xray-api}"
             cp -a /app/scripts/xray_api/. "${XRAY_API_DIR:-/opt/xray-api}/"
+            mkdir -p "$INSTALL_DIR/scripts/xray_api"
+            cp -a /app/scripts/xray_api/. "$INSTALL_DIR/scripts/xray_api/"
         fi
         if [[ -d "/app/scripts/amnezia_api" ]]; then
             mkdir -p "${AMNEZIA_API_DIR:-/opt/amnezia-api}"
@@ -96,6 +98,8 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         if [[ -d "$tmp_extract/scripts/xray_api" ]]; then
             mkdir -p "${XRAY_API_DIR:-/opt/xray-api}"
             cp -a "$tmp_extract/scripts/xray_api/." "${XRAY_API_DIR:-/opt/xray-api}/"
+            mkdir -p "$INSTALL_DIR/scripts/xray_api"
+            cp -a "$tmp_extract/scripts/xray_api/." "$INSTALL_DIR/scripts/xray_api/"
         fi
         if [[ -d "$tmp_extract/scripts/amnezia_api" ]]; then
             mkdir -p "${AMNEZIA_API_DIR:-/opt/amnezia-api}"
@@ -303,7 +307,7 @@ show_status() {
         fi
 
         echo -e "\n  Службы:"
-        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" ]]; then
+        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
             systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         fi
         if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
@@ -547,7 +551,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$role" == "node" || "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
+    if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
@@ -604,42 +608,57 @@ run_doctor() {
     fi
 
     log "5. Проверка SSL сертификатов Let's Encrypt..."
-    local domain
-    domain="$(get_state_val "domain")"
-    [[ -z "$domain" ]] && domain="$(get_state_val "sni")"
-    [[ -z "$domain" ]] && domain="$(get_state_val "vless_domain")"
-    [[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"
-
-    if [[ -n "$domain" && -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
-        local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
-        local exp_date
-        exp_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || echo "НЕИЗВЕСТНО")"
-        
-        # Проверка истечения срока действия (F21)
-        if ! openssl x509 -checkend 0 -noout -in "$cert_file" 2>/dev/null; then
-            echo -e "  ${RED}✗${NC} SSL сертификат для $domain истек ($exp_date)!"
-            failed=$((failed + 1))
-        elif ! openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
-            echo -e "  ${YELLOW}!${NC} SSL сертификат для $domain истекает менее чем через 30 дней: $exp_date"
-        else
-            echo -e "  ${GREEN}✔${NC} SSL сертификат для $domain валиден до: $exp_date"
+    local check_domains=()
+    local d_cand d_cand_lower already existing key domain
+    for key in "domain" "vless_domain" "awg_domain" "sni"; do
+        d_cand="$(get_state_val "$key" "")"
+        d_cand_lower="${d_cand,,}"
+        if [[ -n "$d_cand" && "$d_cand" != "-" && "$d_cand_lower" != "none" && "$d_cand_lower" != "null" ]]; then
+            already=0
+            for existing in "${check_domains[@]}"; do
+                if [[ "$existing" == "$d_cand" ]]; then
+                    already=1
+                    break
+                fi
+            done
+            if [[ $already -eq 0 ]]; then
+                check_domains+=("$d_cand")
+            fi
         fi
+    done
 
-        # Проверка соответствия домена SAN / CN (F21)
-        local cert_text
-        cert_text="$(openssl x509 -noout -text -in "$cert_file" 2>/dev/null || true)"
-        if echo "$cert_text" | grep -qE "DNS:${domain}\b|CN\s*=\s*${domain}\b"; then
-            echo -e "  ${GREEN}✔${NC} Домен $domain подтвержден в сертификате (SAN/CN)"
-        else
-            echo -e "  ${RED}✗${NC} Домен $domain не найден в SAN/CN сертификата!"
-            failed=$((failed + 1))
-        fi
+    if [[ ${#check_domains[@]} -eq 0 ]]; then
+        echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (нормально для Relay)"
     else
-        if [[ -n "$domain" ]]; then
-            echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $domain не найден (нормально для Relay)"
-        else
-            echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (нормально для Relay)"
-        fi
+        for domain in "${check_domains[@]}"; do
+            if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+                local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+                local exp_date
+                exp_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || echo "НЕИЗВЕСТНО")"
+
+                # Проверка истечения срока действия (F21)
+                if ! openssl x509 -checkend 0 -noout -in "$cert_file" 2>/dev/null; then
+                    echo -e "  ${RED}✗${NC} SSL сертификат для $domain истек ($exp_date)!"
+                    failed=$((failed + 1))
+                elif ! openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
+                    echo -e "  ${YELLOW}!${NC} SSL сертификат для $domain истекает менее чем через 30 дней: $exp_date"
+                else
+                    echo -e "  ${GREEN}✔${NC} SSL сертификат для $domain валиден до: $exp_date"
+                fi
+
+                # Проверка соответствия домена SAN / CN (F21)
+                local cert_text
+                cert_text="$(openssl x509 -noout -text -in "$cert_file" 2>/dev/null || true)"
+                if echo "$cert_text" | grep -qE "DNS:${domain}\b|CN\s*=\s*${domain}\b"; then
+                    echo -e "  ${GREEN}✔${NC} Домен $domain подтвержден в сертификате (SAN/CN)"
+                else
+                    echo -e "  ${RED}✗${NC} Домен $domain не найден в SAN/CN сертификата!"
+                    failed=$((failed + 1))
+                fi
+            else
+                echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $domain не найден (нормально для Relay)"
+            fi
+        done
     fi
 
     log "6. Проверка UFW фаервола..."

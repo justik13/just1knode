@@ -31,20 +31,27 @@ ensure_xrayapi_user() {
 
 deploy_xray_api_sources() {
     mkdir -p "${XRAY_API_DIR}"
-    local project_xray_api="${SCRIPT_DIR}/scripts/xray_api"
-    if [[ ! -d "$project_xray_api" ]]; then
-        project_xray_api="${SCRIPT_DIR}/../scripts/xray_api"
-    fi
-    if [[ ! -d "$project_xray_api" ]]; then
-        project_xray_api="${SCRIPT_DIR}/../../scripts/xray_api"
-    fi
+    local project_xray_api=""
+    local cand_dirs=(
+        "${SCRIPT_DIR}/scripts/xray_api"
+        "${SCRIPT_DIR}/../scripts/xray_api"
+        "${SCRIPT_DIR}/../../scripts/xray_api"
+        "${INSTALL_DIR:-/opt/just1knode}/scripts/xray_api"
+        "/opt/just1knode/scripts/xray_api"
+        "/app/scripts/xray_api"
+    )
+    for cand in "${cand_dirs[@]}"; do
+        if [[ -d "$cand" && -f "$cand/app.py" ]]; then
+            project_xray_api="$cand"
+            break
+        fi
+    done
 
-    if [[ -d "$project_xray_api" && -f "$project_xray_api/app.py" ]]; then
+    if [[ -n "$project_xray_api" ]]; then
         log "Копирование локальных исходников агента xray-api из репозитория..."
         cp -r "$project_xray_api"/* "${XRAY_API_DIR}/"
-    elif [[ -d "/app/scripts/xray_api" && -f "/app/scripts/xray_api/app.py" ]]; then
-        log "Копирование исходников xray-api из /app/scripts/xray_api..."
-        cp -r /app/scripts/xray_api/* "${XRAY_API_DIR}/"
+    elif [[ -f "${XRAY_API_DIR}/app.py" ]]; then
+        log "Использование существующих исходников xray-api в ${XRAY_API_DIR}..."
     else
         log "Автономная загрузка модулей xray-api (ref: $JUST1KNODE_REF)..."
         local tmp_tar
@@ -81,6 +88,8 @@ deploy_xray_api_sources() {
         fi
         if [[ -d "${tmp_extracted}/scripts/xray_api" ]]; then
             cp -r "${tmp_extracted}/scripts/xray_api"/* "${XRAY_API_DIR}/"
+            mkdir -p "${INSTALL_DIR:-/opt/just1knode}/scripts/xray_api"
+            cp -r "${tmp_extracted}/scripts/xray_api"/* "${INSTALL_DIR:-/opt/just1knode}/scripts/xray_api/" 2>/dev/null || true
         fi
         rm -rf "$tmp_tar" "$tmp_extracted"
     fi
