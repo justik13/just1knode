@@ -3668,9 +3668,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
 
-        # Doctor check 5 domain fallback
-        self.assertIn('[[ -z "$domain" ]] && domain="$(get_state_val "sni")"', just1knode_sh)
-        self.assertIn('[[ -z "$domain" ]] && domain="$(get_state_val "awg_domain")"', just1knode_sh)
+        # Doctor check 5 domain verification loop
+        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
         self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
 
         # Relay domain setup emoji flag
@@ -3938,6 +3937,38 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", origin_sh)
         self.assertIn("ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']", origin_sh)
         self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", relays_manage_sh)
+
+    def test_modular_awg_node_status_and_doctor_skips_xray(self):
+        """On modular nodes where only AmneziaWG is installed, Xray status and config check must be skipped."""
+        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
+
+        # 1. show_node_status must not check Xray Core just because role == "node"
+        expected_status_cond = 'if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then'
+        self.assertIn(expected_status_cond, just1knode_sh)
+
+        # 2. run_doctor step 3 must not fail Xray config check on AWG-only nodes
+        self.assertIn(f'{expected_status_cond}\n        log "3. Проверка конфигурации Xray..."', just1knode_sh)
+
+    def test_xray_api_source_bootstrap_caching_and_deployment(self):
+        """Verify scripts/xray_api is cached to INSTALL_DIR in bootstrap and reused by deploy_xray_api_sources."""
+        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
+        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
+
+        # 1. Bootstrap caches scripts/xray_api to INSTALL_DIR/scripts/xray_api
+        self.assertIn('cp -a "$tmp_extract/scripts/xray_api/." "$INSTALL_DIR/scripts/xray_api/"', just1knode_sh)
+        self.assertIn('cp -a /app/scripts/xray_api/. "$INSTALL_DIR/scripts/xray_api/"', just1knode_sh)
+
+        # 2. api.sh checks existing XRAY_API_DIR/app.py before attempting remote tarball download
+        self.assertIn('elif [[ -f "${XRAY_API_DIR}/app.py" ]]; then', api_sh)
+        self.assertIn('log "Использование существующих исходников xray-api в ${XRAY_API_DIR}..."', api_sh)
+
+    def test_doctor_ssl_loop_all_configured_domains(self):
+        """Verify run_doctor iterates over all unique configured domains to validate each certificate."""
+        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
+
+        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
+        self.assertIn('for domain in "${check_domains[@]}"; do', just1knode_sh)
+        self.assertIn('cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"', just1knode_sh)
 
 
 

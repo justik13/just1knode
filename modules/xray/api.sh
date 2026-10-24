@@ -38,6 +38,9 @@ deploy_xray_api_sources() {
     if [[ ! -d "$project_xray_api" ]]; then
         project_xray_api="${SCRIPT_DIR}/../../scripts/xray_api"
     fi
+    if [[ ! -d "$project_xray_api" && -d "${INSTALL_DIR:-/opt/just1knode}/scripts/xray_api" ]]; then
+        project_xray_api="${INSTALL_DIR:-/opt/just1knode}/scripts/xray_api"
+    fi
 
     if [[ -d "$project_xray_api" && -f "$project_xray_api/app.py" ]]; then
         log "Копирование локальных исходников агента xray-api из репозитория..."
@@ -45,6 +48,8 @@ deploy_xray_api_sources() {
     elif [[ -d "/app/scripts/xray_api" && -f "/app/scripts/xray_api/app.py" ]]; then
         log "Копирование исходников xray-api из /app/scripts/xray_api..."
         cp -r /app/scripts/xray_api/* "${XRAY_API_DIR}/"
+    elif [[ -f "${XRAY_API_DIR}/app.py" ]]; then
+        log "Использование существующих исходников xray-api в ${XRAY_API_DIR}..."
     else
         log "Автономная загрузка модулей xray-api (ref: $JUST1KNODE_REF)..."
         local tmp_tar
