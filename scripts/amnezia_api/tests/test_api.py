@@ -1395,6 +1395,72 @@ def test_build_client_configs_awg3_without_hpk(mock_awg_env):
     assert decoded["containers"][0]["awg"]["protocol_version"] == "3.1"
 
 
+def test_is_valid_public_ipv4():
+    """Verify _is_valid_public_ipv4 filters non-global, loopback, multicast, and private IPv4s."""
+    assert amnezia_app._is_valid_public_ipv4("1.1.1.1") is True
+    assert amnezia_app._is_valid_public_ipv4("8.8.8.8") is True
+    assert amnezia_app._is_valid_public_ipv4("198.51.100.1") is True
+    assert amnezia_app._is_valid_public_ipv4("127.0.0.1") is False
+    assert amnezia_app._is_valid_public_ipv4("10.0.0.1") is False
+    assert amnezia_app._is_valid_public_ipv4("192.168.1.1") is False
+    assert amnezia_app._is_valid_public_ipv4("224.0.0.1") is False
+    assert amnezia_app._is_valid_public_ipv4("invalid-ip") is False
+    assert amnezia_app._is_valid_public_ipv4("") is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_public_ip_async_caching_and_negative_cache(monkeypatch):
+    """Verify _fetch_public_ip_async caches valid IP with 300s TTL and falls back to 127.0.0.1 with 30s negative TTL."""
+    import time
+
+    # Reset module-level cache
+    monkeypatch.setattr(amnezia_app, "_cached_public_ip", None)
+    monkeypatch.setattr(amnezia_app, "_cached_public_ip_time", 0.0)
+
+    # 1. Success case: curl returns valid global public IP
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"198.51.100.42\n", b"")
+    mock_exec = AsyncMock(return_value=mock_proc)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_exec)
+
+    ip = await amnezia_app._fetch_public_ip_async()
+    assert ip == "198.51.100.42"
+    assert amnezia_app._cached_public_ip == "198.51.100.42"
+    assert mock_exec.call_count == 1
+
+    # Immediate second call within 300s returns cached IP without subprocess
+    ip2 = await amnezia_app._fetch_public_ip_async()
+    assert ip2 == "198.51.100.42"
+    assert mock_exec.call_count == 1
+
+    # 2. Failure case: all network providers and hostname fail
+    monkeypatch.setattr(amnezia_app, "_cached_public_ip", None)
+    monkeypatch.setattr(amnezia_app, "_cached_public_ip_time", 0.0)
+    mock_exec.side_effect = RuntimeError("Network unreachable")
+
+    fallback_ip = await amnezia_app._fetch_public_ip_async()
+    assert fallback_ip == "127.0.0.1"
+    assert amnezia_app._cached_public_ip == "127.0.0.1"
+
+    # Immediate second call within 30s returns 127.0.0.1 via negative cache
+    call_count_before = mock_exec.call_count
+    fallback_ip2 = await amnezia_app._fetch_public_ip_async()
+    assert fallback_ip2 == "127.0.0.1"
+    assert mock_exec.call_count == call_count_before
+
+    # After 31 seconds (exceeding _NEGATIVE_IP_CACHE_TTL_SEC = 30s), it retries
+    monkeypatch.setattr(amnezia_app, "_cached_public_ip_time", time.monotonic() - 31.0)
+    mock_proc_ok = AsyncMock()
+    mock_proc_ok.communicate.return_value = (b"203.0.113.88\n", b"")
+    mock_exec_ok = AsyncMock(return_value=mock_proc_ok)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_exec_ok)
+
+    recovered_ip = await amnezia_app._fetch_public_ip_async()
+    assert recovered_ip == "203.0.113.88"
+    assert amnezia_app._cached_public_ip == "203.0.113.88"
+
+
+
 
 
 

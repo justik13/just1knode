@@ -4044,30 +4044,73 @@ with open(path, 'w', encoding='utf-8') as f:
             ]
         }
 
-        # 1. Flow normalization in elif relay_ib:
-        relay_ib = next((ib for ib in cfg["inbounds"] if ib.get("tag") == "inbound-tls"), None)
-        self.assertIsNotNone(relay_ib)
-        clients = relay_ib.setdefault("settings", {}).setdefault("clients", [])
-        for c in clients:
-            if isinstance(c, dict):
-                c["flow"] = "xtls-rprx-vision"
+        # Functional validation: extract and execute the actual Python snippet from relay.sh
+        py_start = relay_sh.find('python3 -c "\nimport json, os, sys, tempfile')
+        self.assertGreater(py_start, 0)
+        code_start = py_start + len('python3 -c "\n')
+        code_end = relay_sh.find('\n" "$XRAY_CONFIG"', code_start)
+        self.assertGreater(code_end, code_start)
+        embedded_py = relay_sh[code_start:code_end]
 
-        for c in relay_ib["settings"]["clients"]:
-            self.assertEqual(c["flow"], "xtls-rprx-vision")
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            cfg_file = td_path / "config.json"
+            cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
 
-        # 2. Sniffing removal on internal API inbounds
-        for ib in cfg.get("inbounds", []):
-            tag = str(ib.get("tag", "")).strip().lower()
-            if tag in ("api-in", "just1k-wl-api-grpc"):
-                ib.pop("sniffing", None)
-                continue
-            sniff = ib.setdefault("sniffing", {})
-            sniff["enabled"] = True
+            # Create dummy cert directory and files
+            tls_dir = td_path / "tls"
+            tls_dir.mkdir()
+            (tls_dir / "fullchain.pem").write_text("cert", encoding="utf-8")
+            (tls_dir / "privkey.pem").write_text("key", encoding="utf-8")
 
-        grpc_ib = next(ib for ib in cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
-        api_ib = next(ib for ib in cfg["inbounds"] if ib.get("tag") == "api-in")
-        self.assertNotIn("sniffing", grpc_ib)
-        self.assertNotIn("sniffing", api_ib)
+            env = os.environ.copy()
+            env["XRAY_TLS_DIR"] = str(tls_dir)
+            env["PYTHONIOENCODING"] = "utf-8"
+
+            res = subprocess.run(
+                [sys.executable, "-c", embedded_py, str(cfg_file), "tls", "0", "1", "10443", "test-tunnel-uuid"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(res.returncode, 0, f"Python snippet failed: {res.stderr}")
+
+            updated_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            relay_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
+            for c in relay_ib["settings"]["clients"]:
+                self.assertEqual(c["flow"], "xtls-rprx-vision")
+
+            grpc_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
+            api_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "api-in")
+            self.assertNotIn("sniffing", grpc_ib)
+            self.assertNotIn("sniffing", api_ib)
+
+            # Test branch: empty clients with tunnel_uuid populated
+            cfg_empty = {
+                "inbounds": [
+                    {
+                        "tag": "inbound-tls",
+                        "port": 10443,
+                        "protocol": "vless",
+                        "settings": {"clients": []},
+                    }
+                ]
+            }
+            cfg_file.write_text(json.dumps(cfg_empty), encoding="utf-8")
+            res2 = subprocess.run(
+                [sys.executable, "-c", embedded_py, str(cfg_file), "tls", "0", "1", "10443", "uuid-empty-branch"],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(res2.returncode, 0, f"Empty clients branch failed: {res2.stderr}")
+            updated_empty_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+            relay_ib2 = next(ib for ib in updated_empty_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
+            self.assertEqual(len(relay_ib2["settings"]["clients"]), 1)
+            self.assertEqual(relay_ib2["settings"]["clients"][0]["id"], "uuid-empty-branch")
+            self.assertEqual(relay_ib2["settings"]["clients"][0]["flow"], "xtls-rprx-vision")
 
 
 if __name__ == "__main__":

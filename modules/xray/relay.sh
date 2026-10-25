@@ -1719,6 +1719,9 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
     elif relay_ib:
         relay_ib['tag'] = 'inbound-tls'
         clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])
+        if not isinstance(clients, list):
+            clients = []
+            relay_ib['settings']['clients'] = clients
         if not clients and tunnel_uuid:
             clients.append({'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'})
         else:
@@ -1901,7 +1904,7 @@ try:
 except Exception:
     pass
 
-print('[+] Xray Relay config успешно оптимизирован (UseIPv4 + Независимый DNS + VLESS TLS)')
+print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS + VLESS TLS)')
 " "$XRAY_CONFIG" "$current_sec" "$cur_has_vless" "$cur_has_relay" "$cur_relay_port" "$cur_tunnel_uuid"; then
         manifest_rollback
         error "Ошибка выполнения Python-скрипта реконсиляции Relay."

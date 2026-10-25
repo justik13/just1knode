@@ -482,6 +482,8 @@ os.makedirs(d, exist_ok=True)
 t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
+    f.flush()
+    os.fsync(f.fileno())
 try:
     import shutil
     shutil.chown(t_path, user='root', group='xrayapi')
@@ -733,6 +735,8 @@ os.makedirs(d, exist_ok=True)
 t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
+    f.flush()
+    os.fsync(f.fileno())
 try:
     import shutil
     shutil.chown(t_path, user='root', group='xrayapi')
