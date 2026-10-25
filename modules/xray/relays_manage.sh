@@ -482,6 +482,12 @@ os.makedirs(d, exist_ok=True)
 t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
+try:
+    import shutil
+    shutil.chown(t_path, user='root', group='xrayapi')
+    os.chmod(t_path, 0o640)
+except Exception:
+    pass
 os.replace(t_path, cfg_file)
 try:
     import shutil
@@ -727,6 +733,12 @@ os.makedirs(d, exist_ok=True)
 t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
 with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
+try:
+    import shutil
+    shutil.chown(t_path, user='root', group='xrayapi')
+    os.chmod(t_path, 0o640)
+except Exception:
+    pass
 os.replace(t_path, cfg_file)
 " "$XRAY_CONFIG" "$code" "$in_tag" "$out_tag" "$RELAYS_FILE"
     ensure_xray_config_permissions "$XRAY_CONFIG"

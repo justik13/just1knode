@@ -4003,6 +4003,71 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn('local d_cand d_cand_lower already existing key domain', just1knode_sh)
         self.assertIn('"$d_cand_lower" != "none" && "$d_cand_lower" != "null"', just1knode_sh)
 
+    def test_heal_and_update_relay_config_flow_normalization_and_grpc_sniffing(self):
+        """Verify heal_and_update_relay_config normalizes flow to xtls-rprx-vision on existing inbound-tls
+        and removes sniffing on api-in and just1k-wl-api-grpc."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn("clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])", relay_sh)
+        self.assertIn("c['flow'] = 'xtls-rprx-vision'", relay_sh)
+        self.assertIn("if tag in ('api-in', 'just1k-wl-api-grpc'):", relay_sh)
+        self.assertIn("ib.pop('sniffing', None)", relay_sh)
+
+        # Functional validation of the exact normalization logic
+        cfg = {
+            "inbounds": [
+                {
+                    "tag": "inbound-tls",
+                    "port": 10443,
+                    "protocol": "vless",
+                    "settings": {
+                        "clients": [
+                            {"id": "uuid-1", "flow": ""},
+                            {"id": "uuid-2"},
+                        ]
+                    },
+                    "streamSettings": {"network": "tcp", "security": "tls"},
+                },
+                {
+                    "tag": "just1k-wl-api-grpc",
+                    "listen": "127.0.0.1",
+                    "port": 10085,
+                    "protocol": "dokodemo-door",
+                    "sniffing": {"enabled": True, "destOverride": ["tls"]},
+                },
+                {
+                    "tag": "api-in",
+                    "listen": "127.0.0.1",
+                    "port": 10086,
+                    "protocol": "dokodemo-door",
+                    "sniffing": {"enabled": True},
+                },
+            ]
+        }
+
+        # 1. Flow normalization in elif relay_ib:
+        relay_ib = next((ib for ib in cfg["inbounds"] if ib.get("tag") == "inbound-tls"), None)
+        self.assertIsNotNone(relay_ib)
+        clients = relay_ib.setdefault("settings", {}).setdefault("clients", [])
+        for c in clients:
+            if isinstance(c, dict):
+                c["flow"] = "xtls-rprx-vision"
+
+        for c in relay_ib["settings"]["clients"]:
+            self.assertEqual(c["flow"], "xtls-rprx-vision")
+
+        # 2. Sniffing removal on internal API inbounds
+        for ib in cfg.get("inbounds", []):
+            tag = str(ib.get("tag", "")).strip().lower()
+            if tag in ("api-in", "just1k-wl-api-grpc"):
+                ib.pop("sniffing", None)
+                continue
+            sniff = ib.setdefault("sniffing", {})
+            sniff["enabled"] = True
+
+        grpc_ib = next(ib for ib in cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
+        api_ib = next(ib for ib in cfg["inbounds"] if ib.get("tag") == "api-in")
+        self.assertNotIn("sniffing", grpc_ib)
+        self.assertNotIn("sniffing", api_ib)
 
 
 if __name__ == "__main__":

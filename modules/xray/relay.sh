@@ -1718,6 +1718,13 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
         inbounds.insert(0, relay_ib)
     elif relay_ib:
         relay_ib['tag'] = 'inbound-tls'
+        clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])
+        if not clients and tunnel_uuid:
+            clients.append({'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'})
+        else:
+            for c in clients:
+                if isinstance(c, dict):
+                    c['flow'] = 'xtls-rprx-vision'
         st = relay_ib.setdefault('streamSettings', {})
         st['network'] = 'tcp'
         st['security'] = 'tls'
@@ -1870,6 +1877,7 @@ if not has_smtp_port:
 for ib in cfg.get('inbounds', []):
     tag = str(ib.get('tag', '')).strip().lower()
     if tag in ('api-in', 'just1k-wl-api-grpc'):
+        ib.pop('sniffing', None)
         continue
     sniff = ib.setdefault('sniffing', {})
     sniff['enabled'] = True
