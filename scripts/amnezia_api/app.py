@@ -916,6 +916,7 @@ async def syncconf_container(container: str, conf_path: str) -> bool:
 _cached_public_ip: str | None = None
 _cached_public_ip_time: float = 0.0
 _PUBLIC_IP_CACHE_TTL_SEC: float = 300.0
+_NEGATIVE_IP_CACHE_TTL_SEC: float = 30.0
 
 
 def _is_valid_public_ipv4(ip_str: str) -> bool:
@@ -929,7 +930,8 @@ def _is_valid_public_ipv4(ip_str: str) -> bool:
 async def _fetch_public_ip_async() -> str:
     global _cached_public_ip, _cached_public_ip_time
     now = time.monotonic()
-    if _cached_public_ip and (now - _cached_public_ip_time < _PUBLIC_IP_CACHE_TTL_SEC):
+    ttl = _NEGATIVE_IP_CACHE_TTL_SEC if _cached_public_ip == "127.0.0.1" else _PUBLIC_IP_CACHE_TTL_SEC
+    if _cached_public_ip and (now - _cached_public_ip_time < ttl):
         return _cached_public_ip
 
     for url in ("https://ifconfig.me", "https://icanhazip.com", "https://api.ipify.org"):
@@ -965,6 +967,8 @@ async def _fetch_public_ip_async() -> str:
     except Exception:
         pass
 
+    _cached_public_ip = "127.0.0.1"
+    _cached_public_ip_time = now
     return "127.0.0.1"
 
 
@@ -1959,7 +1963,9 @@ async def get_client_by_id(client_id: str):
 
     # Only generate configs if client private key is present (desktop app clients don't have it on server)
     if target.get("clientPrivKey"):
-        host = SERVER_HOST_NAME or "127.0.0.1"
+        host = SERVER_HOST_NAME
+        if not host:
+            host = await _fetch_public_ip_async()
         raw_conf, vpn_uri = build_client_configs(
             target,
             iface,

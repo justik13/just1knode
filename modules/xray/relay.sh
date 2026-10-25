@@ -318,7 +318,6 @@ except Exception:
         return 1
     fi
 
-    local target_prefix="${2:-}"
     if [[ -n "$target_prefix" ]]; then
         install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
         install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem"
@@ -1704,7 +1703,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
             'port': relay_port,
             'protocol': 'vless',
             'settings': {
-                'clients': [{'id': tunnel_uuid, 'flow': ''}],
+                'clients': [{'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'}],
                 'decryption': 'none'
             },
             'streamSettings': {
@@ -1719,6 +1718,16 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
         inbounds.insert(0, relay_ib)
     elif relay_ib:
         relay_ib['tag'] = 'inbound-tls'
+        clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])
+        if not isinstance(clients, list):
+            clients = []
+            relay_ib['settings']['clients'] = clients
+        if not clients and tunnel_uuid:
+            clients.append({'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'})
+        else:
+            for c in clients:
+                if isinstance(c, dict):
+                    c['flow'] = 'xtls-rprx-vision'
         st = relay_ib.setdefault('streamSettings', {})
         st['network'] = 'tcp'
         st['security'] = 'tls'
@@ -1869,6 +1878,10 @@ if not has_smtp_port:
     })
 
 for ib in cfg.get('inbounds', []):
+    tag = str(ib.get('tag', '')).strip().lower()
+    if tag in ('api-in', 'just1k-wl-api-grpc'):
+        ib.pop('sniffing', None)
+        continue
     sniff = ib.setdefault('sniffing', {})
     sniff['enabled'] = True
     sniff.setdefault('destOverride', ['tls', 'http', 'quic'])
@@ -1891,7 +1904,7 @@ try:
 except Exception:
     pass
 
-print('[+] Xray Relay config успешно оптимизирован (UseIPv4 + Независимый DNS + VLESS TLS)')
+print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS + VLESS TLS)')
 " "$XRAY_CONFIG" "$current_sec" "$cur_has_vless" "$cur_has_relay" "$cur_relay_port" "$cur_tunnel_uuid"; then
         manifest_rollback
         error "Ошибка выполнения Python-скрипта реконсиляции Relay."
