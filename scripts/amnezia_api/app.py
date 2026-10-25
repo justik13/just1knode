@@ -1959,7 +1959,9 @@ async def get_client_by_id(client_id: str):
 
     # Only generate configs if client private key is present (desktop app clients don't have it on server)
     if target.get("clientPrivKey"):
-        host = SERVER_HOST_NAME or "127.0.0.1"
+        host = SERVER_HOST_NAME
+        if not host:
+            host = await _fetch_public_ip_async()
         raw_conf, vpn_uri = build_client_configs(
             target,
             iface,

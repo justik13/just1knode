@@ -318,7 +318,6 @@ except Exception:
         return 1
     fi
 
-    local target_prefix="${2:-}"
     if [[ -n "$target_prefix" ]]; then
         install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
         install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem"
@@ -1704,7 +1703,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
             'port': relay_port,
             'protocol': 'vless',
             'settings': {
-                'clients': [{'id': tunnel_uuid, 'flow': ''}],
+                'clients': [{'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'}],
                 'decryption': 'none'
             },
             'streamSettings': {
@@ -1869,6 +1868,9 @@ if not has_smtp_port:
     })
 
 for ib in cfg.get('inbounds', []):
+    tag = str(ib.get('tag', '')).strip().lower()
+    if tag in ('api-in', 'just1k-wl-api-grpc'):
+        continue
     sniff = ib.setdefault('sniffing', {})
     sniff['enabled'] = True
     sniff.setdefault('destOverride', ['tls', 'http', 'quic'])

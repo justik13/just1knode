@@ -288,7 +288,7 @@ print(p)
 
     log "Обновление конфигурации Xray для моста '${name}' (Порт ${next_port}, путь: ${relay_inbound_path})..."
     if ! python3 -c "
-import sys, json
+import sys, json, os, tempfile
 
 cfg_file = sys.argv[1]
 code = sys.argv[2]
@@ -477,8 +477,12 @@ dns_conf['servers'] = [
 dns_conf['queryStrategy'] = 'UseIPv4'
 cfg['dns'] = dns_conf
 
-with open(cfg_file, 'w', encoding='utf-8') as f:
+d = os.path.dirname(os.path.abspath(cfg_file))
+os.makedirs(d, exist_ok=True)
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
+os.replace(t_path, cfg_file)
 try:
     import shutil
     shutil.chown(cfg_file, user='root', group='xrayapi')
@@ -522,6 +526,7 @@ out_tag = sys.argv[9]
 sec = sys.argv[10]
 sni = sys.argv[11]
 badge = safe_arg(sys.argv[12]).strip() if len(sys.argv) > 12 else ''
+r_uuid = sys.argv[13].strip() if len(sys.argv) > 13 else ''
 
 relays = []
 if os.path.exists(rf):
@@ -539,6 +544,7 @@ new_entry = {
     'code': code,
     'ip': ip,
     'port': port,
+    'uuid': r_uuid,
     'inbound_port': in_port,
     'path': in_path,
     'inbound_tag': in_tag,
@@ -565,7 +571,7 @@ try:
     os.chmod(rf, 0o660)
 except Exception:
     pass
-" "$RELAYS_FILE" "$code" "$name" "$ip" "$port" "$next_port" "$relay_inbound_path" "$relay_inbound_tag" "$relay_outbound_tag" "$security_type" "$sni" "$badge"
+" "$RELAYS_FILE" "$code" "$name" "$ip" "$port" "$next_port" "$relay_inbound_path" "$relay_inbound_tag" "$relay_outbound_tag" "$security_type" "$sni" "$badge" "$uuid"
 
     # Синхронизация пулов Nginx upstreams (теперь relays.json содержит новый релей)
     if ! sync_xhttp_upstreams_conf; then
@@ -649,9 +655,9 @@ remove_relay_node() {
     init_state_dir
     local code
     code=$(python3 -c "
-import json, os
-rf = '$RELAYS_FILE'
-target = '$target'.lower()
+import json, os, sys
+rf = sys.argv[1]
+target = sys.argv[2].lower()
 code = ''
 if os.path.exists(rf):
     try:
@@ -663,7 +669,7 @@ if os.path.exists(rf):
     except Exception:
         pass
 print(code)
-")
+" "$RELAYS_FILE" "$target")
 
     if [[ -z "$code" ]]; then
         warn "Relay '${target}' не найден в активном реестре."
@@ -678,12 +684,12 @@ print(code)
     local out_tag="just1k-wl-outbound-${code}"
 
     python3 -c "
-import json, os
-cfg_file = '$XRAY_CONFIG'
-code = '$code'
-in_tag = '$in_tag'
-out_tag = '$out_tag'
-rf = '$RELAYS_FILE'
+import json, os, sys, tempfile
+cfg_file = sys.argv[1]
+code = sys.argv[2]
+in_tag = sys.argv[3]
+out_tag = sys.argv[4]
+rf = sys.argv[5]
 
 with open(cfg_file) as f: cfg = json.load(f)
 target_tags = {in_tag.lower(), f'just1k-wl-{code}'.lower(), f'inbound-{code}'.lower()}
@@ -716,9 +722,13 @@ if not default_rule_found:
         'outboundTag': 'just1k-wl-direct'
     })
 
-with open(cfg_file, 'w', encoding='utf-8') as f:
+d = os.path.dirname(os.path.abspath(cfg_file))
+os.makedirs(d, exist_ok=True)
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp.json')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(cfg, f, indent=2)
-"
+os.replace(t_path, cfg_file)
+" "$XRAY_CONFIG" "$code" "$in_tag" "$out_tag" "$RELAYS_FILE"
     ensure_xray_config_permissions "$XRAY_CONFIG"
 
     # Удаление Nginx конфига (с поддержкой любого регистра: de.conf, DE.conf)
