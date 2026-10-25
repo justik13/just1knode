@@ -27,7 +27,7 @@ send_traffic_telegram_alert() {
             return 1
         fi
     fi
-    return 1
+    return 0
 }
 
 mark_traffic_alert_flag() {
@@ -320,14 +320,12 @@ disable_traffic_limit() {
         if [[ -f "$xray_cfg" && -x "$xray_bin" ]]; then
             if "$xray_bin" run -test -config "$xray_cfg" >/dev/null 2>&1; then
                 systemctl start xray 2>/dev/null || true
-                ensure_xray_api_healthy || true
                 log "Служба Xray автоматически запущена после снятия лимита."
             else
                 warn "Конфигурация Xray некорректна при проверке run -test, автоматический запуск отменен."
             fi
         else
             systemctl start xray 2>/dev/null || true
-            ensure_xray_api_healthy || true
             log "Служба Xray автоматически запущена после снятия лимита."
         fi
     fi

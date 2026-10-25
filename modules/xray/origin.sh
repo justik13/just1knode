@@ -769,21 +769,17 @@ set_origin_bot_ip() {
     has_a="$(get_state_val "has_awg" "0")"
     has_v="$(get_state_val "has_vless" "0")"
 
-    local target_ports=()
     if [[ "$role" == "origin" ]]; then
-        target_ports+=("8444")
+        target_port="8444"
         role_descr="Origin API (порт 8444)"
     elif [[ "$role" == "awg" || "$role" == "node" || "$has_a" == "1" || "$has_v" == "1" || "$role" == "vless" ]]; then
         if [[ "$has_a" == "1" || "$role" == "awg" ]]; then
-            target_ports+=("$(get_state_val "awg_port" "8443")")
+            target_port="$(get_state_val "awg_port" "8443")"
+            role_descr="AmneziaWG API (порт ${target_port})"
+        else
+            target_port="8444"
+            role_descr="Xray API (порт 8444)"
         fi
-        if [[ "$has_v" == "1" || "$role" == "vless" ]]; then
-            target_ports+=("8444")
-        fi
-        if [[ ${#target_ports[@]} -eq 0 ]]; then
-            target_ports+=("8444")
-        fi
-        role_descr="Management API (порты ${target_ports[*]})"
     else
         release_just1knode_lock
         error "Функция доступна только на настроенных узлах (Origin, AmneziaWG или VLESS)."
@@ -817,40 +813,47 @@ set_origin_bot_ip() {
     fi
     if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
         release_just1knode_lock
-        error "Фаервол UFW не активен (Status: inactive). Для безопасного обновления UFW должен быть включен."
+        error "Фаервол UFW не активен (Status: inactive). Для безопасного обновления порта ${target_port} UFW должен быть включен."
         return 1
     fi
 
     local old_bot_ip
     old_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
-    log "Применение новых правил фаервола UFW для ${role_descr} ($new_bot_ip)..."
-    # Шаг 1: Добавляем новые правила ПЕРВЫМИ (не ломая старый доступ)
-    for p in "${target_ports[@]}"; do
-        if ! ufw allow from "$new_bot_ip" to any port "$p" proto tcp comment "just1knode management api"; then
-            release_just1knode_lock
-            error "Сбой выполнения команды 'ufw allow' для IP $new_bot_ip на порт $p. Предыдущие правила сохранены."
-            return 1
+    # Проверка no-op (если IP совпадает и правило уже активно)
+    if [[ "$new_bot_ip" == "$old_bot_ip" ]] && ufw status 2>/dev/null | grep -F "$new_bot_ip" | grep -q "$target_port"; then
+        if ! is_ssh_port "${target_port}"; then
+            ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+            ufw delete allow "${target_port}" >/dev/null 2>&1 || true
         fi
-    done
+        if [[ "$role" == "origin" ]] && ! is_ssh_port "8443"; then
+            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8443 >/dev/null 2>&1 || true
+        fi
+        log "BOT_IP ($new_bot_ip) уже установлен и подтвержден в UFW. Изменений не требуется."
+        release_just1knode_lock
+        return 0
+    fi
 
-    # Шаг 2: Верифицируем, что правила реально появились в UFW
-    for p in "${target_ports[@]}"; do
-        if ! ufw status 2>/dev/null | grep -F "$new_bot_ip" | grep -q "$p"; then
-            for rollback_p in "${target_ports[@]}"; do
-                ufw delete allow from "$new_bot_ip" to any port "$rollback_p" proto tcp >/dev/null 2>&1 || true
-            done
-            release_just1knode_lock
-            error "Верификация не пройдена: правило для $new_bot_ip на порт $p отсутствует в UFW. Изменение откатано."
-            return 1
-        fi
-    done
+    log "Применение нового правила фаервола UFW для ${role_descr} ($new_bot_ip)..."
+    # Шаг 1: Добавляем новое правило ПЕРВЫМ (не ломая старый доступ)
+    if ! ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp comment "just1knode origin api"; then
+        release_just1knode_lock
+        error "Сбой выполнения команды 'ufw allow' для IP $new_bot_ip. Предыдущие правила сохранены."
+        return 1
+    fi
+
+    # Шаг 2: Верифицируем, что правило реально появилось в UFW
+    if ! ufw status 2>/dev/null | grep -F "$new_bot_ip" | grep -q "$target_port"; then
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        release_just1knode_lock
+        error "Верификация не пройдена: правило для $new_bot_ip на порт $target_port отсутствует в UFW. Изменение откатано."
+        return 1
+    fi
 
     # Шаг 3: Атомарно фиксируем новый IP в state.json перед удалением старых правил
     if ! set_state_val "bot_ip" "$new_bot_ip"; then
-        for rollback_p in "${target_ports[@]}"; do
-            ufw delete allow from "$new_bot_ip" to any port "$rollback_p" proto tcp >/dev/null 2>&1 || true
-        done
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
         release_just1knode_lock
         error "Сбой сохранения bot_ip в state.json. Новое правило для $new_bot_ip откатано, старый доступ сохранен."
         return 1
@@ -858,15 +861,13 @@ set_origin_bot_ip() {
 
     # Шаг 4: Только после успешной фиксации состояния удаляем старое и широкие правила
     # Zero-Lockout: не удаляем старое правило, если целевой порт является портом SSH
-    for p in "${target_ports[@]}"; do
-        if ! is_ssh_port "$p"; then
-            if [[ -n "$old_bot_ip" && "$old_bot_ip" != "$new_bot_ip" && "$old_bot_ip" != "any" && "$old_bot_ip" != "-" ]]; then
-                ufw delete allow from "$old_bot_ip" to any port "$p" proto tcp >/dev/null 2>&1 || true
-            fi
-            ufw delete allow "${p}/tcp" >/dev/null 2>&1 || true
-            ufw delete allow "${p}" >/dev/null 2>&1 || true
+    if ! is_ssh_port "${target_port}"; then
+        if [[ -n "$old_bot_ip" && "$old_bot_ip" != "$new_bot_ip" && "$old_bot_ip" != "any" && "$old_bot_ip" != "-" ]]; then
+            ufw delete allow from "$old_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
         fi
-    done
+        ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+        ufw delete allow "${target_port}" >/dev/null 2>&1 || true
+    fi
     if [[ "$role" == "origin" ]] && ! is_ssh_port "8443"; then
         ufw delete allow 8443/tcp >/dev/null 2>&1 || true
         ufw delete allow 8443 >/dev/null 2>&1 || true
