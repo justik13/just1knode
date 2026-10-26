@@ -6,8 +6,8 @@
 
 ## 📑 Каталог документов
 
-### 1. [White Internet («Белый Интернет») Master Guide](WL/WHITELIST_MASTER_GUIDE.md)
-* **Назначение:** Инженерно-технический справочник по работе в условиях жестких белых списков (Default-Drop). Архитектура VLESS XHTTP over Yandex Cloud CDN, Bodiless GET Uplink (защита от 413 ошибок на CDN), Nginx Zero Buffering, VLESS-Vision туннелирование Origin ➔ Exit, протокол INCY, а также детальный аудит транспорта XDRIVE (`network: "xdrive"` из Xray-core v26.9.30).
+### 1. [Белые списки в РФ (Whitelist) Master Guide](WL/WHITELIST_MASTER_GUIDE.md)
+* **Назначение:** Полный независимый исследовательский справочник и база знаний по цензурной инфраструктуре ТСПУ/РКН и методам работы в условиях жестких белых списков (Default-Drop). Архитектура VLESS XHTTP over Yandex Cloud CDN, Bodiless GET Uplink (защита от 413 ошибок на CDN), Nginx Zero Buffering, VLESS-Vision туннелирование Origin ➔ Exit, а также детальный аудит транспорта XDRIVE (`network: "xdrive"` из Xray-core v26.10.x).
 
 ### 2. [AmneziaWG 2.0 Technical Reference](amnezia_docs.md)
 * **Назначение:** Спецификация используемого протокола AmneziaWG 2.0 (`amneziawg2`), форматы файлов `.conf` и `.vpn`, схема URI `vpn://...`, обфускационные параметры (`Jc`, `Jmin`, `Jmax`, `S1-S4`, `H1-H4`, `I1-I5`), особенности интеграции с нативным микросервисом `amnezia-api` и чеклист валидации.
