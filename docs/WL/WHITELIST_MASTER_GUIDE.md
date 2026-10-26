@@ -8,7 +8,7 @@
 > ⚠️ **ВАЖНЫЙ ДИСКЛЕЙМЕР ПОЗИЦИОНИРОВАНИЯ (REFERENCE ONLY):**  
 > Настоящий документ служит **исключительно независимой исследовательской базой знаний и инженерным контекстом** по механизмам цензуры в РФ и протокольным решениям. Документ **НЕ является** руководством по реализации конкретного сервиса, **НЕ описывает** внутреннее устройство кодовой базы `Just1kbot`, **НЕ содержит** обязательных директив для разработчиков и **НЕ является** призывом к действию.
 >
-> *Актуальность: 30 сентября 2026 года. Официальный baseline: Xray-core v26.9.30 (30.09.2026) с поддержкой XDRIVE (network: "xdrive", PR #5645, PR #6748, PR #6754), каноническим профилем Bodiless GET Uplink (uplinkDataPlacement: "header") для парирования инцидента 413 Yandex Cloud CDN от 28–29.09.2026, PR #6632 (Request.GetBody() retry при HTTP/2 GOAWAY), PR #6307 (чистые пути без трейлинг-слэшей), PR #5414 (кастомные uplinkHTTPMethod).*
+> *Актуальность: 26 октября 2026 года. Официальный baseline апстрима: Xray-core v26.10.21 (21.10.2026, релиз безопасности с очисткой RootCA на Go 1.27.3; версии 26.10.10 и 26.10.17 отозваны разработчиками XTLS) с поддержкой XDRIVE (network: "xdrive", PR #5645, PR #6748, PR #6754, PR #7231 S3, PR #7187 HTTP/3), XHTTP с downlinkGzipMs (PR #7211), каноническим профилем Bodiless GET Uplink (uplinkDataPlacement: "header") для парирования инцидента 413 Yandex Cloud CDN от 28–29.09.2026, PR #6632 (Request.GetBody() retry при HTTP/2 GOAWAY), PR #6307 (чистые пути без трейлинг-слэшей), PR #5414 (кастомные uplinkHTTPMethod).*
 >
 > ℹ️ **ПРИМЕЧАНИЕ О ВЕРСИИ В ПРОДАКШЕНЕ:** Боевые узлы проекта `just1knode` строго зафиксированы на проверенной версии `XRAY_VERSION="26.7.28"` (`modules/xray/core.sh:6`) для гарантированной стабильности и совместимости с клиентами INCY.
 
@@ -2219,23 +2219,23 @@ HTTP/1.1 200 OK
 Content-Type: text/plain; charset=utf-8
 Cache-Control: no-store, private, no-cache, must-revalidate
 CDN-Cache-Control: no-store
-Profile-Title: base64:0JHQtdC70YvQtSBT0L/QuNGB0LrQuCDQoNCk
-Profile-Description: base64:VkxFU1MgWEhUVFAgWcOhbmRleCBDRE4=
+Profile-Title: base64:0JHQtdC70YvQtSDRgdC/0LjRgdC60Lgg0KDQpA==
 Subscription-Userinfo: upload=0; download=1073741824; total=107374182400; expire=1788000000
 Profile-Update-Interval: 6
 Support-URL: https://t.me/your_support_bot
+Announce-URL: https://t.me/your_channel_or_bot
 Announce: base64:0KDQtdC20LjQvCDQsdC10LvRi9GFINGB0L/QuNGB0LrQvtCyINCw0LrRgtC40LLQtdC9LiDQmNGB0L/QvtC70YzQt9GD0LnRgtC1IFhSQUku
 Hide-URL: 1
 
 <Base64-закодированное тело: либо Full JSON, либо vless:// URI>
 ```
 
-- **`Profile-Title`**: Название профиля в списке серверов INCY (поддерживает UTF-8 через `base64:`).
-- **`Profile-Description`**: Описание профиля / подзаголовок (поддерживается спецификацией в `base64:`, однако в проверенных мобильных версиях INCY в карточке подписки не отображается; для вывода текстовых оповещений пользователям в клиенте рекомендуется использовать `Announce`).
+- **`Profile-Title`**: Название профиля в списке серверов INCY (строго одна строка через `base64:`, до 25 символов). Перевод строки `\n` и заголовок `Profile-Description` клиентом INCY в интерфейсе не отображаются.
 - **`Subscription-Userinfo`**: Виджет трафика и срока действия подписки прямо на главном экране INCY (`upload`, `download`, `total`, `expire`).
 - **`Profile-Update-Interval`**: Интервал автообновления серверов в часах (например, каждые 6 или 12 часов).
-- **`Support-URL`**: Ссылка на бота поддержки или справочный контакт.
-- **`Announce`**: Сервисное уведомление при обновлении конфигурации клиентом.
+- **`Support-URL`**: Ссылка на бота поддержки или справочный контакт (отображается как кнопка «💬 Поддержка»).
+- **`Announce-URL`**: Ссылка объявления (генерирует кнопку «✈️ Канал / Бот» в карточке профиля).
+- **`Announce`**: Сервисное текстовое уведомление (баннер) при обновлении конфигурации клиентом.
 - **`Hide-URL: 1`**: Защищает URL подписки от случайного копирования и утечки пользователем.
 - **`Cache-Control` / `CDN-Cache-Control: no-store`**: Запрещают промежуточное кэширование персонализированной ленты на узлах CDN и в клиентских кэшах.
 
