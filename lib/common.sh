@@ -405,6 +405,11 @@ net.core.somaxconn = 65535
 net.ipv4.ip_local_port_range = 32768 65535
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 16384
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_udp_timeout = 30
+net.netfilter.nf_conntrack_udp_timeout_stream = 120
 EOF
     chmod 644 "$conf_path" 2>/dev/null || true
 
@@ -419,6 +424,11 @@ EOF
     if command -v sysctl >/dev/null 2>&1; then
         modprobe tcp_bbr 2>/dev/null || true
         modprobe sch_fq 2>/dev/null || true
+        modprobe nf_conntrack 2>/dev/null || true
+        mkdir -p /etc/modules-load.d 2>/dev/null || true
+        if [[ -d /etc/modules-load.d ]] && ! grep -q "^nf_conntrack" /etc/modules-load.d/just1knode.conf 2>/dev/null; then
+            echo "nf_conntrack" >> /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+        fi
         sysctl -p "$conf_path" >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
