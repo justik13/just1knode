@@ -1410,11 +1410,13 @@ import json, sys
 try:
     with open('$XRAY_CONFIG') as f:
         c = json.load(f)
+    relay_p = int('$relay_port') if '$relay_port'.isdigit() else 10443
     for ib in c.get('inbounds', []):
-        clients = ib.get('settings', {}).get('clients', [])
-        if clients and clients[0].get('id'):
-            print(clients[0]['id'])
-            sys.exit(0)
+        if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443, relay_p):
+            clients = ib.get('settings', {}).get('clients', [])
+            if clients and clients[0].get('id'):
+                print(clients[0]['id'])
+                sys.exit(0)
 except Exception: pass
 print('')
 " 2>/dev/null || true)

@@ -44,12 +44,20 @@ class DurableIdempotencyStore:
                     CREATE TABLE IF NOT EXISTS idempotent_ops (
                         idempotency_key TEXT PRIMARY KEY,
                         response_json TEXT NOT NULL,
-                        created_at REAL NOT NULL
+                        created_at REAL NOT NULL,
+                        client_id TEXT
                     )
                     """
                 )
+                try:
+                    conn.execute("ALTER TABLE idempotent_ops ADD COLUMN client_id TEXT")
+                except sqlite3.OperationalError:
+                    pass
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_idempotent_ops_created ON idempotent_ops(created_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_idempotent_ops_client_id ON idempotent_ops(client_id)"
                 )
             try:
                 self.db_path.chmod(0o660)
@@ -78,16 +86,26 @@ class DurableIdempotencyStore:
         try:
             now_ts = time.time()
             data_str = json.dumps(response)
+            client_id_val = None
+            if isinstance(response, dict):
+                raw_cid = response.get("client_id")
+                if raw_cid:
+                    try:
+                        client_id_val = str(uuid_lib.UUID(str(raw_cid).strip())).lower()
+                    except Exception:
+                        client_id_val = str(raw_cid).strip().lower()
+
             with self._get_conn() as conn:
                 conn.execute(
                     """
-                    INSERT INTO idempotent_ops (idempotency_key, response_json, created_at)
-                    VALUES (?, ?, ?)
+                    INSERT INTO idempotent_ops (idempotency_key, response_json, created_at, client_id)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(idempotency_key) DO UPDATE SET
                         response_json=excluded.response_json,
-                        created_at=excluded.created_at
+                        created_at=excluded.created_at,
+                        client_id=excluded.client_id
                     """,
-                    (key, data_str, now_ts),
+                    (key, data_str, now_ts, client_id_val),
                 )
                 cur = conn.execute("SELECT COUNT(*) FROM idempotent_ops")
                 count = cur.fetchone()[0]
@@ -153,9 +171,15 @@ class DurableIdempotencyStore:
 
         try:
             with self._get_conn() as conn:
-                cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
+                conn.execute(
+                    "DELETE FROM idempotent_ops WHERE client_id = ?",
+                    (norm_target,),
+                )
+                legacy_cur = conn.execute(
+                    "SELECT idempotency_key, response_json FROM idempotent_ops WHERE client_id IS NULL"
+                )
                 keys = []
-                for k, v_str in cur.fetchall():
+                for k, v_str in legacy_cur.fetchall():
                     try:
                         data = json.loads(v_str)
                         if isinstance(data, dict):
@@ -171,7 +195,6 @@ class DurableIdempotencyStore:
                         pass
                 if keys:
                     conn.executemany("DELETE FROM idempotent_ops WHERE idempotency_key = ?", [(k,) for k in keys])
-                    conn.commit()
         except Exception as e:
             logging.getLogger("xray_api").warning("Failed to evict idempotent ops for client %s: %s", client_id, e)
 
