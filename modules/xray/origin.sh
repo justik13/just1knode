@@ -664,6 +664,25 @@ server {
     server_name ${server_name_str};
     server_tokens off;
 
+    # Доверенный периметр CDN: заголовок X-Real-IP принимается только от проверенных адресов Yandex Cloud CDN
+    set_real_ip_from 213.180.193.0/24;
+    set_real_ip_from 213.180.204.0/24;
+    set_real_ip_from 87.250.250.0/24;
+    set_real_ip_from 87.250.251.0/24;
+    set_real_ip_from 77.88.44.0/24;
+    set_real_ip_from 77.88.55.0/24;
+    set_real_ip_from 93.158.134.0/24;
+    set_real_ip_from 178.154.200.0/24;
+    set_real_ip_from 178.154.205.0/24;
+    set_real_ip_from 84.201.128.0/18;
+    set_real_ip_from 178.154.224.0/20;
+    set_real_ip_from 130.193.32.0/19;
+    set_real_ip_from 51.250.0.0/16;
+    set_real_ip_from 158.160.0.0/16;
+    set_real_ip_from 127.0.0.1/32;
+    real_ip_header X-Real-IP;
+    real_ip_recursive on;
+
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
