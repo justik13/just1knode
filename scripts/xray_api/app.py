@@ -512,7 +512,8 @@ def get_active_relays() -> tuple[List[Dict[str, Any]], Optional[str]]:
             with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return data, None
+                    valid_relays = [r for r in data if isinstance(r, dict)]
+                    return valid_relays, None
                 return [], f"Expected list in {RELAYS_FILE_PATH}, got {type(data).__name__}"
         except Exception as e:
             logger.warning("Failed to load relays from %s: %s", RELAYS_FILE_PATH, e)
@@ -871,6 +872,16 @@ def list_relays(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
 
 
 async def _probe_single_relay(relay: Dict[str, Any], timeout: float = 2.5) -> Dict[str, Any]:
+    if not isinstance(relay, dict):
+        return {
+            "name": "",
+            "code": "",
+            "ip": "",
+            "port": 0,
+            "healthy": False,
+            "rtt_ms": None,
+            "error": "Invalid relay config entry (expected dict)",
+        }
     ip = relay.get("ip")
     port = relay.get("port")
     code = relay.get("code", "")
