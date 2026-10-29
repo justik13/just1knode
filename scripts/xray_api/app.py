@@ -512,9 +512,14 @@ def get_active_relays() -> tuple[List[Dict[str, Any]], Optional[str]]:
             with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    valid_relays = [r for r in data if isinstance(r, dict)]
-                    return valid_relays, None
-                return [], f"Expected list in {RELAYS_FILE_PATH}, got {type(data).__name__}"
+                    invalid_count = sum(1 for r in data if not isinstance(r, dict))
+                    if invalid_count > 0:
+                        return (
+                            [],
+                            f"Expected list of objects in {RELAYS_FILE_PATH.name}, found {invalid_count} invalid entries",
+                        )
+                    return data, None
+                return [], f"Expected list in {RELAYS_FILE_PATH.name}, got {type(data).__name__}"
         except Exception as e:
             logger.warning("Failed to load relays from %s: %s", RELAYS_FILE_PATH, e)
             return [], f"Corrupted {RELAYS_FILE_PATH.name}: {e}"
