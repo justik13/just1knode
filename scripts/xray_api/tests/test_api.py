@@ -1234,6 +1234,7 @@ def test_health_self_heals_clients_on_epoch_drift():
         mock_sync.assert_called_once_with("epoch_new_after_restart")
 
 
+
 def test_inbound_isolation_excludes_relay_tunnels():
     """Verify is_wl_inbound_tag and resolve_effective_service exclude inbound-tls/reality."""
     from app import is_wl_inbound_tag, resolve_effective_service, get_target_inbounds
@@ -1250,6 +1251,120 @@ def test_inbound_isolation_excludes_relay_tunnels():
         assert resolve_effective_service() == "vless"
         vless_inbounds = get_target_inbounds()
         assert vless_inbounds == ["just1k-vless-direct"]
+
+
+def test_get_active_relays_validation(tmp_path):
+    """Verify get_active_relays validates structure and reports invalid entries."""
+    from app import get_active_relays
+
+    relays_file = tmp_path / "relays.json"
+
+    # 1. Missing file -> empty list, no error
+    missing_file = tmp_path / "missing.json"
+    with patch("app.RELAYS_FILE_PATH", missing_file):
+        relays, err = get_active_relays()
+        assert relays == []
+        assert err is None
+
+    # 2. Valid list of objects
+    valid_data = [{"ip": "1.2.3.4", "port": 10443, "name": "Relay 1"}]
+    relays_file.write_text(json.dumps(valid_data), encoding="utf-8")
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        relays, err = get_active_relays()
+        assert relays == valid_data
+        assert err is None
+
+    # 3. List with null element
+    relays_file.write_text(json.dumps([None]), encoding="utf-8")
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        relays, err = get_active_relays()
+        assert relays == []
+        assert err == "Expected list of objects in relays.json, found 1 invalid entries"
+
+    # 4. Mixed list: valid entry + null + int
+    relays_file.write_text(json.dumps([{"ip": "1.2.3.4", "port": 10443}, None, 42]), encoding="utf-8")
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        relays, err = get_active_relays()
+        assert relays == []
+        assert err == "Expected list of objects in relays.json, found 2 invalid entries"
+
+    # 5. Not a list (dict)
+    relays_file.write_text(json.dumps({"not": "a list"}), encoding="utf-8")
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        relays, err = get_active_relays()
+        assert relays == []
+        assert err == "Expected list in relays.json, got dict"
+
+
+def test_relays_health_endpoint_matrix(tmp_path):
+    """Verify /v1/relays/health and /v1/health handle missing, corrupt, and valid relays config."""
+    relays_file = tmp_path / "relays.json"
+
+    # 1. Missing relays file -> 200 with status="empty"
+    missing_file = tmp_path / "nonexistent.json"
+    with patch("app.RELAYS_FILE_PATH", missing_file):
+        res = client.get("/v1/relays/health", headers=VALID_HEADERS)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "empty"
+        assert data["count"] == 0
+        assert data["all_healthy"] is True
+
+    # 2. Corrupt config ([null]) -> /v1/relays/health returns 500 error
+    relays_file.write_text(json.dumps([None]), encoding="utf-8")
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        res = client.get("/v1/relays/health", headers=VALID_HEADERS)
+        assert res.status_code == 500
+        assert "Failed to load relays config" in res.json()["detail"]
+
+        # GET /v1/health includes relays_error diagnostically
+        with (
+            patch.object(grpc_client, "is_healthy", return_value=True),
+            patch.object(
+                epoch_manager,
+                "get_process_and_epoch",
+                return_value=(100, 1000, "boot-1", "epoch_1"),
+            ),
+        ):
+            h_res = client.get("/v1/health", headers=VALID_HEADERS)
+            assert h_res.status_code == 200
+            h_data = h_res.json()
+            assert h_data["relays"] == []
+            assert "Expected list of objects in relays.json" in h_data["relays_error"]
+
+    # 3. Valid relays config -> /v1/relays/health returns probed statuses
+    valid_data = [{"ip": "1.2.3.4", "port": 10443, "name": "Relay DE", "code": "de"}]
+    relays_file.write_text(json.dumps(valid_data), encoding="utf-8")
+    mock_probe = {
+        "name": "Relay DE",
+        "code": "de",
+        "ip": "1.2.3.4",
+        "port": 10443,
+        "healthy": True,
+        "rtt_ms": 12.5,
+        "error": None,
+    }
+    with patch("app.RELAYS_FILE_PATH", relays_file):
+        with patch("app._probe_single_relay", return_value=mock_probe):
+            res = client.get("/v1/relays/health", headers=VALID_HEADERS)
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "ok"
+            assert data["count"] == 1
+            assert data["all_healthy"] is True
+            assert data["relays"][0]["ip"] == "1.2.3.4"
+
+
+def test_probe_single_relay_defensive_guard():
+    """Verify _probe_single_relay safely handles non-dict input without raising exceptions."""
+    import asyncio
+    from app import _probe_single_relay
+
+    result = asyncio.run(_probe_single_relay(None))  # type: ignore
+    assert result["healthy"] is False
+    assert result["error"] == "Invalid relay config entry (expected dict)"
+
+
 
 
 
