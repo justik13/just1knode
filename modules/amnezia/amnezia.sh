@@ -1320,6 +1320,15 @@ uninstall_amnezia_component() {
     check_root
     init_state_dir
 
+    local cur_has_v cur_has_r
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+
+    # Если на узле активен VLESS, гарантируем автономный VLESS API (8444) до удаления конфигов и сертификатов Amnezia
+    if [[ "$cur_has_v" == "1" ]]; then
+        setup_xray_api_proxy 2>/dev/null || true
+    fi
+
     systemctl stop amnezia-api 2>/dev/null || true
     systemctl disable amnezia-api 2>/dev/null || true
     rm -f /etc/systemd/system/amnezia-api.service 2>/dev/null || true
@@ -1332,7 +1341,7 @@ uninstall_amnezia_component() {
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/01-start-port80-docker.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/stop-port80-docker.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/start-port80-docker.sh" 2>/dev/null || true
-    if [[ ! -f /etc/nginx/sites-enabled/just1k-origin.conf && ! -e /etc/nginx/sites-enabled/default ]]; then
+    if [[ ! -f /etc/nginx/sites-enabled/just1k-origin.conf && ! -f /etc/nginx/sites-enabled/just1k-vless-api.conf && ! -e /etc/nginx/sites-enabled/default ]]; then
         if [[ -f /etc/nginx/sites-available/default.user.bak ]]; then
             cp -a /etc/nginx/sites-available/default.user.bak /etc/nginx/sites-available/default 2>/dev/null || true
             ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true

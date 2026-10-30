@@ -768,6 +768,36 @@ class InventoryRequest(BaseModel):
 
 
 # Endpoints
+@app.get("/healthz")
+@app.get("/health")
+def healthcheck(response: Response) -> Dict[str, Any]:
+    """
+    Lightweight liveness and readiness probe for external monitoring (e.g. Uptime Kuma, Prometheus, Consul).
+    Does not require an API key and does not expose confidential node metadata or client lists.
+    Fail-closed: returns HTTP 200 when Xray core is running and gRPC responds, or HTTP 503 otherwise.
+    """
+    grpc_ok = grpc_client.is_healthy()
+    pid, starttime, boot_id, running_epoch = (
+        epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
+    )
+    is_running = bool(
+        grpc_ok
+        and running_epoch is not None
+        and pid is not None
+        and starttime is not None
+        and boot_id is not None
+    )
+    if not is_running:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {
+        "ok": is_running,
+        "status": "ok" if is_running else "error",
+        "service": "xray-api",
+        "xray_running": is_running,
+        "grpc_ok": bool(grpc_ok),
+    }
+
+
 @app.get("/v1/health")
 def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """

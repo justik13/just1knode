@@ -323,8 +323,8 @@ show_status() {
             fi
             systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
             systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
-        elif [[ "$cur_has_v" == "1" || "$role" == "vless" ]] && systemctl is-active --quiet nginx 2>/dev/null; then
-            echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}"
+        elif [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+            systemctl is-active --quiet nginx && echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444):         ${RED}○ Не работает${NC}"
         fi
     fi
 
