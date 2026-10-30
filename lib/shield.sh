@@ -9,6 +9,7 @@ SHIELD_DIR="${STATE_DIR:-/etc/just1knode}/shield"
 SHIELD_RKN_CACHE="${SHIELD_DIR}/rkn.txt"
 SHIELD_VK_CACHE="${SHIELD_DIR}/vk.txt"
 SHIELD_SYSTEMD_SERVICE="/etc/systemd/system/just1knode-shield.service"
+SHIELD_SYSTEMD_UPDATE_SERVICE="/etc/systemd/system/just1knode-shield-update.service"
 SHIELD_SYSTEMD_TIMER="/etc/systemd/system/just1knode-shield.timer"
 SHIELD_UFW_AFTER_INIT="/etc/ufw/after.init"
 
@@ -125,6 +126,10 @@ shield_update() {
 
     log "Загрузка и обновление списков сетевой фильтрации Shield..."
     install_shield_deps
+    if ! command -v ipset >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1; then
+        error "Ошибка: ipset или iptables не установлены в системе."
+        return 1
+    fi
     mkdir -p "$SHIELD_DIR"
 
     local tmp_rkn_raw tmp_vk_raw tmp_rkn_clean tmp_vk_clean
@@ -189,6 +194,10 @@ shield_apply_ipsets_and_rules() {
     fi
 
     install_shield_deps
+    if ! command -v ipset >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1; then
+        error "Ошибка: ipset или iptables не установлены в системе."
+        return 1
+    fi
 
     if [[ ! -f "$SHIELD_RKN_CACHE" || ! -f "$SHIELD_VK_CACHE" ]]; then
         shield_update
@@ -283,26 +292,42 @@ deploy_shield_systemd_timer() {
         bin_path="/usr/local/bin/just1knode"
     fi
 
+    # 1. Служба восстановления правил из кэша при старте ОС
     cat << EOF > "$SHIELD_SYSTEMD_SERVICE"
 [Unit]
 Description=Just1kNode Shield Protection (L4 RKN filter and leak prevention)
-After=network.target
+DefaultDependencies=no
+After=network-pre.target
+Before=network.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=${bin_path} shield restore
-ExecReload=${bin_path} shield update
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    cat << 'EOF' > "$SHIELD_SYSTEMD_TIMER"
+    # 2. Служба обновления правил из сети (вызывается таймером)
+    cat << EOF > "$SHIELD_SYSTEMD_UPDATE_SERVICE"
+[Unit]
+Description=Just1kNode Shield Rules Daily Update Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${bin_path} shield update
+EOF
+
+    # 3. Таймер ежедневного обновления (в 04:30 со случайной задержкой до 30 мин)
+    cat << EOF > "$SHIELD_SYSTEMD_TIMER"
 [Unit]
 Description=Just1kNode Shield Rules Daily Update Timer
 
 [Timer]
+Unit=just1knode-shield-update.service
 OnCalendar=*-*-* 04:30:00
 RandomizedDelaySec=1800
 Persistent=true
@@ -361,6 +386,10 @@ shield_install() {
     fi
 
     install_shield_deps
+    if ! command -v ipset >/dev/null 2>&1 || ! command -v iptables >/dev/null 2>&1; then
+        error "Ошибка: ipset или iptables не установлены в системе."
+        return 1
+    fi
     shield_update || return 1
     deploy_shield_systemd_timer
     sync_ufw_after_init_shield
@@ -390,14 +419,14 @@ shield_remove() {
     check_root
 
     log "Удаление правил Shield из цепочек iptables..."
-    iptables -D INPUT -m set --match-set just1k_rkn_in src -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D OUTPUT -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
-    iptables -D FORWARD -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D FORWARD -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
+    while iptables -D INPUT -m set --match-set just1k_rkn_in src -j DROP 2>/dev/null; do :; done
+    while iptables -D OUTPUT -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+    while iptables -D OUTPUT -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
+    while iptables -D FORWARD -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+    while iptables -D FORWARD -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -D DOCKER-USER -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null || true
-        iptables -D DOCKER-USER -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
+        while iptables -D DOCKER-USER -m set --match-set just1k_vk_out dst -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null; do :; done
+        while iptables -D DOCKER-USER -m set --match-set just1k_vk_out dst -p udp -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
     fi
 
     log "Удаление наборов ipset..."
@@ -409,7 +438,8 @@ shield_remove() {
     log "Отключение системных служб и хуков Shield..."
     systemctl disable --now just1knode-shield.timer 2>/dev/null || true
     systemctl disable --now just1knode-shield.service 2>/dev/null || true
-    rm -f "$SHIELD_SYSTEMD_SERVICE" "$SHIELD_SYSTEMD_TIMER" 2>/dev/null || true
+    systemctl disable --now just1knode-shield-update.service 2>/dev/null || true
+    rm -f "$SHIELD_SYSTEMD_SERVICE" "$SHIELD_SYSTEMD_UPDATE_SERVICE" "$SHIELD_SYSTEMD_TIMER" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
     if [[ -f "$SHIELD_UFW_AFTER_INIT" ]]; then
