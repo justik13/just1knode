@@ -228,6 +228,8 @@ source "${SCRIPT_DIR}/lib/state.sh"
 source "${SCRIPT_DIR}/lib/ssl.sh"
 # shellcheck source=lib/traffic_watchdog.sh
 source "${SCRIPT_DIR}/lib/traffic_watchdog.sh"
+# shellcheck source=lib/shield.sh
+source "${SCRIPT_DIR}/lib/shield.sh"
 
 # Подключение модулей
 # shellcheck source=modules/xray/core.sh
@@ -337,6 +339,15 @@ show_status() {
         local r_day
         r_day="$(get_state_val "traffic_reset_day" "1")"
         echo -e "    Лимит хостинга: ${CYAN}${lim_gb} ГБ${NC} (сброс: ${r_day}-е число)"
+    fi
+
+    local s_status
+    s_status="$(get_state_val "shield_status" "disabled")"
+    if [[ "$s_status" == "active" || "$s_status" == "enabled" ]]; then
+        echo -e "\n  Защита Shield (L4):"
+        local s_upd
+        s_upd="$(get_state_val "shield_updated_at" "-")"
+        echo -e "    Статус:               ${GREEN}● Активен${NC} (обновлен: ${s_upd})"
     fi
 }
 
@@ -1101,6 +1112,29 @@ if os.path.exists(rf):
         failed=$((failed + 1))
     fi
 
+    if [[ "$role" != "origin" && ("$cur_has_v" == "1" || "$cur_has_r" == "1" || "$role" == "node" || "$role" == "vless") ]]; then
+        log "13. Проверка сетевой защиты Shield (L4 фильтрация)..."
+        if command -v check_shield_rules >/dev/null 2>&1 && check_shield_rules; then
+            local rkn_cnt vk_cnt
+            rkn_cnt="$(ipset list just1k_rkn_in 2>/dev/null | grep -cE '^[0-9]' || echo "0")"
+            vk_cnt="$(ipset list just1k_vk_out 2>/dev/null | grep -cE '^[0-9]' || echo "0")"
+            echo -e "  ${GREEN}✔${NC} Shield активен (РКН DROP: ${rkn_cnt} сетей, VK REJECT: ${vk_cnt} сетей)"
+            if systemctl is-active --quiet just1knode-shield.timer 2>/dev/null; then
+                echo -e "  ${GREEN}✔${NC} Таймер автообновления правил Shield активен"
+            else
+                echo -e "  ${YELLOW}!${NC} Таймер автообновления just1knode-shield.timer не активен"
+                warnings=$((warnings + 1))
+            fi
+        else
+            if [[ "$(get_state_val "shield_status" "")" == "active" ]]; then
+                echo -e "  ${RED}✗${NC} Правила Shield не найдены в iptables/ipset (выполните: just1knode shield restore)"
+                failed=$((failed + 1))
+            else
+                echo -e "  ${YELLOW}i${NC} Сетевая защита Shield не активирована (рекомендуется: just1knode shield install)"
+            fi
+        fi
+    fi
+
     if [[ $failed -eq 0 && $warnings -eq 0 ]]; then
         echo -e "\n${BOLD}${GREEN}Все проверки пройдены успешно! Узел полностью здоров.${NC}\n"
         return 0
@@ -1138,6 +1172,9 @@ reset_node() {
     systemctl disable xray xray-api amnezia-api 2>/dev/null || true
     remove_traffic_watchdog_timer
     remove_amnezia_abuse_protection 2>/dev/null || true
+    if command -v shield_remove >/dev/null 2>&1; then
+        shield_remove 2>/dev/null || true
+    fi
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
@@ -1290,6 +1327,9 @@ uninstall_node() {
 
     info "1/11. Остановка и отключение системных служб systemd..."
     remove_traffic_watchdog_timer
+    if command -v shield_remove >/dev/null 2>&1; then
+        shield_remove 2>/dev/null || true
+    fi
     systemctl stop xray xray-api amnezia-api 2>/dev/null || true
     systemctl disable xray xray-api amnezia-api 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" 2>/dev/null || true
@@ -1672,13 +1712,24 @@ main_menu() {
                         echo -e "\n${BOLD}=== УПРАВЛЕНИЕ VLESS TLS ===${NC}"
                         echo "[1] Показать данные для Telegram-бота (/admin)"
                         echo "[2] 🌐 Настроить / сменить домен VLESS TLS"
-                        echo "[3] Удалить VLESS TLS с этого сервера"
+                        echo "[3] 🛡️  Статус и обновление сетевой защиты Shield"
+                        echo "[4] Удалить VLESS TLS с этого сервера"
                         echo "[0] Назад"
-                        read -rp "Выбор [0-3]: " v_choice
+                        read -rp "Выбор [0-4]: " v_choice
                         case "$v_choice" in
                             1) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
                             2) setup_vless_domain; read -rp "Нажмите Enter для продолжения...";;
-                            3) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
+                            3)
+                                echo -e "\n[1] Показать статус Shield\n[2] Обновить правила Shield сейчас\n[3] Переустановить Shield\n[0] Назад"
+                                read -rp "Выбор [0-3]: " sh_ch
+                                case "$sh_ch" in
+                                    1) shield_status ;;
+                                    2) shield_update ;;
+                                    3) shield_install ;;
+                                esac
+                                read -rp "Нажмите Enter для продолжения..."
+                                ;;
+                            4) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
                         esac
                     else
                         install_vless_direct_node
@@ -1850,6 +1901,17 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     *) error "Использование: just1knode limit [status|set <GB> [reset_day] [tg_token] [tg_chat]|disable|check]" ;;
                 esac
                 ;;
+            shield)
+                case "${2:-status}" in
+                    install|setup) shield_install ;;
+                    update) shield_update ;;
+                    restore) shield_restore ;;
+                    remove|uninstall|disable) shield_remove ;;
+                    status|show|*) shield_status ;;
+                esac
+                ;;
+            install-shield) shield_install ;;
+            update-shield) shield_update ;;
             status) show_status ;;
             doctor|test) run_doctor || exit 1 ;;
             heal) heal_node_config ;;
