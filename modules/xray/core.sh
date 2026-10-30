@@ -602,6 +602,12 @@ update_node_post() {
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi
 
+    if [[ "$(get_state_val "shield_status" "")" == "active" || "$cur_v" == "1" ]]; then
+        if command -v shield_restore >/dev/null 2>&1; then
+            shield_restore 2>/dev/null || true
+        fi
+    fi
+
     local has_xray="0"
     if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]]; then
         has_xray="1"

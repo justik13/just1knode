@@ -1947,6 +1947,9 @@ print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS +
         deploy_vless_fallback_nginx
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         setup_xray_api_proxy
+        if command -v shield_restore >/dev/null 2>&1; then
+            shield_restore 2>/dev/null || true
+        fi
     fi
 
     log "Оптимизация и обновление конфигурации Relay завершены успешно!"
@@ -2270,6 +2273,11 @@ with open(out_f, 'w', encoding='utf-8') as f:
         return 1
     fi
 
+    # Активация Shield защиты L4 (фильтрация сканеров РКН и предотвращение утечек VK/Max)
+    if command -v shield_install >/dev/null 2>&1; then
+        shield_install || warn "Предупреждение: Не удалось настроить сетевую защиту Shield при установке VLESS."
+    fi
+
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
     echo ""
     show_vless_bot_credentials
@@ -2440,6 +2448,9 @@ if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', []))
     cur_has_r="$(get_state_val "has_relay" "0")"
     if [[ "$cur_has_a" == "0" && "$cur_has_r" == "0" ]]; then
         set_state_val "role" "unconfigured"
+        if command -v shield_remove >/dev/null 2>&1; then
+            shield_remove 2>/dev/null || true
+        fi
     else
         set_state_val "role" "node"
     fi
