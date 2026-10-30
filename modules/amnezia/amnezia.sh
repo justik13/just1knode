@@ -1357,6 +1357,32 @@ uninstall_amnezia_component() {
         fi
     fi
 
+    # Остановка и удаление Docker-контейнера AmneziaWG
+    local c
+    c="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
+    if command -v docker >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1; then
+            local amnezia_containers
+            amnezia_containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(amnezia-awg2|amnezia-awg|${c})$" || true)"
+            for cont in $amnezia_containers; do
+                log "Остановка и удаление Docker-контейнера $cont..."
+                docker stop "$cont" >/dev/null 2>&1 || true
+                docker rm -f "$cont" >/dev/null 2>&1 || true
+            done
+            local remaining_containers
+            remaining_containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(amnezia-awg2|amnezia-awg|${c})$" || true)"
+            if [[ -n "$remaining_containers" ]]; then
+                log_warn "Не удалось полностью удалить контейнеры: $remaining_containers"
+            fi
+        else
+            log_warn "Docker демон недоступен, удаление контейнеров AmneziaWG пропущено."
+        fi
+    fi
+
+    local awg_dir="${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}"
+    rm -rf "$awg_dir" 2>/dev/null || true
+    rmdir /opt/amnezia 2>/dev/null || true
+
     remove_amnezia_abuse_protection
 
     set_state_val "has_awg" "0"
