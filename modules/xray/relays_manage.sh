@@ -239,11 +239,6 @@ add_relay_node() {
         error "Недопустимый порт: '$port'. Ожидается число от 1 до 65535."
     fi
 
-    # Валидация UUID
-    if [[ ! "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-        error "Некорректный формат UUID туннеля: '$uuid'."
-    fi
-
     # Автодополнение флага и названия страны для коротких кодов
     case "${name,,}" in
         ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;
@@ -259,7 +254,6 @@ add_relay_node() {
         pl|poland|"pl poland"|"pl польша") name="🇵🇱 Польша" ;;
         at|austria|"at austria"|"at австрия") name="🇦🇹 Австрия" ;;
         ch|switzerland|"ch switzerland"|"ch швейцария") name="🇨🇭 Швейцария" ;;
-        *) name="$(get_country_display_name "$name")" ;;
     esac
 
     # Валидация параметров безопасности VLESS TLS
@@ -901,7 +895,6 @@ rename_relay_node() {
         pl|poland|"pl poland"|"pl польша") new_name="🇵🇱 Польша" ;;
         at|austria|"at austria"|"at австрия") new_name="🇦🇹 Австрия" ;;
         ch|switzerland|"ch switzerland"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
-        *) new_name="$(get_country_display_name "$new_name")" ;;
     esac
 
     local role

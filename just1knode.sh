@@ -444,8 +444,23 @@ print('tls')
         detected_code="relay-01"
     fi
 
-    local detected_country
-    detected_country="$(get_country_display_name "$detected_code")"
+    local detected_country="Зарубежный шлюз"
+    case "$detected_code" in
+        de) detected_country="🇩🇪 Германия" ;;
+        nl) detected_country="🇳🇱 Нидерланды" ;;
+        fi) detected_country="🇫🇮 Финляндия" ;;
+        se) detected_country="🇸🇪 Швеция" ;;
+        us) detected_country="🇺🇸 США" ;;
+        gb|uk) detected_country="🇬🇧 Великобритания" ;;
+        fr) detected_country="🇫🇷 Франция" ;;
+        tr) detected_country="🇹🇷 Турция" ;;
+        kz) detected_country="🇰🇿 Казахстан" ;;
+        pl) detected_country="🇵🇱 Польша" ;;
+        at) detected_country="🇦🇹 Австрия" ;;
+        ch) detected_country="🇨🇭 Швейцария" ;;
+        ee) detected_country="🇪🇪 Эстония" ;;
+        *) detected_country="$(get_country_display_name "$detected_code")" ;;
+    esac
 
     echo -e "${BOLD}Скопируйте и выполните эту команду на вашем Origin-сервере:${NC}"
     echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"

@@ -1157,6 +1157,9 @@ EOF
     geo_resolved="$(resolve_relay_geo_interactive "$my_ip" "exit")"
     local detected_code="${geo_resolved%%|*}"
     local detected_country="${geo_resolved#*|}"
+    case "$detected_code" in
+        ee) detected_country="🇪🇪 Эстония" ;;
+    esac
 
     title "УСТАНОВКА RELAY УЗЛА УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}Команда для добавления этого Relay на вашем Origin-сервере:${NC}"
@@ -1546,6 +1549,9 @@ except Exception:
     geo_resolved="$(resolve_relay_geo_interactive "$my_ip" "relay-01")"
     local detected_code="${geo_resolved%%|*}"
     local detected_country="${geo_resolved#*|}"
+    case "$detected_code" in
+        ee) detected_country="🇪🇪 Эстония" ;;
+    esac
 
     title "НАСТРОЙКА ДОМЕНА RELAY УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}1. Команда для переключения этого релея на вашем Origin-сервере:${NC}"

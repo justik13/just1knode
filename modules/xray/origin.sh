@@ -1268,7 +1268,6 @@ else:
 # чтобы зарубежные запросы клиентов с тегом just1k-wl-inbound-* направлялись на Relay по FQDN без DNS-резолвинга на Origin в РФ
 dom_idx = rules.index(dom_rule)
 relay_offset = 1
-existing_out_tags = {str(ob.get('tag', '')).strip().lower() for ob in outbounds}
 for r in relays:
     if not isinstance(r, dict): continue
     code = r.get('code')
@@ -1276,8 +1275,6 @@ for r in relays:
     in_tag = 'just1k-wl-inbound-' + str(code)
     out_tag = 'just1k-wl-outbound-' + str(code)
     rules = [rl for rl in rules if not (rl.get('inboundTag') == [in_tag] and rl.get('outboundTag') == out_tag)]
-    if out_tag.lower() not in existing_out_tags:
-        continue
     dom_idx = rules.index(dom_rule)
     rules.insert(dom_idx + relay_offset, {
         'type': 'field',
