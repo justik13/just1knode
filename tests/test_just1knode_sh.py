@@ -3698,13 +3698,14 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
 
         # Doctor check 5 domain verification loop
         self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
         self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
 
         # Relay domain setup emoji flag
-        self.assertIn('ee) detected_country="🇪🇪 Эстония" ;;', relay_sh)
+        self.assertIn('ee|estonia|эстония|"ee estonia"|"ee эстония") echo "🇪🇪 Эстония" ;;', common_sh)
         self.assertIn('just1knode relay add \\"${detected_country}\\"', relay_sh)
 
         # add_relay_node and rename_relay_node normalization
