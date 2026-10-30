@@ -879,6 +879,10 @@ if results:
 
 normalize_country_code() {
     local raw="${1:-}"
+    if [[ "$raw" == *"/"* || "$raw" == *"\\"* || "$raw" == *".."* ]]; then
+        echo ""
+        return 1
+    fi
     local val="${raw,,}"
     val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
     case "$val" in

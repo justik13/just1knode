@@ -185,6 +185,9 @@ add_relay_node() {
     if [[ -z "$code" ]]; then
         error "Код страны (ISO 2-letter) обязателен для добавления релея."
     fi
+    if [[ "$code" == *"/"* || "$code" == *"\\"* || "$code" == *".."* ]]; then
+        error "Недопустимый код страны: $code (разрешены только строчные буквы, цифры, дефис и подчеркивание)."
+    fi
     code="$(normalize_country_code "$code")"
     local arg6="${6:-}"
     local arg7="${7:-}"
