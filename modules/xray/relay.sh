@@ -2491,17 +2491,19 @@ if os.path.exists(cfg_file):
 " "$XRAY_CONFIG" 2>/dev/null || true
     fi
 
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-        # Удаляем все правила для relay_port (включая привязку к Origin IP) в обратном порядке номеров
-        local r_nums
-        r_nums="$(ufw status numbered 2>/dev/null | grep -E "\[\s*[0-9]+\]\s+${relay_port}(/tcp)?" | awk -F'[][]' '{print $2}' | sort -rn)"
-        for r_n in $r_nums; do
-            if [[ -n "$r_n" ]]; then
-                echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
-            fi
-        done
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status 2>/dev/null | grep -qi "Status: active"; then
+            # Удаляем только правила TCP с действием ALLOW IN для точного relay_port
+            local r_nums
+            r_nums="$(ufw status numbered 2>/dev/null | grep -E "\[\s*[0-9]+\]\s+${relay_port}/tcp\s+ALLOW IN\b" | awk -F'[][]' '{print $2}' | sort -rn)"
+            for r_n in $r_nums; do
+                if [[ -n "$r_n" ]]; then
+                    echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                fi
+            done
+        fi
+        # Очищаем спецификацию правила TCP даже если UFW временно неактивен
         ufw delete allow "${relay_port}/tcp" >/dev/null 2>&1 || true
-        ufw delete allow "${relay_port}" >/dev/null 2>&1 || true
     fi
 
     set_state_val "has_relay" "0"
