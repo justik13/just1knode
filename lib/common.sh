@@ -809,5 +809,117 @@ except Exception:
     return 0
 }
 
+detect_node_country_code() {
+    local ip="${1:-}"
+    if [[ -z "$ip" ]]; then
+        return 1
+    fi
+
+    local c_code=""
+    # 1. IP-API (most accurate consensus source according to NodeCheck)
+    c_code="$(curl -s --max-time 3 "http://ip-api.com/json/${ip}?fields=status,countryCode" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('countryCode','').lower()) if d.get('status')=='success' else None" 2>/dev/null || true)"
+    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
+        echo "$c_code"
+        return 0
+    fi
+
+    # 2. ipwho.is (backup consensus source)
+    c_code="$(curl -s --max-time 3 "https://ipwho.is/${ip}" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('country_code','').lower()) if d.get('success') else None" 2>/dev/null || true)"
+    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
+        echo "$c_code"
+        return 0
+    fi
+
+    # 3. ipinfo.io (fallback)
+    c_code="$(curl -s --max-time 3 "https://ipinfo.io/${ip}/json" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('country','').lower())" 2>/dev/null || true)"
+    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
+        echo "$c_code"
+        return 0
+    fi
+
+    return 1
+}
+
+get_country_display_name() {
+    local raw="${1:-}"
+    local val="${raw,,}"
+    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
+    case "$val" in
+        de|germany|германия|"de germany"|"de германия") echo "🇩🇪 Германия" ;;
+        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "🇳🇱 Нидерланды" ;;
+        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "🇫🇮 Финляндия" ;;
+        se|sweden|швеция|"se sweden"|"se швеция") echo "🇸🇪 Швеция" ;;
+        us|usa|сша|"us usa"|"us сша") echo "🇺🇸 США" ;;
+        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "🇬🇧 Великобритания" ;;
+        fr|france|франция|"fr france"|"fr франция") echo "🇫🇷 Франция" ;;
+        tr|turkey|турция|"tr turkey"|"tr турция") echo "🇹🇷 Турция" ;;
+        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "🇰🇿 Казахстан" ;;
+        pl|poland|польша|"pl poland"|"pl польша") echo "🇵🇱 Польша" ;;
+        at|austria|австрия|"at austria"|"at австрия") echo "🇦🇹 Австрия" ;;
+        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "🇨🇭 Швейцария" ;;
+        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "🇪🇪 Эстония" ;;
+        es|spain|испания|"es spain"|"es испания") echo "🇪🇸 Испания" ;;
+        it|italy|италия|"it italy"|"it италия") echo "🇮🇹 Италия" ;;
+        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "🇨🇿 Чехия" ;;
+        no|norway|норвегия|"no norway"|"no норвегия") echo "🇳🇴 Норвегия" ;;
+        dk|denmark|дания|"dk denmark"|"dk дания") echo "🇩🇰 Дания" ;;
+        is|iceland|исландия|"is iceland"|"is исландия") echo "🇮🇸 Исландия" ;;
+        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "🇱🇹 Литва" ;;
+        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "🇱🇻 Латвия" ;;
+        ro|romania|румыния|"ro romania"|"ro румыния") echo "🇷🇴 Румыния" ;;
+        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "🇧🇬 Болгария" ;;
+        gr|greece|греция|"gr greece"|"gr греция") echo "🇬🇷 Греция" ;;
+        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "🇭🇺 Венгрия" ;;
+        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "🇸🇰 Словакия" ;;
+        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "🇮🇪 Ирландия" ;;
+        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "🇵🇹 Португалия" ;;
+        jp|japan|япония|"jp japan"|"jp япония") echo "🇯🇵 Япония" ;;
+        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "🇸🇬 Сингапур" ;;
+        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "🇦🇪 ОАЭ" ;;
+        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "🇬🇪 Грузия" ;;
+        am|armenia|армения|"am armenia"|"am армения") echo "🇦🇲 Армения" ;;
+        *)
+            if [[ -n "$raw" ]]; then
+                echo "$raw"
+            else
+                echo "Зарубежный шлюз"
+            fi
+            ;;
+    esac
+}
+
+resolve_relay_geo_interactive() {
+    local ip="${1:-}"
+    local fallback="${2:-exit}"
+    local code=""
+    local country=""
+
+    if [[ -n "$ip" ]]; then
+        code="$(detect_node_country_code "$ip" 2>/dev/null || true)"
+    fi
+    if [[ -z "$code" ]]; then
+        code="$fallback"
+    fi
+
+    country="$(get_country_display_name "$code")"
+
+    if [[ -t 0 ]]; then
+        info "Определена геолокация Relay: ${BOLD}${country}${NC} (код: ${CYAN}${code}${NC})" >&2
+        local confirm=""
+        read -rp "Использовать эту локацию? [Y/n]: " confirm >&2 || true
+        if [[ "$confirm" =~ ^[NnНн]$ ]]; then
+            local custom_code=""
+            read -rp "Введите двухбуквенный код или название страны (например: se, fi, de): " custom_code >&2 || true
+            if [[ -n "$custom_code" ]]; then
+                code="${custom_code,,}"
+                country="$(get_country_display_name "$code")"
+            fi
+        fi
+    fi
+
+    echo "${code}|${country}"
+}
+
+
 
 

@@ -382,6 +382,25 @@ show_relay_credentials() {
     my_ip="$(get_public_ipv4 || true)"
     r_port="$(get_state_val "relay_port" "10443")"
     r_uuid="$(get_state_val "tunnel_uuid")"
+    if [[ -z "$r_uuid" && -f "$XRAY_CONFIG" ]]; then
+        r_uuid="$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    for ib in cfg.get('inbounds', []):
+        if ib.get('tag') in ('inbound-tls', 'inbound-reality', 'from-origin') or ib.get('port') in (10443, 8443):
+            clients = ib.get('settings', {}).get('clients', [])
+            if clients and isinstance(clients, list):
+                uid = clients[0].get('id')
+                if uid:
+                    print(uid)
+                    sys.exit(0)
+except Exception:
+    pass
+" "$XRAY_CONFIG" 2>/dev/null || true)"
+        [[ -n "$r_uuid" ]] && set_state_val "tunnel_uuid" "$r_uuid" 2>/dev/null || true
+    fi
     r_sec="$(get_state_val "security" "")"
     r_pubkey="$(get_state_val "public_key" "")"
     r_shortid="$(get_state_val "short_id" "")"
@@ -412,16 +431,12 @@ print('tls')
     r_sec="tls"
 
     local detected_code=""
-    local geo_json
-    geo_json="$(curl -s --max-time 3 "https://ipinfo.io/${my_ip}/json" 2>/dev/null || true)"
-    if [[ -n "$geo_json" ]]; then
-        local c_code
-        c_code="$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('country','').lower())" "$geo_json" 2>/dev/null || true)"
-        [[ -n "$c_code" && "$c_code" != "ru" ]] && detected_code="$c_code"
+    if [[ -n "$my_ip" ]]; then
+        detected_code="$(detect_node_country_code "$my_ip" 2>/dev/null || true)"
     fi
     if [[ -z "$detected_code" && -n "$r_sni" ]]; then
         local first_label="${r_sni%%.*}"
-        if [[ "$first_label" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        if [[ "${#first_label}" -eq 2 && "$first_label" =~ ^[a-zA-Z]+$ ]]; then
             detected_code="${first_label,,}"
         fi
     fi
@@ -429,23 +444,8 @@ print('tls')
         detected_code="relay-01"
     fi
 
-    local detected_country="Зарубежный шлюз"
-    case "$detected_code" in
-        de) detected_country="🇩🇪 Германия" ;;
-        nl) detected_country="🇳🇱 Нидерланды" ;;
-        fi) detected_country="🇫🇮 Финляндия" ;;
-        se) detected_country="🇸🇪 Швеция" ;;
-        us) detected_country="🇺🇸 США" ;;
-        gb|uk) detected_country="🇬🇧 Великобритания" ;;
-        fr) detected_country="🇫🇷 Франция" ;;
-        tr) detected_country="🇹🇷 Турция" ;;
-        kz) detected_country="🇰🇿 Казахстан" ;;
-        pl) detected_country="🇵🇱 Польша" ;;
-        at) detected_country="🇦🇹 Австрия" ;;
-        ch) detected_country="🇨🇭 Швейцария" ;;
-        ee) detected_country="🇪🇪 Эстония" ;;
-        *) detected_country="${detected_code^^}" ;;
-    esac
+    local detected_country
+    detected_country="$(get_country_display_name "$detected_code")"
 
     echo -e "${BOLD}Скопируйте и выполните эту команду на вашем Origin-сервере:${NC}"
     echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
@@ -1808,9 +1808,9 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 case "${2:-}" in
                     install|setup) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
                     creds|info) show_relay_credentials ;;
-                    uninstall|remove|del) uninstall_relay_component "${3:-}" ;;
-                    add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-de}" "${8:-tls}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
-                    remove-origin|del-origin) remove_relay_node "${3:-}" ;;
+                    uninstall) uninstall_relay_component "${3:-}" ;;
+                    remove|del|remove-origin|del-origin) remove_relay_node "${3:-}" ;;
+                    add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
                     rename) rename_relay_node "${3:-}" "${4:-}" ;;
                     sni|domain) update_relay_sni "${3:-}" "${4:-}" "${5:-tls}" "${6:-}" ;;
                     list) list_relays ;;

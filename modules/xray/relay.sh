@@ -1141,8 +1141,6 @@ EOF
     set_state_val "origin_ip" "$origin_ip"
     set_state_val "tunnel_uuid" "$tunnel_uuid"
     set_state_val "security" "tls"
-    set_state_val "public_key" "-"
-    set_state_val "short_id" "-"
     set_state_val "sni" "$dest_server"
 
     set_state_val "has_relay" "1"
@@ -1155,37 +1153,14 @@ EOF
         fi
     fi
 
-    local detected_country="Зарубежный шлюз"
-    local detected_code="exit"
-    local geo_json
-    geo_json="$(curl -s --max-time 3 "https://ipinfo.io/${my_ip}/json" 2>/dev/null || true)"
-    if [[ -n "$geo_json" ]]; then
-        local c_code
-        c_code="$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('country','').lower())" "$geo_json" 2>/dev/null || true)"
-        if [[ -n "$c_code" && "$c_code" != "ru" ]]; then
-            detected_code="$c_code"
-            case "$c_code" in
-                de) detected_country="🇩🇪 Германия" ;;
-                nl) detected_country="🇳🇱 Нидерланды" ;;
-                fi) detected_country="🇫🇮 Финляндия" ;;
-                se) detected_country="🇸🇪 Швеция" ;;
-                us) detected_country="🇺🇸 США" ;;
-                gb|uk) detected_country="🇬🇧 Великобритания" ;;
-                fr) detected_country="🇫🇷 Франция" ;;
-                tr) detected_country="🇹🇷 Турция" ;;
-                kz) detected_country="🇰🇿 Казахстан" ;;
-                pl) detected_country="🇵🇱 Польша" ;;
-                at) detected_country="🇦🇹 Австрия" ;;
-                ch) detected_country="🇨🇭 Швейцария" ;;
-                ee) detected_country="🇪🇪 Эстония" ;;
-                *) detected_country="${c_code^^}" ;;
-            esac
-        fi
-    fi
+    local geo_resolved
+    geo_resolved="$(resolve_relay_geo_interactive "$my_ip" "exit")"
+    local detected_code="${geo_resolved%%|*}"
+    local detected_country="${geo_resolved#*|}"
 
     title "УСТАНОВКА RELAY УЗЛА УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}Команда для добавления этого Relay на вашем Origin-сервере:${NC}"
-    echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${relay_port} ${tunnel_uuid} \"${detected_code}\" \"tls\" \"-\" \"-\" \"${dest_server}\"${NC}\n"
+    echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${relay_port} \"${tunnel_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${dest_server}\"${NC}\n"
     echo -e "${YELLOW}Примечание: вы можете заменить название \"${detected_country}\" на любое удобное вам.${NC}\n"
 }
 
@@ -1564,51 +1539,19 @@ except Exception:
 
     set_state_val "security" "tls"
     set_state_val "sni" "$domain"
-    set_state_val "public_key" "-"
-    set_state_val "short_id" "-"
 
     manifest_commit
 
-    local detected_code=""
-    local geo_json
-    geo_json="$(curl -s --max-time 3 "https://ipinfo.io/${my_ip}/json" 2>/dev/null || true)"
-    if [[ -n "$geo_json" ]]; then
-        local c_code
-        c_code="$(python3 -c "import json, sys; d=json.loads(sys.argv[1]); print(d.get('country','').lower())" "$geo_json" 2>/dev/null || true)"
-        [[ -n "$c_code" && "$c_code" != "ru" ]] && detected_code="$c_code"
-    fi
-    if [[ -z "$detected_code" ]]; then
-        local first_label="${domain%%.*}"
-        if [[ "$first_label" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-            detected_code="${first_label,,}"
-        else
-            detected_code="relay-01"
-        fi
-    fi
-
-    local detected_country="Зарубежный шлюз"
-    case "$detected_code" in
-        de) detected_country="🇩🇪 Германия" ;;
-        nl) detected_country="🇳🇱 Нидерланды" ;;
-        fi) detected_country="🇫🇮 Финляндия" ;;
-        se) detected_country="🇸🇪 Швеция" ;;
-        us) detected_country="🇺🇸 США" ;;
-        gb|uk) detected_country="🇬🇧 Великобритания" ;;
-        fr) detected_country="🇫🇷 Франция" ;;
-        tr) detected_country="🇹🇷 Турция" ;;
-        kz) detected_country="🇰🇿 Казахстан" ;;
-        pl) detected_country="🇵🇱 Польша" ;;
-        at) detected_country="🇦🇹 Австрия" ;;
-        ch) detected_country="🇨🇭 Швейцария" ;;
-        ee) detected_country="🇪🇪 Эстония" ;;
-        *) detected_country="${detected_code^^}" ;;
-    esac
+    local geo_resolved
+    geo_resolved="$(resolve_relay_geo_interactive "$my_ip" "relay-01")"
+    local detected_code="${geo_resolved%%|*}"
+    local detected_country="${geo_resolved#*|}"
 
     title "НАСТРОЙКА ДОМЕНА RELAY УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}1. Команда для переключения этого релея на вашем Origin-сервере:${NC}"
     echo -e "${GREEN}just1knode relay sni ${detected_code} ${domain} tls${NC}\n"
     echo -e "${BOLD}2. Если вы настраиваете этот релей на Origin впервые, используйте команду:${NC}"
-    echo -e "${CYAN}just1knode relay add \"${detected_country}\" ${my_ip} ${relay_port} ${tunnel_uuid} \"${detected_code}\" \"tls\" \"-\" \"-\" \"${domain}\"${NC}\n"
+    echo -e "${CYAN}just1knode relay add \"${detected_country}\" ${my_ip} ${relay_port} \"${tunnel_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${domain}\"${NC}\n"
 }
 
 heal_and_update_relay_config() {

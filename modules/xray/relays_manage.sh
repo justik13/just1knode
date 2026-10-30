@@ -23,6 +23,16 @@ def is_valid_relays_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+            return isinstance(data, list)
+    except Exception:
+        return False
+
+def is_valid_backup_file(path):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
             return isinstance(data, list) and len(data) > 0
     except Exception:
         return False
@@ -35,7 +45,7 @@ relays = None
 # 1. Попытка восстановить из свежей резервной копии
 baks = sorted(glob.glob(os.path.join(backup_dir, 'relays_*.bak*')) + glob.glob(os.path.join(backup_dir, 'relays*.json*')), key=os.path.getmtime, reverse=True)
 for b in baks:
-    if is_valid_relays_file(b):
+    if is_valid_backup_file(b):
         try:
             with open(b, 'r', encoding='utf-8') as f:
                 relays = json.load(f)
@@ -49,7 +59,19 @@ if not relays and os.path.exists(cfg_file):
     try:
         with open(cfg_file, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
-        known_names = {'de': '🇩🇪 Германия', 'ee': '🇪🇪 Эстония', 'nl': '🇳🇱 Нидерланды', 'fi': '🇫🇮 Финляндия', 'se': '🇸🇪 Швеция', 'pl': '🇵🇱 Польша', 'fr': '🇫🇷 Франция', 'us': '🇺🇸 США', 'gb': '🇬🇧 Великобритания'}
+        known_names = {
+            'de': '🇩🇪 Германия', 'ee': '🇪🇪 Эстония', 'nl': '🇳🇱 Нидерланды',
+            'fi': '🇫🇮 Финляндия', 'se': '🇸🇪 Швеция', 'pl': '🇵🇱 Польша',
+            'fr': '🇫🇷 Франция', 'us': '🇺🇸 США', 'gb': '🇬🇧 Великобритания',
+            'tr': '🇹🇷 Турция', 'kz': '🇰🇿 Казахстан', 'at': '🇦🇹 Австрия',
+            'ch': '🇨🇭 Швейцария', 'es': '🇪🇸 Испания', 'it': '🇮🇹 Италия',
+            'cz': '🇨🇿 Чехия', 'no': '🇳🇴 Норвегия', 'dk': '🇩🇰 Дания',
+            'is': '🇮🇸 Исландия', 'lt': '🇱🇹 Литва', 'lv': '🇱🇻 Латвия',
+            'ro': '🇷🇴 Румыния', 'bg': '🇧🇬 Болгария', 'gr': '🇬🇷 Греция',
+            'hu': '🇭🇺 Венгрия', 'sk': '🇸🇰 Словакия', 'ie': '🇮🇪 Ирландия',
+            'pt': '🇵🇹 Португалия', 'jp': '🇯🇵 Япония', 'sg': '🇸🇬 Сингапур',
+            'ae': '🇦🇪 ОАЭ', 'ge': '🇬🇪 Грузия', 'am': '🇦🇲 Армения'
+        }
         reconstructed = []
         for ob in cfg.get('outbounds', []):
             tag = ob.get('tag', '')
@@ -173,11 +195,25 @@ add_relay_node() {
     local sni=""
     local badge=""
 
-    security_type="tls"
-    sni="$arg9"
-    badge="$arg10"
-    [[ -z "$sni" && -n "$arg8" && "$arg8" != "-" ]] && sni="$arg8"
-    [[ -z "$sni" && -n "$arg6" && "$arg6" != "tls" && "$arg6" != "-" ]] && sni="$arg6"
+    # Поддерживаем форматы вызова:
+    # 1. 10-arg legacy: <name> <ip> <port> <uuid> <code> <sec> <pk> <sid> <sni> [badge]
+    # 2. 7-arg modern:  <name> <ip> <port> <uuid> <code> "tls" <sni> [badge]
+    # 3. 6-arg direct:  <name> <ip> <port> <uuid> <code> <sni> [badge]
+    if [[ "$arg6" == "tls" || "$arg6" == "reality" ]]; then
+        if [[ -n "$arg9" && "$arg9" != "-" ]]; then
+            sni="$arg9"
+            badge="$arg10"
+        elif [[ -n "$arg7" && "$arg7" != "-" ]]; then
+            sni="$arg7"
+            badge="$arg8"
+        elif [[ -n "$arg8" && "$arg8" != "-" ]]; then
+            sni="$arg8"
+            badge="$arg9"
+        fi
+    elif [[ -n "$arg6" && "$arg6" != "-" ]]; then
+        sni="$arg6"
+        badge="$arg7"
+    fi
 
     [[ "$pubkey" == "-" ]] && pubkey=""
     [[ "$shortid" == "-" ]] && shortid=""
@@ -191,6 +227,21 @@ add_relay_node() {
 
     if [[ -z "$name" || -z "$ip" || -z "$uuid" ]]; then
         error "Имя, IP/Домен и UUID обязательны для добавления релея."
+    fi
+
+    # Валидация IP / Hostname
+    if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ ! "$ip" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        error "Некорректный IP или домен релея: '$ip'."
+    fi
+
+    # Валидация порта
+    if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+        error "Недопустимый порт: '$port'. Ожидается число от 1 до 65535."
+    fi
+
+    # Валидация UUID
+    if [[ ! "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        error "Некорректный формат UUID туннеля: '$uuid'."
     fi
 
     # Автодополнение флага и названия страны для коротких кодов
@@ -208,6 +259,7 @@ add_relay_node() {
         pl|poland|"pl poland"|"pl польша") name="🇵🇱 Польша" ;;
         at|austria|"at austria"|"at австрия") name="🇦🇹 Австрия" ;;
         ch|switzerland|"ch switzerland"|"ch швейцария") name="🇨🇭 Швейцария" ;;
+        *) name="$(get_country_display_name "$name")" ;;
     esac
 
     # Валидация параметров безопасности VLESS TLS
@@ -849,6 +901,7 @@ rename_relay_node() {
         pl|poland|"pl poland"|"pl польша") new_name="🇵🇱 Польша" ;;
         at|austria|"at austria"|"at австрия") new_name="🇦🇹 Австрия" ;;
         ch|switzerland|"ch switzerland"|"ch швейцария") new_name="🇨🇭 Швейцария" ;;
+        *) new_name="$(get_country_display_name "$new_name")" ;;
     esac
 
     local role
@@ -1079,12 +1132,27 @@ if not target_ip:
         target_ip = vnext[0].get('address')
 
 if not any(r.get('code') == matched_code for r in relays):
+    in_tag = f'just1k-wl-inbound-{matched_code}'
+    in_ib = next((ib for ib in cfg.get('inbounds', []) if ib.get('tag') == in_tag), None)
+    path = in_ib.get('streamSettings', {}).get('xhttpSettings', {}).get('path', f'/stream/{matched_code}') if in_ib else f'/stream/{matched_code}'
+    in_port = in_ib.get('port') if in_ib else None
+    vnext_users = (target_ob.get('settings', {}).get('vnext') or [{}])[0].get('users') or [{}]
+    u_id = vnext_users[0].get('id', '') if vnext_users else ''
+    port_num = (target_ob.get('settings', {}).get('vnext') or [{}])[0].get('port', 10443)
+    known_names = {'de': '🇩🇪 Германия', 'ee': '🇪🇪 Эстония', 'nl': '🇳🇱 Нидерланды', 'fi': '🇫🇮 Финляндия', 'se': '🇸🇪 Швеция', 'pl': '🇵🇱 Польша', 'fr': '🇫🇷 Франция', 'us': '🇺🇸 США', 'gb': '🇬🇧 Великобритания'}
+    r_name = known_names.get(matched_code.lower(), f'Релей {matched_code.upper()}')
     relays.append({
+        'name': r_name,
         'code': matched_code,
-        'name': f'Релей {matched_code.upper()}',
         'ip': target_ip or '',
-        'sni': new_sni,
-        'security': new_sec
+        'port': port_num,
+        'uuid': u_id,
+        'inbound_port': in_port,
+        'path': path,
+        'inbound_tag': in_tag,
+        'outbound_tag': out_tag,
+        'security': new_sec,
+        'sni': new_sni
     })
 
 # Валидация DNS для режима TLS во избежание NDPI_UNRESOLVED_HOSTNAME (сверка SNI ➔ DNS)
@@ -1266,8 +1334,15 @@ try:
         sni = ''
         badge = ''
         if len(tokens) > 5 and tokens[5] == 'tls':
-            sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
-            badge = tokens[9] if len(tokens) > 9 else ''
+            if len(tokens) > 8 and tokens[8] != '-':
+                sni = tokens[8]
+                badge = tokens[9] if len(tokens) > 9 else ''
+            elif len(tokens) > 6 and tokens[6] != '-':
+                sni = tokens[6]
+                badge = tokens[7] if len(tokens) > 7 else ''
+            elif len(tokens) > 7 and tokens[7] != '-':
+                sni = tokens[7]
+                badge = tokens[8] if len(tokens) > 8 else ''
         elif len(tokens) > 5 and tokens[5] == 'reality':
             sni = tokens[8] if len(tokens) > 8 and tokens[8] != '-' else ''
             badge = tokens[9] if len(tokens) > 9 else ''
