@@ -1096,6 +1096,45 @@ if not any(ob.get('tag') == 'just1k-wl-api' for ob in outbounds):
         'protocol': 'blackhole'
     })
 
+# 1.5. Реконструкция/актуализация outbounds релеев из реестра relays.json
+for r in relays:
+    if not isinstance(r, dict):
+        continue
+    code = r.get('code')
+    if not code:
+        continue
+    out_tag = f'just1k-wl-outbound-{code}'
+    r_ob = next((ob for ob in outbounds if ob.get('tag') == out_tag), None)
+    if not r_ob:
+        r_ip = r.get('ip')
+        r_port = r.get('port', 10443)
+        r_uuid = r.get('uuid')
+        r_sni = r.get('sni')
+        if r_ip and r_uuid:
+            outbounds.append({
+                'tag': out_tag,
+                'protocol': 'vless',
+                'settings': {
+                    'vnext': [{
+                        'address': r_ip,
+                        'port': int(r_port),
+                        'users': [{
+                            'id': r_uuid,
+                            'encryption': 'none',
+                            'flow': 'xtls-rprx-vision'
+                        }]
+                    }]
+                },
+                'streamSettings': {
+                    'network': 'tcp',
+                    'security': 'tls',
+                    'tlsSettings': {
+                        'serverName': r_sni or r_ip,
+                        'allowInsecure': False
+                    }
+                }
+            })
+
 # 2. INBOUNDS: гарантия наличия базовых инбаундов и правильный sniffing
 inbounds = cfg.setdefault('inbounds', [])
 

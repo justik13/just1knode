@@ -1801,7 +1801,13 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             install-amnezia|install-awg|add-amnezia) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
             uninstall-amnezia|uninstall-awg|remove-amnezia) uninstall_amnezia_component "${2:-}" ;;
             install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
-            uninstall-relay|remove-relay) uninstall_relay_component "${2:-}" ;;
+            uninstall-relay|remove-relay)
+                if [[ "$(get_state_val "role")" == "origin" ]]; then
+                    remove_relay_node "${2:-}"
+                else
+                    uninstall_relay_component "${2:-}"
+                fi
+                ;;
             setup-domain|relay-domain|setup_domain)
                 setup_relay_domain "${2:-}"
                 ;;
@@ -1823,8 +1829,20 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 case "${2:-}" in
                     install|setup) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
                     creds|info) show_relay_credentials ;;
-                    uninstall) uninstall_relay_component "${3:-}" ;;
-                    remove|del|remove-origin|del-origin) remove_relay_node "${3:-}" ;;
+                    uninstall)
+                        if [[ "$(get_state_val "role")" == "origin" && -n "${3:-}" ]]; then
+                            remove_relay_node "${3:-}"
+                        else
+                            uninstall_relay_component "${3:-}"
+                        fi
+                        ;;
+                    remove|del|remove-origin|del-origin)
+                        if [[ "$(get_state_val "role")" == "relay" && -z "${3:-}" ]]; then
+                            uninstall_relay_component "${3:-}"
+                        else
+                            remove_relay_node "${3:-}"
+                        fi
+                        ;;
                     add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
                     rename) rename_relay_node "${3:-}" "${4:-}" ;;
                     sni|domain) update_relay_sni "${3:-}" "${4:-}" "${5:-tls}" "${6:-}" ;;

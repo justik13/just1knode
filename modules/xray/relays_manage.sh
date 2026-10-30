@@ -23,7 +23,7 @@ def is_valid_relays_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return isinstance(data, list)
+            return isinstance(data, list) and all(isinstance(x, dict) for x in data)
     except Exception:
         return False
 
@@ -33,7 +33,7 @@ def is_valid_backup_file(path):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return isinstance(data, list) and len(data) > 0
+            return isinstance(data, list) and len(data) > 0 and all(isinstance(x, dict) for x in data)
     except Exception:
         return False
 
@@ -181,8 +181,11 @@ add_relay_node() {
     local ip="${2:-}"
     local port="${3:-10443}"
     local uuid="${4:-}"
-    local code="${5:-de}"
-    code="$(echo "$code" | tr '[:upper:]' '[:lower:]')"
+    local code="${5:-}"
+    if [[ -z "$code" ]]; then
+        error "Код страны (ISO 2-letter) обязателен для добавления релея."
+    fi
+    code="$(normalize_country_code "$code")"
     local arg6="${6:-}"
     local arg7="${7:-}"
     local arg8="${8:-}"
@@ -230,7 +233,15 @@ add_relay_node() {
     fi
 
     # Валидация IP / Hostname
-    if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ ! "$ip" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+    if [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        local o1="${BASH_REMATCH[1]}"
+        local o2="${BASH_REMATCH[2]}"
+        local o3="${BASH_REMATCH[3]}"
+        local o4="${BASH_REMATCH[4]}"
+        if (( o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255 )); then
+            error "Некорректный IPv4-адрес релея: '$ip' (октеты должны быть от 0 до 255)."
+        fi
+    elif [[ ! "$ip" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
         error "Некорректный IP или домен релея: '$ip'."
     fi
 
@@ -1132,7 +1143,19 @@ if not any(r.get('code') == matched_code for r in relays):
     vnext_users = (target_ob.get('settings', {}).get('vnext') or [{}])[0].get('users') or [{}]
     u_id = vnext_users[0].get('id', '') if vnext_users else ''
     port_num = (target_ob.get('settings', {}).get('vnext') or [{}])[0].get('port', 10443)
-    known_names = {'de': '🇩🇪 Германия', 'ee': '🇪🇪 Эстония', 'nl': '🇳🇱 Нидерланды', 'fi': '🇫🇮 Финляндия', 'se': '🇸🇪 Швеция', 'pl': '🇵🇱 Польша', 'fr': '🇫🇷 Франция', 'us': '🇺🇸 США', 'gb': '🇬🇧 Великобритания'}
+    known_names = {
+        'de': '🇩🇪 Германия', 'ee': '🇪🇪 Эстония', 'nl': '🇳🇱 Нидерланды',
+        'fi': '🇫🇮 Финляндия', 'se': '🇸🇪 Швеция', 'pl': '🇵🇱 Польша',
+        'fr': '🇫🇷 Франция', 'us': '🇺🇸 США', 'gb': '🇬🇧 Великобритания',
+        'tr': '🇹🇷 Турция', 'kz': '🇰🇿 Казахстан', 'at': '🇦🇹 Австрия',
+        'ch': '🇨🇭 Швейцария', 'es': '🇪🇸 Испания', 'it': '🇮🇹 Италия',
+        'cz': '🇨🇿 Чехия', 'no': '🇳🇴 Норвегия', 'dk': '🇩🇰 Дания',
+        'is': '🇮🇸 Исландия', 'lt': '🇱🇹 Литва', 'lv': '🇱🇻 Латвия',
+        'ro': '🇷🇴 Румыния', 'bg': '🇧🇬 Болгария', 'gr': '🇬🇷 Греция',
+        'hu': '🇭🇺 Венгрия', 'sk': '🇸🇰 Словакия', 'ie': '🇮🇪 Ирландия',
+        'pt': '🇵🇹 Португалия', 'jp': '🇯🇵 Япония', 'sg': '🇸🇬 Сингапур',
+        'ae': '🇦🇪 ОАЭ', 'ge': '🇬🇪 Грузия', 'am': '🇦🇲 Армения'
+    }
     r_name = known_names.get(matched_code.lower(), f'Релей {matched_code.upper()}')
     relays.append({
         'name': r_name,

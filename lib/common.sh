@@ -816,28 +816,115 @@ detect_node_country_code() {
     fi
 
     local c_code=""
-    # 1. IP-API (most accurate consensus source according to NodeCheck)
-    c_code="$(curl -s --max-time 3 "http://ip-api.com/json/${ip}?fields=status,countryCode" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('countryCode','').lower()) if d.get('status')=='success' else None" 2>/dev/null || true)"
-    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
-        echo "$c_code"
-        return 0
-    fi
+    c_code="$(python3 -c "
+import urllib.request, json, sys
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # 2. ipwho.is (backup consensus source)
-    c_code="$(curl -s --max-time 3 "https://ipwho.is/${ip}" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('country_code','').lower()) if d.get('success') else None" 2>/dev/null || true)"
-    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
-        echo "$c_code"
-        return 0
-    fi
+ip = sys.argv[1]
 
-    # 3. ipinfo.io (fallback)
-    c_code="$(curl -s --max-time 3 "https://ipinfo.io/${ip}/json" 2>/dev/null | python3 -c "import json, sys; d=json.load(sys.stdin); print(d.get('country','').lower())" 2>/dev/null || true)"
+def fetch_ip_api():
+    try:
+        req = urllib.request.Request(f'http://ip-api.com/json/{ip}?fields=status,countryCode', headers={'User-Agent': 'curl/7.88.1'})
+        with urllib.request.urlopen(req, timeout=2.5) as r:
+            d = json.loads(r.read().decode('utf-8'))
+            if d.get('status') == 'success':
+                return d.get('countryCode', '').lower()
+    except Exception:
+        pass
+    return None
+
+def fetch_ipwho():
+    try:
+        req = urllib.request.Request(f'https://ipwho.is/{ip}', headers={'User-Agent': 'curl/7.88.1'})
+        with urllib.request.urlopen(req, timeout=2.5) as r:
+            d = json.loads(r.read().decode('utf-8'))
+            if d.get('success'):
+                return d.get('country_code', '').lower()
+    except Exception:
+        pass
+    return None
+
+def fetch_ipinfo():
+    try:
+        req = urllib.request.Request(f'https://ipinfo.io/{ip}/json', headers={'User-Agent': 'curl/7.88.1'})
+        with urllib.request.urlopen(req, timeout=2.5) as r:
+            d = json.loads(r.read().decode('utf-8'))
+            return d.get('country', '').lower()
+    except Exception:
+        pass
+    return None
+
+results = []
+with ThreadPoolExecutor(max_workers=3) as ex:
+    futures = [ex.submit(fetch_ip_api), ex.submit(fetch_ipwho), ex.submit(fetch_ipinfo)]
+    for f in as_completed(futures):
+        res = f.result()
+        if res and len(res) == 2 and res != 'ru':
+            results.append(res)
+
+if results:
+    counts = Counter(results)
+    most_common, _ = counts.most_common(1)[0]
+    print(most_common)
+" "$ip" 2>/dev/null || true)"
+
     if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
         echo "$c_code"
         return 0
     fi
 
     return 1
+}
+
+normalize_country_code() {
+    local raw="${1:-}"
+    local val="${raw,,}"
+    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
+    case "$val" in
+        de|germany|германия|"de germany"|"de германия") echo "de" ;;
+        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "nl" ;;
+        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "fi" ;;
+        se|sweden|швеция|"se sweden"|"se швеция") echo "se" ;;
+        us|usa|сша|"us usa"|"us сша") echo "us" ;;
+        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "gb" ;;
+        fr|france|франция|"fr france"|"fr франция") echo "fr" ;;
+        tr|turkey|турция|"tr turkey"|"tr турция") echo "tr" ;;
+        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "kz" ;;
+        pl|poland|польша|"pl poland"|"pl польша") echo "pl" ;;
+        at|austria|австрия|"at austria"|"at австрия") echo "at" ;;
+        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "ch" ;;
+        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "ee" ;;
+        es|spain|испания|"es spain"|"es испания") echo "es" ;;
+        it|italy|италия|"it italy"|"it италия") echo "it" ;;
+        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "cz" ;;
+        no|norway|норвегия|"no norway"|"no норвегия") echo "no" ;;
+        dk|denmark|дания|"dk denmark"|"dk дания") echo "dk" ;;
+        is|iceland|исландия|"is iceland"|"is исландия") echo "is" ;;
+        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "lt" ;;
+        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "lv" ;;
+        ro|romania|румыния|"ro romania"|"ro румыния") echo "ro" ;;
+        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "bg" ;;
+        gr|greece|греция|"gr greece"|"gr греция") echo "gr" ;;
+        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "hu" ;;
+        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "sk" ;;
+        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "ie" ;;
+        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "pt" ;;
+        jp|japan|япония|"jp japan"|"jp япония") echo "jp" ;;
+        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "sg" ;;
+        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "ae" ;;
+        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "ge" ;;
+        am|armenia|армения|"am armenia"|"am армения") echo "am" ;;
+        *)
+            if [[ "$val" =~ ^[a-z]{2}$ ]]; then
+                echo "$val"
+            else
+                local clean
+                clean="$(echo "$val" | tr -cd '[:alnum:]')"
+                echo "${clean:0:2}"
+            fi
+            ;;
+    esac
 }
 
 get_country_display_name() {
@@ -879,7 +966,11 @@ get_country_display_name() {
         ge|georgia|грузия|"ge georgia"|"ge грузия") echo "🇬🇪 Грузия" ;;
         am|armenia|армения|"am armenia"|"am армения") echo "🇦🇲 Армения" ;;
         *)
-            if [[ -n "$raw" ]]; then
+            local norm
+            norm="$(normalize_country_code "$raw")"
+            if [[ -n "$norm" && "$norm" != "$val" && "$norm" != "$raw" ]]; then
+                get_country_display_name "$norm"
+            elif [[ -n "$raw" ]]; then
                 echo "$raw"
             else
                 echo "Зарубежный шлюз"
@@ -901,6 +992,7 @@ resolve_relay_geo_interactive() {
         code="$fallback"
     fi
 
+    code="$(normalize_country_code "$code")"
     country="$(get_country_display_name "$code")"
 
     if [[ -t 0 ]]; then
@@ -911,7 +1003,7 @@ resolve_relay_geo_interactive() {
             local custom_code=""
             read -rp "Введите двухбуквенный код или название страны (например: se, fi, de): " custom_code >&2 || true
             if [[ -n "$custom_code" ]]; then
-                code="${custom_code,,}"
+                code="$(normalize_country_code "$custom_code")"
                 country="$(get_country_display_name "$code")"
             fi
         fi
