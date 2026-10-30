@@ -560,6 +560,42 @@ def test_health_fail_closed_when_process_unreadable():
             assert data["node_epoch"] is None
 
 
+def test_healthz_unauthenticated_healthy():
+    with patch.object(grpc_client, "is_healthy", return_value=True):
+        with patch.object(
+            epoch_manager,
+            "get_process_and_epoch",
+            return_value=(100, 1000, "boot-1", "epoch_1"),
+        ):
+            for path in ("/healthz", "/health"):
+                res = client.get(path)
+                assert res.status_code == 200
+                data = res.json()
+                assert data["ok"] is True
+                assert data["status"] == "ok"
+                assert data["service"] == "xray-api"
+                assert data["xray_running"] is True
+                assert data["grpc_ok"] is True
+
+
+def test_healthz_unauthenticated_fail_closed_when_grpc_down():
+    with patch.object(grpc_client, "is_healthy", return_value=False):
+        with patch.object(
+            epoch_manager,
+            "get_process_and_epoch",
+            return_value=(100, 1000, "boot-1", "epoch_1"),
+        ):
+            for path in ("/healthz", "/health"):
+                res = client.get(path)
+                assert res.status_code == 503
+                data = res.json()
+                assert data["ok"] is False
+                assert data["status"] == "error"
+                assert data["service"] == "xray-api"
+                assert data["xray_running"] is False
+                assert data["grpc_ok"] is False
+
+
 def test_traffic_snapshot_fail_closed_when_grpc_down():
     with patch.object(grpc_client, "is_healthy", return_value=False):
         res = client.get("/v1/traffic/snapshot", headers=VALID_HEADERS)
