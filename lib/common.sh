@@ -399,6 +399,7 @@ net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 1
 net.ipv4.icmp_echo_ignore_all = 1
+net.mptcp.enabled = 0
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
 net.core.somaxconn = 65535
@@ -434,6 +435,7 @@ EOF
         sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv4.icmp_echo_ignore_all=1 >/dev/null 2>&1 || true
+        sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1 || true
         sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
         sysctl -w net.ipv4.tcp_fin_timeout=15 >/dev/null 2>&1 || true
         sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true

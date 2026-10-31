@@ -1515,7 +1515,10 @@ with os.fdopen(t_fd, 'w', encoding='utf-8') as fp:
     os.fsync(fp.fileno())
 os.replace(t_path, cfg_file)
 try:
+    import shutil
+    shutil.chown(cfg_file, user='root', group='xrayapi')
     os.chmod(cfg_file, 0o640)
+    os.chmod(d, 0o755)
 except Exception:
     pass
 " "$XRAY_CONFIG" "$relay_port" "$tunnel_uuid" "$domain"; then
@@ -1523,6 +1526,8 @@ except Exception:
         error "Ошибка обновления конфигурации Xray Relay."
         return 1
     fi
+
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     if ! "$XRAY_BIN" run -test -config "$XRAY_CONFIG"; then
         manifest_rollback
@@ -1851,7 +1856,10 @@ with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     os.fsync(f.fileno())
 os.replace(t_path, cfg_file)
 try:
+    import shutil
+    shutil.chown(cfg_file, user='root', group='xrayapi')
     os.chmod(cfg_file, 0o640)
+    os.chmod(d, 0o755)
 except Exception:
     pass
 
@@ -1861,7 +1869,7 @@ print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS +
         error "Ошибка выполнения Python-скрипта реконсиляции Relay."
     fi
 
-    chmod 640 "$XRAY_CONFIG" 2>/dev/null || true
+    ensure_xray_config_permissions "$XRAY_CONFIG"
 
     apply_node_sysctl_hardening
 
