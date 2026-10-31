@@ -5,6 +5,7 @@ __pycache__/
 # Dependencies and virtual environments
 .venv/
 venv/
+uv.lock
 
 # Logs and temp files
 *.log

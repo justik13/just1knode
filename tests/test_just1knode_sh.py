@@ -1246,7 +1246,7 @@ exit 0
     def test_update_xray_fail_closed_rollback(self):
         self._prepare_base_env()
         xray_bin = self.bin_dir / "xray"
-        xray_bin.write_text("#!/bin/sh\necho 'Xray 26.10.29'\nexit 0\n", encoding="utf-8")
+        xray_bin.write_text("#!/bin/sh\necho 'Xray 26.10.31'\nexit 0\n", encoding="utf-8")
         xray_bin.chmod(0o755)
 
         # Mock download_and_verify_xray using python zipfile

@@ -3,9 +3,9 @@
 # JUST1KNODE - Модуль Xray Core (modules/xray/core.sh)
 # =============================================================================
 
-XRAY_VERSION_PINNED="${XRAY_VERSION_PINNED:-26.10.29}"
-XRAY_SHA256_64="8a5f3e6a1057e4bd0f8a7c57c9d91204b4be0b74222a6e210d070603101163c2"
-XRAY_SHA256_ARM64="afe01f19045b05237420328028ee1ee2e1edd2100eb41a8cbbf50e683b0a6e58"
+XRAY_VERSION_PINNED="${XRAY_VERSION_PINNED:-26.10.31}"
+XRAY_SHA256_64="e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214"
+XRAY_SHA256_ARM64="1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d"
 
 XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_CONFIG_DIR="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"

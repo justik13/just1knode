@@ -60,8 +60,8 @@
   https://telegra.ph/Perehod-na-SelfSteal-SNI-prostaya-i-gramotnaya-nastrojka-dlya-vashego-VPN-09-29
 
 ## Ядро Xray-core: релизы, спецификации и Pull Requests
-- Xray-core v26.10.29 и PR #5067 (VLESS Native Encryption ML-KEM-768 — постквантовое 0-RTT шифрование полезной нагрузки для предотвращения детекции и оверхеда двойного TLS поверх CDN):
-  https://github.com/XTLS/Xray-core/releases/tag/v26.10.29
+- Xray-core v26.10.31 (экстренное обновление безопасности: закрытие уязвимости Linux kernel IPv4 MPTCP; v26.10.29 отозван) и PR #5067 (VLESS Native Encryption ML-KEM-768):
+  https://github.com/XTLS/Xray-core/releases/tag/v26.10.31
   https://github.com/XTLS/Xray-core/pull/5067
 - Xray-core v26.9.30 (Тег prerelease: true, транспорт XDRIVE, PR #5645, PR #6748, PR #6754):
   https://github.com/XTLS/Xray-core/releases/tag/v26.9.30
