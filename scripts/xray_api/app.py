@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 import sqlite3
@@ -906,7 +906,12 @@ def list_relays(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     }
 
 
-async def _probe_single_relay(relay: Dict[str, Any], timeout: float = 2.5) -> Dict[str, Any]:
+async def _probe_single_relay(
+    relay: Dict[str, Any],
+    timeout: float = 5.0,
+    retries: int = 2,
+    retry_delay: float = 0.5,
+) -> Dict[str, Any]:
     if not isinstance(relay, dict):
         return {
             "name": "",
@@ -933,55 +938,59 @@ async def _probe_single_relay(relay: Dict[str, Any], timeout: float = 2.5) -> Di
             "error": "Missing IP or port",
         }
 
-    t0 = time.perf_counter()
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(str(ip), int(port)),
-            timeout=timeout,
-        )
-        rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
-        writer.close()
+    last_error: Optional[str] = None
+    total_attempts = max(0, retries) + 1
+    for attempt in range(total_attempts):
+        t0 = time.perf_counter()
         try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return {
-            "name": name,
-            "code": code,
-            "ip": ip,
-            "port": port,
-            "healthy": True,
-            "rtt_ms": rtt_ms,
-            "error": None,
-        }
-    except asyncio.TimeoutError:
-        return {
-            "name": name,
-            "code": code,
-            "ip": ip,
-            "port": port,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": f"Timeout ({timeout}s)",
-        }
-    except Exception as exc:
-        return {
-            "name": name,
-            "code": code,
-            "ip": ip,
-            "port": port,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": str(exc),
-        }
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(str(ip), int(port)),
+                timeout=timeout,
+            )
+            rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return {
+                "name": name,
+                "code": code,
+                "ip": ip,
+                "port": port,
+                "healthy": True,
+                "rtt_ms": rtt_ms,
+                "error": None,
+            }
+        except asyncio.TimeoutError:
+            last_error = f"Timeout ({timeout}s)"
+        except Exception as exc:
+            last_error = str(exc)
+
+        if attempt < retries:
+            await asyncio.sleep(retry_delay)
+
+    return {
+        "name": name,
+        "code": code,
+        "ip": ip,
+        "port": port,
+        "healthy": False,
+        "rtt_ms": None,
+        "error": last_error or f"Timeout ({timeout}s)",
+    }
 
 
 @app.get("/v1/relays/health")
-async def check_relays_health(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
+async def check_relays_health(
+    timeout: float = Query(5.0, ge=0.5, le=30.0, description="TCP connect timeout per attempt in seconds"),
+    retries: int = Query(2, ge=0, le=5, description="Number of retry attempts before reporting failure"),
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
     """Probes all configured relay nodes from this Origin node via TCP connection.
 
-    Measures RTT and connectivity. Returns status 'ok' if all relays are healthy,
-    'degraded' if some are unreachable, 'error' if relays config is invalid,
+    Measures RTT and connectivity with configurable retry resilience. Returns status 'ok' if all
+    relays are healthy, 'degraded' if some are unreachable, 'error' if relays config is invalid,
     or 'empty' if no relays configured.
     """
     relays, err = get_active_relays()
@@ -998,7 +1007,7 @@ async def check_relays_health(_: bool = Depends(verify_api_key)) -> Dict[str, An
             "relays": [],
         }
 
-    tasks = [_probe_single_relay(r) for r in relays]
+    tasks = [_probe_single_relay(r, timeout=timeout, retries=retries) for r in relays]
     results = await asyncio.gather(*tasks)
     all_healthy = all(r["healthy"] for r in results)
     return {
