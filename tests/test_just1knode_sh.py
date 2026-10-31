@@ -586,6 +586,7 @@ exit 0
         self.assertIn("net.ipv6.conf.default.disable_ipv6 = 1", content)
         self.assertIn("net.ipv6.conf.lo.disable_ipv6 = 1", content)
         self.assertIn("net.ipv4.icmp_echo_ignore_all = 1", content)
+        self.assertIn("net.mptcp.enabled = 0", content)
         self.assertIn("net.ipv4.tcp_tw_reuse = 1", content)
         self.assertIn("net.ipv4.tcp_fin_timeout = 15", content)
         self.assertIn("net.core.somaxconn = 65535", content)
