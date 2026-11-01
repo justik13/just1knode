@@ -1625,12 +1625,11 @@ main_menu() {
             echo -e "  ${BOLD}[5]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
             echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-10]: " choice
+            read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
                 1) manage_relays_menu; read -rp "Нажмите Enter для продолжения...";;
@@ -1640,9 +1639,8 @@ main_menu() {
                 5) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
                 6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
                 7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1688,13 +1686,12 @@ main_menu() {
             echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
             echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[10]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[11]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[8]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-11]: " choice
+            read -rp "Выберите действие [0-10]: " choice
 
             case "$choice" in
                 1)
@@ -1755,10 +1752,9 @@ main_menu() {
                 5) show_status; read -rp "Нажмите Enter для продолжения...";;
                 6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
                 7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                10) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                11) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                8) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1851,11 +1847,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                             uninstall_relay_component "${3:-}"
                         fi
                         ;;
-                    remove|del|remove-origin|del-origin)
-                        if [[ "$(get_state_val "role")" == "relay" && -z "${3:-}" ]]; then
-                            uninstall_relay_component "${3:-}"
-                        else
+                    remove|del)
+                        if [[ "$(get_state_val "role")" == "origin" ]]; then
                             remove_relay_node "${3:-}"
+                        else
+                            error "Команда 'relay remove <код_узла>' предназначена для выполнения на сервере Origin. Для удаления компонента Relay на текущем узле используйте: just1knode relay uninstall"
                         fi
                         ;;
                     add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;

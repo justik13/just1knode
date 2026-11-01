@@ -1338,9 +1338,9 @@ manage_relays_menu() {
                 echo -e "\nВставьте команду, которую выдал Relay-сервер при установке:"
                 read -rp "> " paste_cmd
                 if [[ -n "$paste_cmd" ]]; then
-                    local eval_args
-                    eval_args=$(python3 -c "
-import shlex, sys, json
+                    local parsed_args=()
+                    mapfile -t parsed_args < <(python3 -c "
+import shlex, sys
 cmd = sys.argv[1].strip()
 try:
     tokens = shlex.split(cmd)
@@ -1369,14 +1369,15 @@ try:
         elif len(tokens) > 5:
             sni = tokens[5] if tokens[5] != '-' else ''
             badge = tokens[6] if len(tokens) > 6 else ''
-        print(' '.join(shlex.quote(x) for x in [name, ip, port, uuid, code, sec, pk, sid, sni, badge]))
+        for item in [name, ip, port, uuid, code, sec, pk, sid, sni, badge]:
+            print(item)
     else:
         sys.exit(1)
 except Exception:
     sys.exit(1)
 " "$paste_cmd" 2>/dev/null || true)
-                    if [[ -n "$eval_args" ]]; then
-                        eval "add_relay_node $eval_args"
+                    if [[ ${#parsed_args[@]} -ge 5 ]]; then
+                        add_relay_node "${parsed_args[@]}"
                     else
                         error "Не удалось распознать аргументы команды. Проверьте формат строки."
                     fi
