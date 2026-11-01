@@ -1,6 +1,6 @@
 import tempfile
 from pathlib import Path
-from app import ClientStore
+from client_store import ClientStore
 
 
 def test_client_store_persistence():
@@ -28,3 +28,5 @@ def test_client_store_persistence():
         assert uuid1 not in clients_after
         assert uuid2 in clients_after
         assert len(clients_after) == 1
+
+

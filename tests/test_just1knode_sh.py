@@ -506,9 +506,13 @@ exit 0
         with open(xray_config_file, "r", encoding="utf-8") as f:
             updated = json.load(f)
 
-        # 1. Check UseIPv4
+        # 1. Check UseIPv4 via streamSettings.sockopt and legacy settings cleaned
         direct_ob = next(ob for ob in updated["outbounds"] if ob["tag"] == "just1k-wl-direct")
-        self.assertEqual(direct_ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
+        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
 
         # 2. Check direct routing rule updated with domain:2ip.ru and inbound-de
         direct_rule = next(
@@ -913,6 +917,21 @@ socket.getaddrinfo = _mock_gai
         self.assertNotIn('/tmp/xray_update.zip', core_sh)
         self.assertNotIn('/tmp/xray_new', core_sh)
 
+    def test_update_xray_core_skips_when_version_matches(self):
+        """Verify update_xray_core checks current binary version and skips re-downloading if already pinned."""
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        self.assertIn('current_ver="$($XRAY_BIN version 2>/dev/null | awk \'NR==1 {print $2}\')"', core_sh)
+        self.assertIn('[[ $force_update -eq 0 && -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]', core_sh)
+
+    def test_relay_and_origin_atomic_writes_and_sniffing(self):
+        """Verify atomic file writes via tempfile.mkstemp and sniffing routeOnly=False on relays."""
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", origin_sh)
+        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", relay_sh)
+        self.assertIn("'routeOnly': False", relay_sh)
+        self.assertIn("sniff['routeOnly'] = False", relay_sh)
+
     def test_configure_safe_ufw_verifies_status_active(self):
         """Verify configure_safe_ufw checks ufw status active before logging successful activation."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
@@ -1137,6 +1156,24 @@ print("RECONCILE_SUCCESS")
             "just1k-wl-direct", tags, "Namespaced just1k-wl-direct outbound must be added"
         )
         self.assertIn("just1k-wl-block", tags, "Namespaced just1k-wl-block outbound must be added")
+        self.assertIn("just1k-wl-api", tags, "Namespaced just1k-wl-api blackhole outbound must be added")
+
+        for r in cfg.get("routing", {}).get("rules", []):
+            in_tags = r.get("inboundTag", [])
+            in_tags_list = in_tags if isinstance(in_tags, list) else [in_tags]
+            self.assertNotIn("just1k-wl-inbounds", in_tags_list, "Phantom tag just1k-wl-inbounds must not exist in routing rules")
+
+        direct_ob = next(ob for ob in cfg["outbounds"] if ob["tag"] == "direct")
+        self.assertEqual(
+            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
+        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
+        wl_direct = next(ob for ob in cfg["outbounds"] if ob["tag"] == "just1k-wl-direct")
+        self.assertEqual(
+            wl_direct.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
 
     # -------------------------------------------------------------------------
     # F05: Zero-Collateral Preservation of Custom Inbound Tags
@@ -1247,7 +1284,7 @@ exit 0
     def test_update_xray_fail_closed_rollback(self):
         self._prepare_base_env()
         xray_bin = self.bin_dir / "xray"
-        xray_bin.write_text("#!/bin/sh\necho 'Xray 26.10.31'\nexit 0\n", encoding="utf-8")
+        xray_bin.write_text("#!/bin/sh\necho 'Xray 25.1.0'\nexit 0\n", encoding="utf-8")
         xray_bin.chmod(0o755)
 
         # Mock download_and_verify_xray using python zipfile
@@ -3148,6 +3185,13 @@ remove_traffic_watchdog_timer
         self.assertIn("ensure_xray_config_permissions \"${XRAY_CONFIG:-/usr/local/etc/xray/config.json}\"", state_sh)
         self.assertIn("r['outboundTag'] = 'just1k-wl-direct'", relays_manage_sh)
 
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
+        self.assertIn('chmod 644 "$amnezia_nginx"', relay_sh)
+
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn('core|xray) shift 2; update_xray_core "$@" ;;', just1knode_sh)
+
     def test_xray_api_service_unit_has_partof_and_update_node_syncs_it(self):
         """Verify xray-api.service has PartOf=xray.service, start limit resilience, and ensure_xray_api_healthy."""
         service_file = (REPO_ROOT / "scripts" / "xray_api" / "xray-api.service").read_text(encoding="utf-8")
@@ -3744,6 +3788,24 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
         self.assertIn("just1k-amnezia.conf", common_sh)
+        self.assertIn("timeout=5.0", just1knode_sh)
+        self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
+
+        # 5. Outbound TLS fingerprint invariants (strict Firefox standard PR #438)
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn("'fingerprint': 'firefox'", origin_sh)
+        self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
+        self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
+        self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
+
+        # 6. Freedom outbound sockopt domainStrategy invariants (Xray PR #6058)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", origin_sh)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", relays_manage_sh)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", relay_sh)
+        self.assertNotIn("'protocol': 'freedom',\n        'settings': {'domainStrategy'", origin_sh)
+        self.assertNotIn("'protocol': 'freedom', 'settings': {'domainStrategy'", relay_sh)
 
     def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
         """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
@@ -4013,6 +4075,7 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("c['flow'] = 'xtls-rprx-vision'", relay_sh)
         self.assertIn("if tag in ('api-in', 'just1k-wl-api-grpc'):", relay_sh)
         self.assertIn("ib.pop('sniffing', None)", relay_sh)
+        self.assertIn("is_managed = (", relay_sh)
 
         # Functional validation of the exact normalization logic
         cfg = {
@@ -4042,6 +4105,24 @@ with open(path, 'w', encoding='utf-8') as f:
                     "port": 10086,
                     "protocol": "dokodemo-door",
                     "sniffing": {"enabled": True},
+                },
+                {
+                    "tag": "custom-inbound-sniff",
+                    "port": 20001,
+                    "protocol": "shadowsocks",
+                    "sniffing": {"enabled": True, "destOverride": ["fakedns"], "routeOnly": True},
+                },
+                {
+                    "tag": "custom-inbound-nosniff",
+                    "port": 20002,
+                    "protocol": "shadowsocks",
+                },
+                None,
+                {
+                    "tag": "inbound-reality",
+                    "port": 443,
+                    "protocol": "vless",
+                    "sniffing": None,
                 },
             ]
         }
@@ -4082,11 +4163,27 @@ with open(path, 'w', encoding='utf-8') as f:
             relay_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
             for c in relay_ib["settings"]["clients"]:
                 self.assertEqual(c["flow"], "xtls-rprx-vision")
+            self.assertTrue(relay_ib["sniffing"]["enabled"])
+            self.assertFalse(relay_ib["sniffing"]["routeOnly"])
+            self.assertEqual(relay_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
 
             grpc_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
             api_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "api-in")
             self.assertNotIn("sniffing", grpc_ib)
             self.assertNotIn("sniffing", api_ib)
+
+            custom_sniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "custom-inbound-sniff")
+            self.assertTrue(custom_sniff_ib["sniffing"]["enabled"])
+            self.assertTrue(custom_sniff_ib["sniffing"]["routeOnly"])
+            self.assertEqual(custom_sniff_ib["sniffing"]["destOverride"], ["fakedns"])
+
+            custom_nosniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "custom-inbound-nosniff")
+            self.assertNotIn("sniffing", custom_nosniff_ib)
+
+            reality_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "inbound-reality")
+            self.assertTrue(reality_ib["sniffing"]["enabled"])
+            self.assertFalse(reality_ib["sniffing"]["routeOnly"])
+            self.assertEqual(reality_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
 
             # Test branch: empty clients with tunnel_uuid populated
             cfg_empty = {

@@ -161,13 +161,29 @@ class EpochManager:
 
         return False
 
+    def _find_xray_process(self) -> Tuple[Optional[int], Optional[int]]:
+        """Alias for get_xray_process_info for backwards compatibility."""
+        return self.get_xray_process_info()
+
     def get_xray_process_info(self) -> Tuple[Optional[int], Optional[int]]:
         """
         Finds the running xray process and extracts (pid, starttime).
-        Reads /proc filesystem directly, with fallback to pidfiles when /proc
-        is mounted with hidepid=2 or permissions are restricted.
+        Fast path checks self._last_pid first, then pidfiles, then /proc scan.
         Returns (pid, starttime) or (None, None) if not running.
         """
+        # 0. Fast path: check self._last_pid first without scanning /proc
+        if self._last_pid is None:
+            saved = self.load_state()
+            if isinstance(saved.get("xray_pid"), int):
+                self._last_pid = saved["xray_pid"]
+                self._last_starttime = saved.get("xray_starttime")
+
+        if self._last_pid is not None and self._is_xray_process(self._last_pid):
+            starttime = self._read_proc_stat(self._last_pid)
+            if starttime is not None:
+                self._last_starttime = starttime
+                return self._last_pid, starttime
+
         # 1. Check known pidfiles first (handles hidepid=2 and container sandboxes)
         pidfile_candidates = [
             Path("/run/xray/xray.pid"),
@@ -184,18 +200,24 @@ class EpochManager:
                         if self._is_xray_process(candidate_pid):
                             starttime = self._read_proc_stat(candidate_pid)
                             if starttime is not None:
+                                self._last_pid = candidate_pid
+                                self._last_starttime = starttime
                                 return candidate_pid, starttime
                 except Exception as e:
                     logger.debug("Error checking pidfile %s: %s", pf, e)
 
         proc_dir = Path("/proc")
         if not proc_dir.exists() or not proc_dir.is_dir():
+            self._last_pid = None
+            self._last_starttime = None
             return None, None
 
         try:
             entries = list(proc_dir.iterdir())
         except (PermissionError, OSError) as e:
             logger.debug("Cannot iterate /proc (possibly hidepid): %s", e)
+            self._last_pid = None
+            self._last_starttime = None
             return None, None
 
         for entry in entries:
@@ -207,6 +229,8 @@ class EpochManager:
                     continue
                 starttime = self._read_proc_stat(pid)
                 if starttime is not None:
+                    self._last_pid = pid
+                    self._last_starttime = starttime
                     return pid, starttime
             except (ProcessLookupError, PermissionError):
                 continue
@@ -214,6 +238,8 @@ class EpochManager:
                 logger.debug("Error inspecting /proc/%s: %s", pid, e)
                 continue
 
+        self._last_pid = None
+        self._last_starttime = None
         return None, None
 
     def get_last_known_epoch(self) -> Optional[str]:

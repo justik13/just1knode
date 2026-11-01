@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
@@ -867,6 +868,18 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     elif running_epoch:
         sync_active_users_with_epoch(running_epoch)
 
+    disk_usage_info: Dict[str, Any] = {}
+    try:
+        total, used, free = shutil.disk_usage("/")
+        disk_usage_info = {
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
+            "used_percent": round((used / total) * 100, 1) if total > 0 else 0.0,
+        }
+    except Exception as e:
+        logger.debug("Failed to read disk usage: %s", e)
+
     return {
         "status": "ok" if is_running else "error",
         "xray_running": is_running,
@@ -887,6 +900,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "sync_status": node_sync_state.get("status", "unsynchronized"),
         "synchronized": node_sync_state.get("status") == "synchronized",
         "last_synced_at": node_sync_state.get("last_synced_at"),
+        "disk_usage": disk_usage_info,
     }
 
 

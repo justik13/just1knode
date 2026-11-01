@@ -909,7 +909,7 @@ run_doctor() {
         auto_heal_relays_registry
         local relay_probe_res
         relay_probe_res=$(python3 -c "
-import json, socket, sys, os
+import json, socket, sys, os, time
 rf = sys.argv[1]
 if os.path.exists(rf):
     try:
@@ -922,21 +922,36 @@ if os.path.exists(rf):
             ip = r.get('ip', '')
             port = int(r.get('port', 10443))
             if not ip: continue
-            try:
-                s = socket.create_connection((ip, port), timeout=3)
-                s.close()
-                print(f'OK\t{name}\t{code}\t{ip}\t{port}')
-            except Exception as e:
-                print(f'FAIL\t{name}\t{code}\t{ip}\t{port}\t{e}')
+            last_err = None
+            rtt_ms = None
+            for attempt in range(3):
+                t0 = time.perf_counter()
+                try:
+                    s = socket.create_connection((ip, port), timeout=5.0)
+                    rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
+                    s.close()
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    if attempt < 2:
+                        time.sleep(0.5)
+            if last_err is None and rtt_ms is not None:
+                print(f'OK\t{name}\t{code}\t{ip}\t{port}\t{rtt_ms}')
+            else:
+                print(f'FAIL\t{name}\t{code}\t{ip}\t{port}\t{last_err}')
     except Exception as e:
         print(f'ERROR\t{e}')
 " "$RELAYS_FILE" 2>/dev/null || true)
         if [[ -n "$relay_probe_res" ]]; then
-            while IFS=$'\t' read -r status name code ip port err; do
+            while IFS=$'\t' read -r status name code ip port val; do
                 if [[ "$status" == "OK" ]]; then
-                    echo -e "  ${GREEN}✔${NC} Relay '$name' ($code: $ip:$port) доступен по сети"
+                    echo -e "  ${GREEN}✔${NC} Relay '$name' ($code: $ip:$port) доступен (RTT: ${val}ms)"
                 elif [[ "$status" == "FAIL" ]]; then
-                    echo -e "  ${RED}✗${NC} Relay '$name' ($code: $ip:$port) НЕ ОТВЕЧАЕТ (${err:-timeout})!"
+                    echo -e "  ${RED}✗${NC} Relay '$name' ($code: $ip:$port) НЕ ОТВЕЧАЕТ (${val:-timeout})!"
+                    failed=$((failed + 1))
+                elif [[ "$status" == "ERROR" ]]; then
+                    echo -e "  ${RED}✗${NC} Ошибка проверки реестра релеев: $name"
                     failed=$((failed + 1))
                 fi
             done <<< "$relay_probe_res"
@@ -1904,7 +1919,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             update)
                 case "${2:-}" in
-                    core|xray) update_xray_core ;;
+                    core|xray) shift 2; update_xray_core "$@" ;;
                     config|heal) heal_node_config ;;
                     *) update_node "${2:-all}" ;;
                 esac
