@@ -1,6 +1,6 @@
 import tempfile
 from pathlib import Path
-from app import ClientStore
+from client_store import ClientStore
 
 
 def test_client_store_persistence():
@@ -51,3 +51,32 @@ def test_epoch_manager_find_xray_process_fast_path():
             mock_is_xray.assert_called_once_with(4321)
             mock_read_stat.assert_called_once_with(4321)
             mock_iterdir.assert_not_called()
+
+
+def test_epoch_manager_find_xray_process_fallback_when_stale():
+    from unittest.mock import patch, MagicMock
+    from epoch_manager import EpochManager
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        em = EpochManager(
+            file_path=str(Path(tmpdir) / "epoch.json"),
+            lock_path=str(Path(tmpdir) / "epoch.lock"),
+        )
+        em._last_pid = 4321
+        em._last_starttime = 99999
+
+        mock_p1 = MagicMock()
+        mock_p1.is_dir.return_value = True
+        mock_p1.name = "5555"
+
+        with patch.object(em, "_is_xray_process", side_effect=lambda p: p == 5555), \
+             patch.object(em, "_read_proc_stat", side_effect=lambda p: 12345 if p == 5555 else None), \
+             patch("pathlib.Path.iterdir", return_value=[mock_p1]), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.is_dir", return_value=True):
+            pid, starttime = em._find_xray_process()
+            assert pid == 5555
+            assert starttime == 12345
+            assert em._last_pid == 5555
+            assert em._last_starttime == 12345
+

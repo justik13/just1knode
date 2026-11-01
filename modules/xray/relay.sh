@@ -1864,7 +1864,7 @@ for ib in cfg.get('inbounds', []):
         continue
     sniff = ib.setdefault('sniffing', {})
     sniff['enabled'] = True
-    sniff.setdefault('destOverride', ['tls', 'http', 'quic'])
+    sniff['destOverride'] = ['tls', 'http', 'quic']
     sniff['routeOnly'] = False
     sniff.setdefault('metadataOnly', False)
 

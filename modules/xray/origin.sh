@@ -411,10 +411,17 @@ security_rules = [
 for s_idx, s_rule in enumerate(security_rules):
     rules.insert(s_idx, s_rule)
 
+client_inbounds = [
+    ib.get('tag') for ib in inbounds
+    if ib.get('tag') == 'just1k-wl-default' or str(ib.get('tag', '')).startswith('just1k-wl-inbound-')
+]
+if 'just1k-wl-default' not in client_inbounds:
+    client_inbounds.append('just1k-wl-default')
+
 # Split-Routing: прямой выход в Рунет с московского IP Origin-сервера
 rules.append({
     'type': 'field',
-    'inboundTag': ['just1k-wl-default'],
+    'inboundTag': client_inbounds,
     'domain': [
         'geosite:category-ru',
         'geosite:tld-ru',
