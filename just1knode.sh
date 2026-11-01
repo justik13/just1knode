@@ -1919,7 +1919,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             update)
                 case "${2:-}" in
-                    core|xray) update_xray_core ;;
+                    core|xray) shift 2; update_xray_core "$@" ;;
                     config|heal) heal_node_config ;;
                     *) update_node "${2:-all}" ;;
                 esac

@@ -641,6 +641,7 @@ with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     os.fsync(f.fileno())
 os.replace(t_path, path)
 " "$amnezia_nginx" 2>/dev/null || true
+            chmod 644 "$amnezia_nginx" 2>/dev/null || true
 
             if python3 -c "
 import re, sys
@@ -2376,6 +2377,7 @@ try:
 except Exception:
     pass
 " "$amnezia_nginx" 2>/dev/null || true
+        chmod 644 "$amnezia_nginx" 2>/dev/null || true
     fi
     if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || true
@@ -2483,6 +2485,7 @@ if os.path.exists(cfg_file):
     except Exception:
         pass
 " "$XRAY_CONFIG" 2>/dev/null || true
+        ensure_xray_config_permissions "$XRAY_CONFIG"
     fi
 
     if command -v ufw >/dev/null 2>&1; then
