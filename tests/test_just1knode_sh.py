@@ -921,7 +921,7 @@ socket.getaddrinfo = _mock_gai
         """Verify update_xray_core checks current binary version and skips re-downloading if already pinned."""
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         self.assertIn('current_ver="$($XRAY_BIN version 2>/dev/null | awk \'NR==1 {print $2}\')"', core_sh)
-        self.assertIn('[[ -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]', core_sh)
+        self.assertIn('[[ $force_update -eq 0 && -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]', core_sh)
 
     def test_relay_and_origin_atomic_writes_and_sniffing(self):
         """Verify atomic file writes via tempfile.mkstemp and sniffing routeOnly=False on relays."""
@@ -1284,7 +1284,7 @@ exit 0
     def test_update_xray_fail_closed_rollback(self):
         self._prepare_base_env()
         xray_bin = self.bin_dir / "xray"
-        xray_bin.write_text("#!/bin/sh\necho 'Xray 26.10.31'\nexit 0\n", encoding="utf-8")
+        xray_bin.write_text("#!/bin/sh\necho 'Xray 25.1.0'\nexit 0\n", encoding="utf-8")
         xray_bin.chmod(0o755)
 
         # Mock download_and_verify_xray using python zipfile

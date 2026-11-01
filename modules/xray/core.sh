@@ -86,7 +86,12 @@ update_xray_core() {
     current_ver="$($XRAY_BIN version 2>/dev/null | awk 'NR==1 {print $2}')"
     log "Текущая версия Xray: ${current_ver:-не установлена}"
 
-    if [[ -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]; then
+    local force_update=0
+    if [[ "${1:-}" == "--force" || "${1:-}" == "-f" || "${FORCE:-}" == "1" ]]; then
+        force_update=1
+    fi
+
+    if [[ $force_update -eq 0 && -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]; then
         log "Ядро Xray уже обновлено до версии ${current_ver}. Обновление не требуется."
         return 0
     fi
