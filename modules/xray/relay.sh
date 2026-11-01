@@ -602,7 +602,7 @@ limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;
 EOF
             fi
             python3 -c "
-import re, sys
+import re, sys, os, tempfile
 path = sys.argv[1]
 with open(path, 'r', encoding='utf-8') as f:
     content = f.read()
@@ -632,8 +632,14 @@ for i, part in enumerate(parts):
     new_parts.append(part)
 
 new_content = ''.join(new_parts)
-with open(path, 'w', encoding='utf-8') as f:
+d = os.path.dirname(os.path.abspath(path))
+os.makedirs(d, exist_ok=True)
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     f.write(new_content)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(t_path, path)
 " "$amnezia_nginx" 2>/dev/null || true
 
             if python3 -c "
@@ -1671,6 +1677,11 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                     'alpn': ['h2', 'http/1.1'],
                     'certificates': [{'certificateFile': tls_cert_file, 'keyFile': tls_key_file}]
                 }
+            },
+            'sniffing': {
+                'enabled': True,
+                'destOverride': ['tls', 'http', 'quic'],
+                'routeOnly': False
             }
         }
         inbounds.insert(0, relay_ib)
@@ -1698,6 +1709,11 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                     'keyFile': tls_key_file
                 }
             ]
+        }
+        relay_ib['sniffing'] = {
+            'enabled': True,
+            'destOverride': ['tls', 'http', 'quic'],
+            'routeOnly': False
         }
 
     has_vless_flag = sys.argv[3] if len(sys.argv) > 3 else '0'
@@ -1735,7 +1751,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'sniffing': {
                     'enabled': True,
                     'destOverride': ['tls', 'http', 'quic'],
-                    'metadataOnly': False
+                    'routeOnly': False
                 }
             }
             inbounds.append(direct_ib)
@@ -1758,6 +1774,11 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                         'keyFile': target_vless_key
                     }
                 ]
+            }
+            direct_ib['sniffing'] = {
+                'enabled': True,
+                'destOverride': ['tls', 'http', 'quic'],
+                'routeOnly': False
             }
     else:
         if direct_ib:
@@ -1844,6 +1865,7 @@ for ib in cfg.get('inbounds', []):
     sniff = ib.setdefault('sniffing', {})
     sniff['enabled'] = True
     sniff.setdefault('destOverride', ['tls', 'http', 'quic'])
+    sniff['routeOnly'] = False
     sniff.setdefault('metadataOnly', False)
 
 cfg['dns'] = {
@@ -2337,14 +2359,20 @@ uninstall_vless_component() {
     local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
     if [[ "$cur_has_r_init" != "1" && -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
         python3 -c "
-import re, sys
+import re, sys, os, tempfile
 p = sys.argv[1]
 try:
     with open(p, 'r', encoding='utf-8') as f:
         c = f.read()
     c = re.sub(r'[ \t]*location\s+/v1/\s*\{[^}]*\}\n?', '', c)
-    with open(p, 'w', encoding='utf-8') as f:
+    d = os.path.dirname(os.path.abspath(p))
+    os.makedirs(d, exist_ok=True)
+    t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+    with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
         f.write(c)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(t_path, p)
 except Exception:
     pass
 " "$amnezia_nginx" 2>/dev/null || true
@@ -2437,15 +2465,21 @@ uninstall_relay_component() {
 
     if [[ -f "$XRAY_CONFIG" ]]; then
         python3 -c "
-import json, os, sys
+import json, os, sys, tempfile
 cfg_file = sys.argv[1]
 if os.path.exists(cfg_file):
     try:
         with open(cfg_file, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
         cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if ib.get('tag') not in ('inbound-tls', 'inbound-reality', 'from-origin')]
-        with open(cfg_file, 'w', encoding='utf-8') as f:
+        d = os.path.dirname(os.path.abspath(cfg_file))
+        os.makedirs(d, exist_ok=True)
+        t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+        with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(t_path, cfg_file)
     except Exception:
         pass
 " "$XRAY_CONFIG" 2>/dev/null || true

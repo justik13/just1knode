@@ -292,7 +292,7 @@ EOF
 
     log "Формирование конфигурации Xray Origin (Surgical Merge)..."
     python3 -c "
-import sys, json, os
+import sys, json, os, tempfile
 
 config_file = sys.argv[1]
 secret_path = sys.argv[2]
@@ -311,7 +311,7 @@ inbounds = [
 ]
 outbounds = [
     ob for ob in existing.get('outbounds', [])
-    if ob.get('tag') not in ('just1k-wl-direct', 'just1k-wl-block')
+    if ob.get('tag') not in ('just1k-wl-direct', 'just1k-wl-block', 'just1k-wl-api')
 ]
 existing_rules = existing.get('routing', {}).get('rules', [])
 rules = [
@@ -380,6 +380,12 @@ if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
         'settings': {'response': {'type': 'none'}}
     })
 
+if not any(ob.get('tag') == 'just1k-wl-api' for ob in outbounds):
+    outbounds.append({
+        'tag': 'just1k-wl-api',
+        'protocol': 'blackhole'
+    })
+
 security_rules = [
     {
         'type': 'field',
@@ -408,7 +414,7 @@ for s_idx, s_rule in enumerate(security_rules):
 # Split-Routing: прямой выход в Рунет с московского IP Origin-сервера
 rules.append({
     'type': 'field',
-    'inboundTag': ['just1k-wl-default', 'just1k-wl-inbounds'],
+    'inboundTag': ['just1k-wl-default'],
     'domain': [
         'geosite:category-ru',
         'geosite:tld-ru',
@@ -421,7 +427,7 @@ rules.append({
 })
 rules.append({
     'type': 'field',
-    'inboundTag': ['just1k-wl-default', 'just1k-wl-inbounds'],
+    'inboundTag': ['just1k-wl-default'],
     'ip': ['geoip:ru'],
     'outboundTag': 'just1k-wl-direct'
 })
@@ -478,8 +484,14 @@ final_config['routing'] = existing.get('routing', {})
 final_config['routing']['domainStrategy'] = existing.get('routing', {}).get('domainStrategy', 'IPIfNonMatch')
 final_config['routing']['rules'] = rules
 
-with open(config_file, 'w', encoding='utf-8') as f:
+d = os.path.dirname(os.path.abspath(config_file))
+os.makedirs(d, exist_ok=True)
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     json.dump(final_config, f, indent=2)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(t_path, config_file)
 " "$XRAY_CONFIG" "$secret_path"
 
     chown root:xrayapi "$XRAY_CONFIG" 2>/dev/null || true

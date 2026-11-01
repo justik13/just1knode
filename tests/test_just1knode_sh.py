@@ -917,6 +917,21 @@ socket.getaddrinfo = _mock_gai
         self.assertNotIn('/tmp/xray_update.zip', core_sh)
         self.assertNotIn('/tmp/xray_new', core_sh)
 
+    def test_update_xray_core_skips_when_version_matches(self):
+        """Verify update_xray_core checks current binary version and skips re-downloading if already pinned."""
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        self.assertIn('current_ver="$($XRAY_BIN version 2>/dev/null | awk \'NR==1 {print $2}\')"', core_sh)
+        self.assertIn('[[ -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]', core_sh)
+
+    def test_relay_and_origin_atomic_writes_and_sniffing(self):
+        """Verify atomic file writes via tempfile.mkstemp and sniffing routeOnly=False on relays."""
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", origin_sh)
+        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", relay_sh)
+        self.assertIn("'routeOnly': False", relay_sh)
+        self.assertIn("sniff['routeOnly'] = False", relay_sh)
+
     def test_configure_safe_ufw_verifies_status_active(self):
         """Verify configure_safe_ufw checks ufw status active before logging successful activation."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
@@ -1141,6 +1156,12 @@ print("RECONCILE_SUCCESS")
             "just1k-wl-direct", tags, "Namespaced just1k-wl-direct outbound must be added"
         )
         self.assertIn("just1k-wl-block", tags, "Namespaced just1k-wl-block outbound must be added")
+        self.assertIn("just1k-wl-api", tags, "Namespaced just1k-wl-api blackhole outbound must be added")
+
+        for r in cfg.get("routing", {}).get("rules", []):
+            in_tags = r.get("inboundTag", [])
+            in_tags_list = in_tags if isinstance(in_tags, list) else [in_tags]
+            self.assertNotIn("just1k-wl-inbounds", in_tags_list, "Phantom tag just1k-wl-inbounds must not exist in routing rules")
 
         direct_ob = next(ob for ob in cfg["outbounds"] if ob["tag"] == "direct")
         self.assertEqual(

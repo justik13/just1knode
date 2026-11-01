@@ -65,6 +65,7 @@ def test_auth_enforcement():
             assert "services" in data
             assert "capabilities" in data
             assert "vless_domain" in data
+            assert "disk_usage" in data
 
 
 def test_sub_path_prefix_resolution(tmp_path):
