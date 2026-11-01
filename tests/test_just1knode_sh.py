@@ -3766,10 +3766,18 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 5. Outbound TLS fingerprint invariants (strict Firefox standard PR #438)
         origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn("'fingerprint': 'firefox'", origin_sh)
         self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
+
+        # 6. Freedom outbound sockopt domainStrategy invariants (Xray PR #6058)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", origin_sh)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", relays_manage_sh)
+        self.assertIn("['domainStrategy'] = 'UseIPv4'", relay_sh)
+        self.assertNotIn("'protocol': 'freedom',\n        'settings': {'domainStrategy'", origin_sh)
+        self.assertNotIn("'protocol': 'freedom', 'settings': {'domainStrategy'", relay_sh)
 
     def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
         """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""

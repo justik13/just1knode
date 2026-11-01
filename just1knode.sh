@@ -950,6 +950,9 @@ if os.path.exists(rf):
                 elif [[ "$status" == "FAIL" ]]; then
                     echo -e "  ${RED}✗${NC} Relay '$name' ($code: $ip:$port) НЕ ОТВЕЧАЕТ (${val:-timeout})!"
                     failed=$((failed + 1))
+                elif [[ "$status" == "ERROR" ]]; then
+                    echo -e "  ${RED}✗${NC} Ошибка проверки реестра релеев: $name"
+                    failed=$((failed + 1))
                 fi
             done <<< "$relay_probe_res"
         else
