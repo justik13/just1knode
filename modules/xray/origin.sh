@@ -365,8 +365,13 @@ if not any(ob.get('tag') == 'just1k-wl-direct' for ob in outbounds):
     outbounds.append({
         'tag': 'just1k-wl-direct',
         'protocol': 'freedom',
-        'settings': {'domainStrategy': 'UseIPv4'}
+        'streamSettings': {'sockopt': {'domainStrategy': 'UseIPv4'}}
     })
+
+for ob in outbounds:
+    if ob.get('protocol') == 'freedom':
+        ob.get('settings', {}).pop('domainStrategy', None)
+        ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
 if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
     outbounds.append({
@@ -1072,14 +1077,16 @@ outbounds = cfg.setdefault('outbounds', [])
 # 1.1. just1k-wl-direct (freedom, UseIPv4)
 direct_ob = next((ob for ob in outbounds if ob.get('tag') == 'just1k-wl-direct'), None)
 if not direct_ob:
-    direct_ob = {'tag': 'just1k-wl-direct', 'protocol': 'freedom', 'settings': {}}
+    direct_ob = {'tag': 'just1k-wl-direct', 'protocol': 'freedom'}
     outbounds.insert(0, direct_ob)
-direct_ob.setdefault('settings', {})['domainStrategy'] = 'UseIPv4'
+direct_ob.get('settings', {}).pop('domainStrategy', None)
+direct_ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
 # 1.2. Принудительный UseIPv4 на всех freedom outbounds
 for ob in outbounds:
     if ob.get('protocol') == 'freedom':
-        ob.setdefault('settings', {})['domainStrategy'] = 'UseIPv4'
+        ob.get('settings', {}).pop('domainStrategy', None)
+        ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
 # 1.3. just1k-wl-block (blackhole)
 if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
@@ -1130,10 +1137,18 @@ for r in relays:
                     'security': 'tls',
                     'tlsSettings': {
                         'serverName': r_sni or r_ip,
+                        'fingerprint': 'firefox',
+                        'alpn': ['h2', 'http/1.1'],
                         'allowInsecure': False
                     }
                 }
             })
+    else:
+        st = r_ob.setdefault('streamSettings', {})
+        if st.get('security') == 'tls':
+            tls = st.setdefault('tlsSettings', {})
+            tls['fingerprint'] = 'firefox'
+            tls['alpn'] = ['h2', 'http/1.1']
 
 # 2. INBOUNDS: гарантия наличия базовых инбаундов и правильный sniffing
 inbounds = cfg.setdefault('inbounds', [])

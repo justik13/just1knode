@@ -1066,8 +1066,10 @@ print('[]')
     {
       "tag": "direct",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "UseIPv4"
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIPv4"
+        }
       }
     },
     {
@@ -1798,7 +1800,8 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
 
 for ob in cfg.get('outbounds', []):
     if ob.get('tag') == 'direct' or ob.get('protocol') == 'freedom':
-        ob.setdefault('settings', {})['domainStrategy'] = 'UseIPv4'
+        ob.get('settings', {}).pop('domainStrategy', None)
+        ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
 has_block = any(ob.get('tag') == 'block' for ob in cfg.get('outbounds', []))
 if not has_block:
@@ -2069,7 +2072,7 @@ if not cfg:
         },
         'inbounds': [],
         'outbounds': [
-            {'tag': 'direct', 'protocol': 'freedom', 'settings': {'domainStrategy': 'UseIPv4'}},
+            {'tag': 'direct', 'protocol': 'freedom', 'streamSettings': {'sockopt': {'domainStrategy': 'UseIPv4'}}},
             {'tag': 'block', 'protocol': 'blackhole'},
             {'tag': 'api', 'protocol': 'blackhole'}
         ],

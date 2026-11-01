@@ -422,7 +422,7 @@ stream_settings = {
     'security': 'tls',
     'tlsSettings': {
         'serverName': r_sni if r_sni else r_ip,
-        'fingerprint': 'chrome',
+        'fingerprint': 'firefox',
         'alpn': ['h2', 'http/1.1']
     }
 }
@@ -514,7 +514,8 @@ cfg['routing']['rules'] = rules
 
 for ob in cfg.get('outbounds', []):
     if ob.get('tag') == 'just1k-wl-direct' or ob.get('protocol') == 'freedom':
-        ob.setdefault('settings', {})['domainStrategy'] = 'UseIPv4'
+        ob.get('settings', {}).pop('domainStrategy', None)
+        ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
 dns_conf = dict(cfg.get('dns', {}))
 dns_conf['servers'] = [
@@ -1190,7 +1191,7 @@ st['security'] = 'tls'
 st.pop('realitySettings', None)
 st['tlsSettings'] = {
     'serverName': new_sni,
-    'fingerprint': 'chrome',
+    'fingerprint': 'firefox',
     'alpn': ['h2', 'http/1.1']
 }
 

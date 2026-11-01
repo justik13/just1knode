@@ -506,9 +506,13 @@ exit 0
         with open(xray_config_file, "r", encoding="utf-8") as f:
             updated = json.load(f)
 
-        # 1. Check UseIPv4
+        # 1. Check UseIPv4 via streamSettings.sockopt and legacy settings cleaned
         direct_ob = next(ob for ob in updated["outbounds"] if ob["tag"] == "just1k-wl-direct")
-        self.assertEqual(direct_ob["settings"]["domainStrategy"], "UseIPv4")
+        self.assertEqual(
+            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
+        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
 
         # 2. Check direct routing rule updated with domain:2ip.ru and inbound-de
         direct_rule = next(
@@ -1137,6 +1141,18 @@ print("RECONCILE_SUCCESS")
             "just1k-wl-direct", tags, "Namespaced just1k-wl-direct outbound must be added"
         )
         self.assertIn("just1k-wl-block", tags, "Namespaced just1k-wl-block outbound must be added")
+
+        direct_ob = next(ob for ob in cfg["outbounds"] if ob["tag"] == "direct")
+        self.assertEqual(
+            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
+        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
+        wl_direct = next(ob for ob in cfg["outbounds"] if ob["tag"] == "just1k-wl-direct")
+        self.assertEqual(
+            wl_direct.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
+            "UseIPv4",
+        )
 
     # -------------------------------------------------------------------------
     # F05: Zero-Collateral Preservation of Custom Inbound Tags
@@ -3744,6 +3760,16 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
         self.assertIn("just1k-amnezia.conf", common_sh)
+        self.assertIn("timeout=5.0", just1knode_sh)
+        self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
+
+        # 5. Outbound TLS fingerprint invariants (strict Firefox standard PR #438)
+        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        self.assertIn("'fingerprint': 'firefox'", origin_sh)
+        self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
+        self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
+        self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
 
     def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
         """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
