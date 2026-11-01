@@ -787,7 +787,7 @@ install_xray_relay_node() {
     local relay_port="${1:-}"
     local origin_ip="${2:-}"
     local dest_server="${3:-}"
-    local sec_mode="${4:-tls}"
+    local sec_mode="tls"
 
     # Интерактивный опросник, если аргументы не переданы
     if [[ -z "$relay_port" ]]; then
