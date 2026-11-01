@@ -4075,6 +4075,7 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("c['flow'] = 'xtls-rprx-vision'", relay_sh)
         self.assertIn("if tag in ('api-in', 'just1k-wl-api-grpc'):", relay_sh)
         self.assertIn("ib.pop('sniffing', None)", relay_sh)
+        self.assertIn("is_managed = (", relay_sh)
 
         # Functional validation of the exact normalization logic
         cfg = {
@@ -4104,6 +4105,17 @@ with open(path, 'w', encoding='utf-8') as f:
                     "port": 10086,
                     "protocol": "dokodemo-door",
                     "sniffing": {"enabled": True},
+                },
+                {
+                    "tag": "custom-inbound-sniff",
+                    "port": 20001,
+                    "protocol": "shadowsocks",
+                    "sniffing": {"enabled": True, "destOverride": ["fakedns"], "routeOnly": True},
+                },
+                {
+                    "tag": "custom-inbound-nosniff",
+                    "port": 20002,
+                    "protocol": "shadowsocks",
                 },
             ]
         }
@@ -4144,11 +4156,22 @@ with open(path, 'w', encoding='utf-8') as f:
             relay_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
             for c in relay_ib["settings"]["clients"]:
                 self.assertEqual(c["flow"], "xtls-rprx-vision")
+            self.assertTrue(relay_ib["sniffing"]["enabled"])
+            self.assertFalse(relay_ib["sniffing"]["routeOnly"])
+            self.assertEqual(relay_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
 
             grpc_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
             api_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "api-in")
             self.assertNotIn("sniffing", grpc_ib)
             self.assertNotIn("sniffing", api_ib)
+
+            custom_sniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "custom-inbound-sniff")
+            self.assertTrue(custom_sniff_ib["sniffing"]["enabled"])
+            self.assertTrue(custom_sniff_ib["sniffing"]["routeOnly"])
+            self.assertEqual(custom_sniff_ib["sniffing"]["destOverride"], ["fakedns"])
+
+            custom_nosniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "custom-inbound-nosniff")
+            self.assertNotIn("sniffing", custom_nosniff_ib)
 
             # Test branch: empty clients with tunnel_uuid populated
             cfg_empty = {

@@ -1863,11 +1863,19 @@ for ib in cfg.get('inbounds', []):
     if tag in ('api-in', 'just1k-wl-api-grpc'):
         ib.pop('sniffing', None)
         continue
-    sniff = ib.setdefault('sniffing', {})
-    sniff['enabled'] = True
-    sniff['destOverride'] = ['tls', 'http', 'quic']
-    sniff['routeOnly'] = False
-    sniff.setdefault('metadataOnly', False)
+    is_managed = (
+        tag in ('inbound-tls', 'just1k-vless-direct', 'inbound-reality', 'from-origin')
+        or tag.startswith('just1k-')
+        or tag.startswith('inbound-')
+    )
+    if is_managed:
+        sniff = ib.setdefault('sniffing', {})
+        sniff['enabled'] = True
+        sniff['destOverride'] = ['tls', 'http', 'quic']
+        sniff['routeOnly'] = False
+        sniff.setdefault('metadataOnly', False)
+    elif 'sniffing' in ib and isinstance(ib['sniffing'], dict):
+        ib['sniffing'].setdefault('enabled', True)
 
 cfg['dns'] = {
     'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'],
