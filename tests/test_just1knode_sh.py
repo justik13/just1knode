@@ -3185,6 +3185,13 @@ remove_traffic_watchdog_timer
         self.assertIn("ensure_xray_config_permissions \"${XRAY_CONFIG:-/usr/local/etc/xray/config.json}\"", state_sh)
         self.assertIn("r['outboundTag'] = 'just1k-wl-direct'", relays_manage_sh)
 
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
+        self.assertIn('chmod 644 "$amnezia_nginx"', relay_sh)
+
+        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn('core|xray) shift 2; update_xray_core "$@" ;;', just1knode_sh)
+
     def test_xray_api_service_unit_has_partof_and_update_node_syncs_it(self):
         """Verify xray-api.service has PartOf=xray.service, start limit resilience, and ensure_xray_api_healthy."""
         service_file = (REPO_ROOT / "scripts" / "xray_api" / "xray-api.service").read_text(encoding="utf-8")
