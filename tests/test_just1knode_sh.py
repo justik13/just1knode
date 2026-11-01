@@ -4117,6 +4117,13 @@ with open(path, 'w', encoding='utf-8') as f:
                     "port": 20002,
                     "protocol": "shadowsocks",
                 },
+                None,
+                {
+                    "tag": "inbound-reality",
+                    "port": 443,
+                    "protocol": "vless",
+                    "sniffing": None,
+                },
             ]
         }
 
@@ -4170,8 +4177,13 @@ with open(path, 'w', encoding='utf-8') as f:
             self.assertTrue(custom_sniff_ib["sniffing"]["routeOnly"])
             self.assertEqual(custom_sniff_ib["sniffing"]["destOverride"], ["fakedns"])
 
-            custom_nosniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "custom-inbound-nosniff")
+            custom_nosniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "custom-inbound-nosniff")
             self.assertNotIn("sniffing", custom_nosniff_ib)
+
+            reality_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "inbound-reality")
+            self.assertTrue(reality_ib["sniffing"]["enabled"])
+            self.assertFalse(reality_ib["sniffing"]["routeOnly"])
+            self.assertEqual(reality_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
 
             # Test branch: empty clients with tunnel_uuid populated
             cfg_empty = {

@@ -1659,7 +1659,8 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
     relay_port = int(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].isdigit() else 10443
     tunnel_uuid = sys.argv[6] if len(sys.argv) > 6 else ''
 
-    inbounds = cfg.setdefault('inbounds', [])
+    cfg['inbounds'] = [ib for ib in cfg.get('inbounds', []) if isinstance(ib, dict)]
+    inbounds = cfg['inbounds']
     relay_ib = next((ib for ib in inbounds if ib.get('tag') in ('inbound-reality', 'inbound-tls', 'from-origin') or ib.get('port') in (10443, relay_port)), None)
 
     if has_relay_flag == '1' and not relay_ib and tunnel_uuid:
@@ -1859,6 +1860,8 @@ if not has_smtp_port:
     })
 
 for ib in cfg.get('inbounds', []):
+    if not isinstance(ib, dict):
+        continue
     tag = str(ib.get('tag', '')).strip().lower()
     if tag in ('api-in', 'just1k-wl-api-grpc'):
         ib.pop('sniffing', None)
@@ -1869,7 +1872,9 @@ for ib in cfg.get('inbounds', []):
         or tag.startswith('inbound-')
     )
     if is_managed:
-        sniff = ib.setdefault('sniffing', {})
+        if not isinstance(ib.get('sniffing'), dict):
+            ib['sniffing'] = {}
+        sniff = ib['sniffing']
         sniff['enabled'] = True
         sniff['destOverride'] = ['tls', 'http', 'quic']
         sniff['routeOnly'] = False
