@@ -499,7 +499,7 @@ run_doctor() {
         if [[ "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray-api")
         fi
-        if [[ "$cur_has_a" == "1" || -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]]; then
+        if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
             services_to_check+=("amnezia-api" "nginx")
         elif [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
             services_to_check+=("xray")
