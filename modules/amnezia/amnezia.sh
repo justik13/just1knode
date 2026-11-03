@@ -351,6 +351,14 @@ install_amnezia_node() {
         return 1
     fi
 
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${YELLOW}! ВНИМАНИЕ: ПРОТОКОЛ AMNEZIAWG ВЫВЕДЕН ИЗ ЭКСПЛУАТАЦИИ В ПРОДЕ${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "С 27.10.2026 протокол AmneziaWG выведен из продакшена из-за массовых"
+    echo -e "блокировок IP со стороны ТСПУ РКН. Рекомендуется использовать VLESS:"
+    echo -e "  just1knode install vless"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}\n"
+
     local target_container
     target_container="$(detect_amnezia_container)"
 
@@ -1386,6 +1394,13 @@ uninstall_amnezia_component() {
         else
             log_warn "Docker демон недоступен, удаление контейнеров AmneziaWG пропущено."
         fi
+    fi
+
+    # Удаление интерфейса ядра awg0
+    if ip link show awg0 >/dev/null 2>&1; then
+        log "Остановка и удаление сетевого интерфейса awg0..."
+        ip link set awg0 down 2>/dev/null || true
+        ip link delete awg0 2>/dev/null || true
     fi
 
     local awg_dir="${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}"
