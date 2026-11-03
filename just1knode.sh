@@ -1645,11 +1645,11 @@ main_menu() {
             read -rp "Выберите действие [0-5]: " choice
 
             case "$choice" in
-                1) install_xray_origin_node; read -rp "Нажмите Enter для продолжения...";;
-                2) install_xray_relay_node; read -rp "Нажмите Enter для продолжения...";;
-                3) install_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                4) install_vless_direct_node; read -rp "Нажмите Enter для продолжения...";;
-                5) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                1) install_xray_origin_node || true; read -rp "Нажмите Enter для продолжения...";;
+                2) install_xray_relay_node || true; read -rp "Нажмите Enter для продолжения...";;
+                3) install_amnezia_node || true; read -rp "Нажмите Enter для продолжения...";;
+                4) install_vless_direct_node || true; read -rp "Нажмите Enter для продолжения...";;
+                5) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1677,15 +1677,15 @@ main_menu() {
             read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
-                1) manage_relays_menu; read -rp "Нажмите Enter для продолжения...";;
-                2) show_status; read -rp "Нажмите Enter для продолжения...";;
-                3) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                4) show_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                5) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
-                6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                1) manage_relays_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                2) show_status || true; read -rp "Нажмите Enter для продолжения...";;
+                3) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                4) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                5) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                6) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1748,12 +1748,12 @@ main_menu() {
                         echo "[0] Назад"
                         read -rp "Выбор [0-3]: " v_choice
                         case "$v_choice" in
-                            1) show_vless_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                            2) setup_vless_domain; read -rp "Нажмите Enter для продолжения...";;
-                            3) uninstall_vless_component; read -rp "Нажмите Enter для продолжения...";;
+                            1) show_vless_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                            2) setup_vless_domain || true; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_vless_component || true; read -rp "Нажмите Enter для продолжения...";;
                         esac
                     else
-                        install_vless_direct_node
+                        install_vless_direct_node || true
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
@@ -1766,12 +1766,12 @@ main_menu() {
                         echo "[0] Назад"
                         read -rp "Выбор [0-3]: " a_choice
                         case "$a_choice" in
-                            1) show_amnezia_bot_credentials; read -rp "Нажмите Enter для продолжения...";;
-                            2) backup_amnezia_node; read -rp "Нажмите Enter для продолжения...";;
-                            3) uninstall_amnezia_component; read -rp "Нажмите Enter для продолжения...";;
+                            1) show_amnezia_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                            2) backup_amnezia_node || true; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_amnezia_component || true; read -rp "Нажмите Enter для продолжения...";;
                         esac
                     else
-                        install_amnezia_node
+                        install_amnezia_node || true
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
@@ -1784,22 +1784,22 @@ main_menu() {
                         echo "[0] Назад"
                         read -rp "Выбор [0-3]: " r_choice
                         case "$r_choice" in
-                            1) show_relay_credentials; read -rp "Нажмите Enter для продолжения...";;
-                            2) setup_relay_domain; read -rp "Нажмите Enter для продолжения...";;
-                            3) uninstall_relay_component; read -rp "Нажмите Enter для продолжения...";;
+                            1) show_relay_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                            2) setup_relay_domain || true; read -rp "Нажмите Enter для продолжения...";;
+                            3) uninstall_relay_component || true; read -rp "Нажмите Enter для продолжения...";;
                         esac
                     else
-                        install_xray_relay_node
+                        install_xray_relay_node || true
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
-                4) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
-                5) show_status; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                4) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                5) show_status || true; read -rp "Нажмите Enter для продолжения...";;
+                6) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                8) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                9) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                10) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
