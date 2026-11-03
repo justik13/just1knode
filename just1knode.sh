@@ -486,10 +486,7 @@ run_doctor() {
     elif [[ "$role" == "relay" ]]; then
         services_to_check+=("xray")
     elif [[ "$role" == "vless" ]]; then
-        services_to_check+=("xray" "xray-api")
-        if systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]; then
-            services_to_check+=("nginx")
-        fi
+        services_to_check+=("xray" "nginx" "xray-api")
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
     elif [[ "$role" == "node" ]]; then
@@ -498,9 +495,9 @@ run_doctor() {
         fi
         if [[ "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray-api")
-        fi
-        if [[ "$cur_has_v" == "1" ]] && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]); then
-            services_to_check+=("nginx")
+            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
+                services_to_check+=("nginx")
+            fi
         fi
         if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
             services_to_check+=("amnezia-api")
@@ -1192,7 +1189,7 @@ reset_node() {
     systemctl disable xray xray-api amnezia-api 2>/dev/null || true
     remove_traffic_watchdog_timer
     remove_amnezia_abuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1382,6 +1379,10 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-enabled/just1k-amnezia.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-available/just1k-amnezia.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-enabled/just1k-vless-api.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-available/just1k-vless-api.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-available/just1k-fallback80.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
