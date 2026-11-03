@@ -1379,7 +1379,8 @@ except Exception:
                     if [[ ${#parsed_args[@]} -ge 5 ]]; then
                         add_relay_node "${parsed_args[@]}"
                     else
-                        error "Не удалось распознать аргументы команды. Проверьте формат строки."
+                        warn "Не удалось распознать аргументы команды. Проверьте формат строки."
+                        read -rp "Нажмите Enter для возврата в меню..."
                     fi
                 fi
             elif [[ "$add_mode" == "2" ]]; then
