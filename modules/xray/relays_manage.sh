@@ -1338,9 +1338,9 @@ manage_relays_menu() {
                 echo -e "\nВставьте команду, которую выдал Relay-сервер при установке:"
                 read -rp "> " paste_cmd
                 if [[ -n "$paste_cmd" ]]; then
-                    local eval_args
-                    eval_args=$(python3 -c "
-import shlex, sys, json
+                    local parsed_args=()
+                    mapfile -t parsed_args < <(python3 -c "
+import shlex, sys
 cmd = sys.argv[1].strip()
 try:
     tokens = shlex.split(cmd)
@@ -1369,16 +1369,18 @@ try:
         elif len(tokens) > 5:
             sni = tokens[5] if tokens[5] != '-' else ''
             badge = tokens[6] if len(tokens) > 6 else ''
-        print(' '.join(shlex.quote(x) for x in [name, ip, port, uuid, code, sec, pk, sid, sni, badge]))
+        for item in [name, ip, port, uuid, code, sec, pk, sid, sni, badge]:
+            print(item)
     else:
         sys.exit(1)
 except Exception:
     sys.exit(1)
 " "$paste_cmd" 2>/dev/null || true)
-                    if [[ -n "$eval_args" ]]; then
-                        eval "add_relay_node $eval_args"
+                    if [[ ${#parsed_args[@]} -ge 5 ]]; then
+                        add_relay_node "${parsed_args[@]}"
                     else
-                        error "Не удалось распознать аргументы команды. Проверьте формат строки."
+                        warn "Не удалось распознать аргументы команды. Проверьте формат строки."
+                        read -rp "Нажмите Enter для возврата в меню..."
                     fi
                 fi
             elif [[ "$add_mode" == "2" ]]; then
@@ -1395,7 +1397,11 @@ except Exception:
                 local r_sni=""
                 read -rp "TLS Домен / SNI Relay-ноды (например: ${r_code}.yourdomain.com): " r_sni_in
                 r_sni="$r_sni_in"
-                if [[ -z "$r_sni" ]]; then error "Домен SNI обязателен для TLS."; return 1; fi
+                if [[ -z "$r_sni" ]]; then
+                    warn "Домен SNI обязателен для TLS."
+                    read -rp "Нажмите Enter для возврата в меню..."
+                    return 0
+                fi
                 read -rp "Бейдж узла в INCY (например: ⚡ Зарубежный узел, Enter по умолчанию): " r_badge
                 add_relay_node "$r_name" "$r_ip" "$r_port" "$r_uuid" "$r_code" "$r_sec" "$r_pubkey" "$r_shortid" "$r_sni" "$r_badge"
             fi

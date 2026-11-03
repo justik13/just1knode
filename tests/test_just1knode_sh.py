@@ -3867,7 +3867,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
     def test_setup_xray_api_proxy_warn_and_return_error(self):
         """Verify setup_xray_api_proxy warns and returns 1 on failure instead of exit 1 via error()."""
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        api_proxy_code = relay_sh.split('setup_xray_api_proxy() {')[1].split('setup_dual_xray_api()')[0]
+        api_proxy_code = relay_sh.split('setup_xray_api_proxy() {')[1].split('install_xray_relay_node()')[0]
         self.assertNotIn('error "Служба xray-api не смогла запуститься', api_proxy_code)
         self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси', api_proxy_code)
         self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API', api_proxy_code)

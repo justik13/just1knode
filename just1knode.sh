@@ -486,10 +486,7 @@ run_doctor() {
     elif [[ "$role" == "relay" ]]; then
         services_to_check+=("xray")
     elif [[ "$role" == "vless" ]]; then
-        services_to_check+=("xray" "xray-api")
-        if systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]; then
-            services_to_check+=("nginx")
-        fi
+        services_to_check+=("xray" "nginx" "xray-api")
     elif [[ "$role" == "awg" ]]; then
         services_to_check+=("amnezia-api" "nginx")
     elif [[ "$role" == "node" ]]; then
@@ -498,11 +495,17 @@ run_doctor() {
         fi
         if [[ "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray-api")
+            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
+                services_to_check+=("nginx")
+            fi
         fi
-        if [[ "$cur_has_a" == "1" || ("$cur_has_r" == "0" && "$cur_has_v" == "0") ]]; then
-            services_to_check+=("amnezia-api" "nginx")
-        elif [[ "$cur_has_v" == "1" ]] && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/sites-available/just1k-vless-api.conf ]]); then
-            services_to_check+=("nginx")
+        if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
+            services_to_check+=("amnezia-api")
+            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
+                services_to_check+=("nginx")
+            fi
+        elif [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
+            services_to_check+=("xray")
         fi
     fi
     for srv in "${services_to_check[@]}"; do
@@ -1146,10 +1149,28 @@ if os.path.exists(rf):
 reset_node() {
     title "СБРОС И ПЕРЕУСТАНОВКА УЗЛА"
     check_root
-    warn "ВНИМАНИЕ! Это действие остановит службы и очистит конфигурации just1knode."
-    read -rp "Вы уверены, что хотите сбросить узел? (введите 'yes' для подтверждения): " confirm
-    if [[ "$confirm" != "yes" ]]; then
-        info "Сброс отменен."
+
+    echo ""
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${YELLOW}⚠️  ВНИМАНИЕ: СБРОС И ПЕРЕУСТАНОВКА УЗЛА JUST1KNODE${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "Вы собираетесь сбросить конфигурацию узла в исходное состояние (Clean Slate)."
+    echo ""
+    echo -e "${BOLD}Что произойдет:${NC}"
+    echo -e "  1. ${BOLD}Защитный бэкап:${NC} автоматическое сохранение текущего состояния в /var/backups/just1knode/"
+    echo -e "  2. ${BOLD}Системные службы:${NC} остановка и отключение xray, xray-api, amnezia-api"
+    echo -e "  3. ${BOLD}Конфигурация узла:${NC} очистка /etc/just1knode (роль, релеи, state.json)"
+    echo -e "  4. ${BOLD}Веб-сервер Nginx:${NC} удаление хостов just1knode, восстановление дефолтного сайта"
+    echo -e "  5. ${BOLD}Сохранение системы:${NC} утилита just1knode, ядро Xray и системные пакеты НЕ удаляются"
+    echo ""
+    echo -e "${BOLD}${YELLOW}⚠️  СЕРВЕР ПЕРЕСТАНЕТ ПРИНИМАТЬ ТРАФИК ДО ПОВТОРНОЙ НАСТРОЙКИ РОЛИ!${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    local confirm=""
+    read -rp "Вы уверены, что хотите сбросить узел? (введите 'yes' или 'СБРОСИТЬ' для подтверждения, Enter для отмены): " confirm
+    if [[ "$confirm" != "yes" && "$confirm" != "СБРОСИТЬ" ]]; then
+        info "Сброс отменен пользователем."
         return
     fi
 
@@ -1168,7 +1189,7 @@ reset_node() {
     systemctl disable xray xray-api amnezia-api 2>/dev/null || true
     remove_traffic_watchdog_timer
     remove_amnezia_abuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1358,6 +1379,10 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-enabled/just1k-amnezia.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-available/just1k-amnezia.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-enabled/just1k-vless-api.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-available/just1k-vless-api.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/sites-available/just1k-fallback80.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
@@ -1625,12 +1650,11 @@ main_menu() {
             echo -e "  ${BOLD}[5]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
             echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-10]: " choice
+            read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
                 1) manage_relays_menu; read -rp "Нажмите Enter для продолжения...";;
@@ -1640,9 +1664,8 @@ main_menu() {
                 5) set_origin_bot_ip; read -rp "Нажмите Enter для продолжения...";;
                 6) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
                 7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1688,13 +1711,12 @@ main_menu() {
             echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
             echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚡ Обновить ядро Xray-core"
-            echo -e "  ${BOLD}[9]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[10]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[11]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[8]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-11]: " choice
+            read -rp "Выберите действие [0-10]: " choice
 
             case "$choice" in
                 1)
@@ -1755,10 +1777,9 @@ main_menu() {
                 5) show_status; read -rp "Нажмите Enter для продолжения...";;
                 6) run_doctor; read -rp "Нажмите Enter для продолжения...";;
                 7) update_node "all" "1"; read -rp "Нажмите Enter для продолжения...";;
-                8) update_xray_core; read -rp "Нажмите Enter для продолжения...";;
-                9) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
-                10) reset_node; read -rp "Нажмите Enter для продолжения...";;
-                11) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
+                8) manage_traffic_limit_menu; read -rp "Нажмите Enter для продолжения...";;
+                9) reset_node; read -rp "Нажмите Enter для продолжения...";;
+                10) uninstall_node; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1851,11 +1872,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                             uninstall_relay_component "${3:-}"
                         fi
                         ;;
-                    remove|del|remove-origin|del-origin)
-                        if [[ "$(get_state_val "role")" == "relay" && -z "${3:-}" ]]; then
-                            uninstall_relay_component "${3:-}"
-                        else
+                    remove|del)
+                        if [[ "$(get_state_val "role")" == "origin" ]]; then
                             remove_relay_node "${3:-}"
+                        else
+                            error "Команда 'relay remove <код_узла>' предназначена для выполнения на сервере Origin. Для удаления компонента Relay на текущем узле используйте: just1knode relay uninstall"
                         fi
                         ;;
                     add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;

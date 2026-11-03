@@ -769,10 +769,6 @@ EOF
     fi
 }
 
-setup_dual_xray_api() {
-    setup_xray_api_proxy "$@"
-}
-
 install_xray_relay_node() {
     title "УСТАНОВКА RELAY УЗЛА (Белый Интернет — Выход VLESS)"
     check_root
@@ -791,7 +787,7 @@ install_xray_relay_node() {
     local relay_port="${1:-}"
     local origin_ip="${2:-}"
     local dest_server="${3:-}"
-    local sec_mode="${4:-}"
+    local sec_mode="tls"
 
     # Интерактивный опросник, если аргументы не переданы
     if [[ -z "$relay_port" ]]; then
@@ -821,8 +817,6 @@ install_xray_relay_node() {
 
     local my_ip
     my_ip="$(get_public_ipv4 || true)"
-
-    local sec_mode="tls"
 
     if [[ -z "$dest_server" ]]; then
         local auto_domain=""
