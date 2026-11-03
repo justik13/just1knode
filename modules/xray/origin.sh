@@ -130,6 +130,9 @@ install_xray_origin_node() {
         return 1
     fi
 
+    install_base_deps
+    apply_node_sysctl_hardening
+
     local domain="${1:-}"
     local email="${2:-}"
     local api_key="${3:-}"
@@ -247,9 +250,6 @@ install_xray_origin_node() {
     if ! validate_fqdn "$bot_domain"; then
         error "BOT_DOMAIN должен быть доменным именем (FQDN) с доверенным SSL-сертификатом, а не IP-адресом или недопустимым хостом: '$bot_domain'"
     fi
-
-    install_base_deps
-    apply_node_sysctl_hardening
 
     if [[ -n "$bot_domain" ]]; then
         info "Проверка связи с ботом по HTTPS (https://${bot_domain}/sub/wl/ping)..."

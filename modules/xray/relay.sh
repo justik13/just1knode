@@ -781,6 +781,9 @@ install_xray_relay_node() {
         return 1
     fi
 
+    install_base_deps
+    apply_node_sysctl_hardening
+
     local relay_port="${1:-}"
     local origin_ip="${2:-}"
     local dest_server="${3:-}"
@@ -917,9 +920,6 @@ if cands:
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
         return 1
     fi
-
-    install_base_deps
-    apply_node_sysctl_hardening
 
     # Выпуск SSL сертификата (Zero-Signature: порт 80 открывается только на время ACME-челленджа)
     if ! issue_relay_tls_cert "$dest_server"; then
@@ -2027,6 +2027,10 @@ install_vless_direct_node() {
         return 1
     fi
 
+    install_base_deps
+    install_nginx_if_missing
+    apply_node_sysctl_hardening
+
     local dest_server="${1:-}"
     local bot_ip="${2:-${BOT_IP:-}}"
     local my_ip
@@ -2101,10 +2105,6 @@ if cands:
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
         return 1
     fi
-
-    install_base_deps
-    install_nginx_if_missing
-    apply_node_sysctl_hardening
 
     if [[ -z "$bot_ip" ]]; then
         local saved_bip
