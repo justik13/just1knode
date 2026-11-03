@@ -48,10 +48,10 @@ except Exception as e:
 " "$domain" "$expected_ip" 2>/dev/null || true)
 
         if [[ "$dns_res" == "CYRILLIC" ]]; then
-            error "Домен '$domain' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+            warn "Домен '$domain' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
             return 1
         elif [[ "$dns_res" == "INVALID_FQDN" ]]; then
-            error "Некорректный формат домена: '$domain'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)."
+            warn "Некорректный формат домена: '$domain'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)."
             return 1
         elif echo "$dns_res" | grep -q "^INVALID_EXPECTED|"; then
             local bad_exp="${dns_res#INVALID_EXPECTED|}"
@@ -84,7 +84,7 @@ except Exception as e:
             case "${retry_choice:-1}" in
                 1) sleep 5; continue ;;
                 2) log "Проверка DNS пропущена по выбору пользователя."; return 0 ;;
-                *) error "Настройка отменена."; return 1 ;;
+                *) warn "Настройка отменена."; return 1 ;;
             esac
         else
             if [[ -n "$expected_ip" ]]; then
@@ -777,12 +777,9 @@ install_xray_relay_node() {
     local prev_role
     prev_role="$(get_node_status)"
     if [[ "$prev_role" == "origin" ]]; then
-        error "Узел уже настроен как Origin. Установка Relay на Origin запрещена (контуры строго изолированы)."
+        warn "Узел уже настроен как Origin. Установка Relay на Origin запрещена (контуры строго изолированы)."
         return 1
     fi
-
-    install_base_deps
-    apply_node_sysctl_hardening
 
     local relay_port="${1:-}"
     local origin_ip="${2:-}"
@@ -791,28 +788,45 @@ install_xray_relay_node() {
 
     # Интерактивный опросник, если аргументы не переданы
     if [[ -z "$relay_port" ]]; then
-        read -rp "Порт туннеля Relay [по умолчанию: 10443]: " relay_port_in || true
-        relay_port="${relay_port_in:-10443}"
-    fi
-    if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
-        error "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}')."
-        return 1
-    fi
-    if [[ "$relay_port" == "443" ]]; then
-        error "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
-        return 1
-    fi
-    if is_ssh_port "$relay_port"; then
-        error "Порт ${relay_port} занят службой SSH. Запрещено использовать порт SSH для Relay туннеля."
-        return 1
+        while true; do
+            read -rp "Порт туннеля Relay [по умолчанию: 10443, 0 для отмены]: " relay_port_in || true
+            relay_port_in="$(echo "$relay_port_in" | tr -d '[:space:]')"
+            if [[ "$relay_port_in" == "0" || "$relay_port_in" == "q" || "$relay_port_in" == "Q" ]]; then
+                warn "Настройка Relay отменена."
+                return 1
+            fi
+            relay_port="${relay_port_in:-10443}"
+            if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
+                warn "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}'). Попробуйте еще раз."
+                continue
+            fi
+            if [[ "$relay_port" == "443" ]]; then
+                warn "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
+                continue
+            fi
+            if is_ssh_port "$relay_port"; then
+                warn "Порт ${relay_port} занят службой SSH. Запрещено использовать порт SSH для Relay туннеля."
+                continue
+            fi
+            break
+        done
     fi
 
     if [[ -z "$origin_ip" ]]; then
-        read -rp "Введите IP-адрес Origin-сервера в РФ (для защиты UFW): " origin_ip || true
-    fi
-    if [[ -z "$origin_ip" ]] || ! validate_ipv4 "$origin_ip"; then
-        error "IP-адрес Origin ('${origin_ip}') некорректен или пуст. Требуется валидный IPv4-адрес для настройки фаервола."
-        return 1
+        while true; do
+            read -rp "Введите IP-адрес Origin-сервера в РФ (или 0 для отмены): " origin_ip_in || true
+            origin_ip_in="$(echo "$origin_ip_in" | tr -d '[:space:]')"
+            if [[ "$origin_ip_in" == "0" || "$origin_ip_in" == "q" || "$origin_ip_in" == "Q" ]]; then
+                warn "Настройка Relay отменена."
+                return 1
+            fi
+            if [[ -z "$origin_ip_in" ]] || ! validate_ipv4 "$origin_ip_in"; then
+                warn "IP-адрес Origin ('${origin_ip_in}') некорректен или пуст. Требуется валидный IPv4-адрес. Попробуйте еще раз."
+                continue
+            fi
+            origin_ip="$origin_ip_in"
+            break
+        done
     fi
 
     local my_ip
@@ -849,18 +863,30 @@ if cands:
         echo -e "\n${BOLD}=== НАСТРОЙКА ДОМЕНА ДЛЯ СВЯЗИ ORIGIN ➔ RELAY (VLESS TLS) ===${NC}"
         echo -e "Для исключения блокировок ТСПУ по сверке SNI ➔ DNS (nDPI NDPI_UNRESOLVED_HOSTNAME)"
         echo -e "релей настраивается на вашем собственном домене с чистым сертификатом Let's Encrypt."
-        if [[ -n "$auto_domain" ]]; then
-            echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
-            read -rp "Использовать этот домен [Enter = ${auto_domain}]: " dest_in || true
-            dest_server="${dest_in:-$auto_domain}"
-        else
-            echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-relay.yourdomain.com ➔ ${my_ip}${NC}\n"
-            read -rp "Введите домен Relay (например: your-relay.yourdomain.com): " dest_in || true
-            dest_server="${dest_in:-}"
-        fi
+        while true; do
+            if [[ -n "$auto_domain" ]]; then
+                echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
+                read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in || true
+                dest_in="${dest_in:-$auto_domain}"
+            else
+                echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-relay.yourdomain.com ➔ ${my_ip}${NC}\n"
+                read -rp "Введите домен Relay (например: your-relay.yourdomain.com, или 0 для отмены): " dest_in || true
+            fi
+            dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+            if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
+                warn "Настройка Relay отменена."
+                return 1
+            fi
+            if [[ -z "$dest_in" ]]; then
+                warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            dest_server="$dest_in"
+            break
+        done
     fi
     if [[ -z "$dest_server" ]]; then
-        error "Домен Relay обязателен для режима VLESS TLS. Использование сторонних SNI запрещено."
+        warn "Домен Relay обязателен для режима VLESS TLS. Использование сторонних SNI запрещено."
         return 1
     fi
 
@@ -868,6 +894,9 @@ if cands:
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
         return 1
     fi
+
+    install_base_deps
+    apply_node_sysctl_hardening
 
     # Выпуск SSL сертификата (Zero-Signature: порт 80 открывается только на время ACME-челленджа)
     if ! issue_relay_tls_cert "$dest_server"; then
@@ -1427,13 +1456,25 @@ print('')
             echo -e "релей настраивается на вашем персональном домене с чистым сертификатом Let's Encrypt."
             echo -e "Создайте DNS A-запись (DNS-Only / без Cloudflare Proxy):"
             echo -e "  ${CYAN}your-relay.yourdomain.com ➔ ${my_ip}${NC}\n"
-            read -rp "Введите персональный домен для этого Relay (например: your-relay.yourdomain.com): " domain_in
-            domain="${domain_in:-}"
+            while true; do
+                read -rp "Введите персональный домен для этого Relay (например: your-relay.yourdomain.com, или 0 для отмены): " domain_in || true
+                domain_in="$(echo "$domain_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+                if [[ "$domain_in" == "0" || "$domain_in" == "q" || "$domain_in" == "Q" ]]; then
+                    warn "Смена домена Relay отменена."
+                    return 1
+                fi
+                if [[ -z "$domain_in" ]]; then
+                    warn "Домен Relay не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                    continue
+                fi
+                domain="$domain_in"
+                break
+            done
         fi
     fi
 
     if [[ -z "$domain" ]]; then
-        error "Домен Relay обязателен."
+        warn "Домен Relay обязателен."
         return 1
     fi
 
@@ -1954,13 +1995,9 @@ install_vless_direct_node() {
     local prev_role
     prev_role="$(get_node_status)"
     if [[ "$prev_role" == "origin" ]]; then
-        error "Узел уже настроен как Origin. Установка VLESS на Origin запрещена (Origin строго изолирован под Белый Интернет)."
+        warn "Узел уже настроен как Origin. Установка VLESS на Origin запрещена (Origin строго изолирован под Белый Интернет)."
         return 1
     fi
-
-    install_base_deps
-    install_nginx_if_missing
-    apply_node_sysctl_hardening
 
     local dest_server="${1:-}"
     local bot_ip="${2:-${BOT_IP:-}}"
@@ -1997,21 +2034,41 @@ if cands:
 
         echo -e "\n${BOLD}=== НАСТРОЙКА ДОМЕНА ДЛЯ VLESS TLS (ПОРТ 443) ===${NC}"
         echo -e "Для клиентских подключений VLESS TLS требуется персональный домен."
-        if [[ -n "$auto_domain" ]]; then
-            echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
-            read -rp "Использовать этот домен [Enter = ${auto_domain}]: " dest_in || true
-            dest_server="${dest_in:-$auto_domain}"
-        else
-            echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-vless.yourdomain.com ➔ ${my_ip}${NC}\n"
-            read -rp "Введите домен VLESS (например: your-vless.yourdomain.com): " dest_in || true
-            dest_server="${dest_in:-}"
-        fi
+        while true; do
+            if [[ -n "$auto_domain" ]]; then
+                echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
+                read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in || true
+                dest_in="${dest_in:-$auto_domain}"
+            else
+                echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-vless.yourdomain.com ➔ ${my_ip}${NC}\n"
+                read -rp "Введите домен VLESS (например: your-vless.yourdomain.com, или 0 для отмены): " dest_in || true
+            fi
+            dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+            if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
+                warn "Настройка VLESS TLS отменена."
+                return 1
+            fi
+            if [[ -z "$dest_in" ]]; then
+                warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            dest_server="$dest_in"
+            break
+        done
     fi
 
     if [[ -z "$dest_server" ]]; then
-        error "Домен обязателен для настройки VLESS TLS."
+        warn "Домен обязателен для настройки VLESS TLS."
         return 1
     fi
+
+    if ! validate_relay_dns "$dest_server" "$my_ip"; then
+        return 1
+    fi
+
+    install_base_deps
+    install_nginx_if_missing
+    apply_node_sysctl_hardening
 
     if [[ -z "$bot_ip" ]]; then
         local saved_bip
@@ -2037,10 +2094,6 @@ if cands:
         fi
     else
         warn "BOT_IP не указан или невалиден. API будет закрыт от внешнего мира в UFW (Fail-Closed)."
-    fi
-
-    if ! validate_relay_dns "$dest_server" "$my_ip"; then
-        return 1
     fi
 
     if ! issue_relay_tls_cert "$dest_server" "vless"; then
@@ -2311,18 +2364,30 @@ setup_vless_domain() {
         if [[ -n "$cur_dom" ]]; then
             echo -e "Текущий настроенный домен: ${BOLD}${CYAN}${cur_dom}${NC}"
         fi
-        if [[ -n "$auto_domain" && "$auto_domain" != "$cur_dom" ]]; then
-            echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
-            read -rp "Использовать этот домен [Enter = ${auto_domain}]: " dest_in || true
-            new_domain="${dest_in:-$auto_domain}"
-        else
-            read -rp "Введите новый домен VLESS (например: your-vless.domain.com): " dest_in || true
-            new_domain="${dest_in:-}"
-        fi
+        while true; do
+            if [[ -n "$auto_domain" && "$auto_domain" != "$cur_dom" ]]; then
+                echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
+                read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in || true
+                dest_in="${dest_in:-$auto_domain}"
+            else
+                read -rp "Введите новый домен VLESS (например: your-vless.domain.com, или 0 для отмены): " dest_in || true
+            fi
+            dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+            if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
+                warn "Смена домена VLESS TLS отменена."
+                return 1
+            fi
+            if [[ -z "$dest_in" ]]; then
+                warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            new_domain="$dest_in"
+            break
+        done
     fi
 
     if [[ -z "$new_domain" ]]; then
-        error "Домен обязателен для настройки VLESS TLS."
+        warn "Домен обязателен для настройки VLESS TLS."
         return 1
     fi
 
