@@ -142,28 +142,67 @@ install_xray_origin_node() {
     local bot_domain="${7:-${BOT_DOMAIN:-}}"
 
     # Интерактивный опросник параметров
-    if [[ -z "$domain" ]]; then
-        read -rp "Введите домен Origin-сервера (например: origin.example.com): " domain || true
+    if [[ -z "$domain" && -t 0 ]]; then
+        while true; do
+            if ! read -rp "Введите домен Origin-сервера (например: origin.example.com, или 0 для отмены): " domain_in; then
+                warn "Ввод прерван."
+                return 1
+            fi
+            domain_in="$(echo "$domain_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+            if [[ "$domain_in" == "0" || "$domain_in" == "q" || "$domain_in" == "Q" ]]; then
+                warn "Настройка Origin отменена."
+                return 1
+            fi
+            if [[ -z "$domain_in" ]]; then
+                warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            domain="$domain_in"
+            break
+        done
     fi
     if [[ -z "$domain" ]]; then error "Домен не может быть пустым."; fi
 
     if [[ -z "$cdn_domain" ]]; then
-        if [[ $# -eq 0 ]]; then
+        if [[ $# -eq 0 && -t 0 ]]; then
             read -rp "Введите домен Yandex Cloud CDN (CNAME) [по умолчанию: ${domain}]: " input_cdn || true
+            input_cdn="$(echo "$input_cdn" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
             cdn_domain="${input_cdn:-$domain}"
         else
             cdn_domain="$domain"
         fi
     fi
 
-    if [[ -z "$email" ]]; then
-        read -rp "Введите Email для SSL Let's Encrypt [по умолчанию: admin@${domain}]: " email || true
-        email="${email:-admin@${domain}}"
+    if [[ -z "$email" && -t 0 ]]; then
+        read -rp "Введите Email для SSL Let's Encrypt [по умолчанию: admin@${domain}]: " email_in || true
+        email_in="$(echo "$email_in" | tr -d '[:space:]')"
+        email="${email_in:-admin@${domain}}"
     fi
+    email="${email:-admin@${domain}}"
     if [[ -z "$email" ]]; then error "Email не может быть пустым."; fi
 
-    if [[ -z "$bot_ip" ]]; then
-        read -rp "Введите IP-адрес Telegram-бота (для защиты порта 8444): " bot_ip || true
+    if [[ -z "$bot_ip" && -t 0 ]]; then
+        while true; do
+            if ! read -rp "Введите IP-адрес Telegram-бота (для защиты порта 8444, или 0 для отмены): " input_bip; then
+                warn "Ввод прерван."
+                return 1
+            fi
+            input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
+            if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
+                warn "Настройка Origin отменена."
+                return 1
+            fi
+            if [[ -z "$input_bip" ]]; then
+                warn "BOT_IP не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            if ! validate_ipv4 "$input_bip"; then
+                warn "Недопустимый формат IP-адреса: '$input_bip' (ожидается валидный IPv4 адрес). Попробуйте еще раз."
+                continue
+            fi
+            bot_ip="$input_bip"
+            break
+        done
     fi
     if [[ -z "$bot_ip" ]]; then
         error "BOT_IP обязателен для безопасной настройки порта 8444."
@@ -174,12 +213,31 @@ install_xray_origin_node() {
         existing_bot_domain="$(get_state_val "bot_domain" 2>/dev/null || true)"
         if [[ -n "$existing_bot_domain" && ! "$existing_bot_domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$existing_bot_domain" != "localhost" ]]; then
             bot_domain="$existing_bot_domain"
-        else
+        elif [[ -t 0 ]]; then
             if [[ -n "$existing_bot_domain" ]]; then
                 warn "Обнаружено устаревшее значение bot_domain в state.json (IP: '$existing_bot_domain'). Для защищенного TLS-проксирования требуется FQDN."
             fi
-            read -rp "Введите домен Telegram-бота (например: bot.example.com): " input_bot_domain || true
-            bot_domain="${input_bot_domain:-}"
+            while true; do
+                if ! read -rp "Введите домен Telegram-бота (например: bot.example.com, или 0 для отмены): " input_bot_domain; then
+                    warn "Ввод прерван."
+                    return 1
+                fi
+                input_bot_domain="$(echo "$input_bot_domain" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
+                if [[ "$input_bot_domain" == "0" || "$input_bot_domain" == "q" || "$input_bot_domain" == "Q" ]]; then
+                    warn "Настройка Origin отменена."
+                    return 1
+                fi
+                if [[ -z "$input_bot_domain" ]]; then
+                    warn "BOT_DOMAIN не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                    continue
+                fi
+                if ! validate_fqdn "$input_bot_domain"; then
+                    warn "BOT_DOMAIN должен быть доменным именем (FQDN) с доверенным SSL-сертификатом, а не IP-адресом: '$input_bot_domain'. Попробуйте еще раз."
+                    continue
+                fi
+                bot_domain="$input_bot_domain"
+                break
+            done
         fi
     fi
 
@@ -933,8 +991,30 @@ set_origin_bot_ip() {
     fi
 
     local new_bot_ip="${1:-}"
-    if [[ -z "$new_bot_ip" ]]; then
-        read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}): " new_bot_ip || true
+    if [[ -z "$new_bot_ip" && -t 0 ]]; then
+        while true; do
+            if ! read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip; then
+                release_just1knode_lock
+                warn "Ввод прерван."
+                return 1
+            fi
+            input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
+            if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
+                release_just1knode_lock
+                warn "Настройка IP-адреса Telegram-бота отменена."
+                return 1
+            fi
+            if [[ -z "$input_bip" ]]; then
+                warn "IP-адрес не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            if ! validate_ipv4 "$input_bip"; then
+                warn "Недопустимый формат IP-адреса: '$input_bip' (ожидается валидный IPv4 адрес). Попробуйте еще раз."
+                continue
+            fi
+            new_bot_ip="$input_bip"
+            break
+        done
     fi
 
     new_bot_ip="$(echo "$new_bot_ip" | tr -d '[:space:]')"

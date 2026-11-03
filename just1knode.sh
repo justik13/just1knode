@@ -1561,13 +1561,31 @@ manage_traffic_limit_menu() {
     read -rp "Выберите действие [0-3]: " t_act
     case "$t_act" in
         1)
-            read -rp "Введите лимит трафика в ГБ (например: 8000 для 8 ТБ): " lim_in
-            read -rp "День месяца сброса биллинга у провайдера [по умолчанию: 1]: " day_in
+            local lim_in=""
+            if [[ -t 0 ]]; then
+                while true; do
+                    if ! read -rp "Введите лимит трафика в ГБ (например: 8000 для 8 ТБ, 0 для отмены): " lim_in; then
+                        warn "Ввод прерван."
+                        return
+                    fi
+                    lim_in="$(echo "$lim_in" | tr -d '[:space:]')"
+                    if [[ "$lim_in" == "0" || "$lim_in" == "q" || "$lim_in" == "Q" ]]; then
+                        warn "Настройка лимита трафика отменена."
+                        return
+                    fi
+                    if [[ -z "$lim_in" || ! "$lim_in" =~ ^[1-9][0-9]*$ ]]; then
+                        warn "Укажите корректный лимит трафика в ГБ (целое положительное число, например: 8000). Попробуйте еще раз."
+                        continue
+                    fi
+                    break
+                done
+            fi
+            read -rp "День месяца сброса биллинга у провайдера [по умолчанию: 1]: " day_in || true
             day_in="${day_in:-1}"
-            read -rp "Telegram Bot Token для уведомлений (опционально, Enter для пропуска): " tok_in
+            read -rp "Telegram Bot Token для уведомлений (опционально, Enter для пропуска): " tok_in || true
             local chat_in=""
             if [[ -n "$tok_in" ]]; then
-                read -rp "Telegram Chat ID администратора: " chat_in
+                read -rp "Telegram Chat ID администратора: " chat_in || true
             fi
             set_traffic_limit "$lim_in" "$day_in" "$tok_in" "$chat_in"
             ;;

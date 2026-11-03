@@ -275,6 +275,7 @@ set_traffic_limit() {
 
     if [[ -z "$limit_gb" || ! "$limit_gb" =~ ^[1-9][0-9]*$ ]]; then
         error "Укажите корректный лимит трафика в ГБ (целое положительное число, например: 8000)."
+        return 1
     fi
 
     if [[ ! "$reset_day" =~ ^[1-9][0-9]*$ ]] || (( reset_day < 1 || reset_day > 28 )); then
