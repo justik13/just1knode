@@ -1397,7 +1397,11 @@ except Exception:
                 local r_sni=""
                 read -rp "TLS Домен / SNI Relay-ноды (например: ${r_code}.yourdomain.com): " r_sni_in
                 r_sni="$r_sni_in"
-                if [[ -z "$r_sni" ]]; then error "Домен SNI обязателен для TLS."; return 1; fi
+                if [[ -z "$r_sni" ]]; then
+                    warn "Домен SNI обязателен для TLS."
+                    read -rp "Нажмите Enter для возврата в меню..."
+                    return 1
+                fi
                 read -rp "Бейдж узла в INCY (например: ⚡ Зарубежный узел, Enter по умолчанию): " r_badge
                 add_relay_node "$r_name" "$r_ip" "$r_port" "$r_uuid" "$r_code" "$r_sec" "$r_pubkey" "$r_shortid" "$r_sni" "$r_badge"
             fi

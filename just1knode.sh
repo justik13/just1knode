@@ -503,7 +503,10 @@ run_doctor() {
             services_to_check+=("nginx")
         fi
         if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
-            services_to_check+=("amnezia-api" "nginx")
+            services_to_check+=("amnezia-api")
+            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
+                services_to_check+=("nginx")
+            fi
         elif [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
             services_to_check+=("xray")
         fi
