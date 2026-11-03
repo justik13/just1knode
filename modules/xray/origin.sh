@@ -146,15 +146,24 @@ install_xray_origin_node() {
         while true; do
             if ! read -rp "Введите домен Origin-сервера (например: origin.example.com, или 0 для отмены): " domain_in; then
                 warn "Ввод прерван."
-                return 1
+                return 0
             fi
             domain_in="$(echo "$domain_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
             if [[ "$domain_in" == "0" || "$domain_in" == "q" || "$domain_in" == "Q" ]]; then
                 warn "Настройка Origin отменена."
-                return 1
+                return 0
             fi
             if [[ -z "$domain_in" ]]; then
                 warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            local dom_syntax
+            dom_syntax="$(check_domain_syntax "$domain_in")"
+            if [[ "$dom_syntax" == "CYRILLIC" ]]; then
+                warn "Домен '$domain_in' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+                continue
+            elif [[ "$dom_syntax" == "INVALID_FQDN" ]]; then
+                warn "Некорректный формат домена: '$domain_in'. Ожидается валидное имя FQDN (например: origin.example.com)."
                 continue
             fi
             domain="$domain_in"
@@ -185,12 +194,12 @@ install_xray_origin_node() {
         while true; do
             if ! read -rp "Введите IP-адрес Telegram-бота (для защиты порта 8444, или 0 для отмены): " input_bip; then
                 warn "Ввод прерван."
-                return 1
+                return 0
             fi
             input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
             if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
                 warn "Настройка Origin отменена."
-                return 1
+                return 0
             fi
             if [[ -z "$input_bip" ]]; then
                 warn "BOT_IP не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
@@ -220,12 +229,12 @@ install_xray_origin_node() {
             while true; do
                 if ! read -rp "Введите домен Telegram-бота (например: bot.example.com, или 0 для отмены): " input_bot_domain; then
                     warn "Ввод прерван."
-                    return 1
+                    return 0
                 fi
                 input_bot_domain="$(echo "$input_bot_domain" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                 if [[ "$input_bot_domain" == "0" || "$input_bot_domain" == "q" || "$input_bot_domain" == "Q" ]]; then
                     warn "Настройка Origin отменена."
-                    return 1
+                    return 0
                 fi
                 if [[ -z "$input_bot_domain" ]]; then
                     warn "BOT_DOMAIN не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
@@ -996,13 +1005,13 @@ set_origin_bot_ip() {
             if ! read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip; then
                 release_just1knode_lock
                 warn "Ввод прерван."
-                return 1
+                return 0
             fi
             input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
             if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
                 release_just1knode_lock
                 warn "Настройка IP-адреса Telegram-бота отменена."
-                return 1
+                return 0
             fi
             if [[ -z "$input_bip" ]]; then
                 warn "IP-адрес не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
@@ -1108,6 +1117,7 @@ heal_and_update_origin_config() {
     check_root
     init_state_dir
     acquire_just1knode_lock
+    trap release_just1knode_lock RETURN
 
     local role
     role="$(get_state_val "role")"

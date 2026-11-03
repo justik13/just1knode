@@ -13,7 +13,7 @@ validate_relay_dns() {
     fi
 
     while true; do
-        log "Проверка DNS A-записи домена $domain (ожидается IP: ${expected_ip:-текущий хост})..."
+        log "Проверка DNS A-записи домена $domain (ожидается IP: ${expected_ip:-текущий хост})..." >&2
         local dns_res
         dns_res=$(python3 -c "
 import socket, sys, re
@@ -48,43 +48,43 @@ except Exception as e:
 " "$domain" "$expected_ip" 2>/dev/null || true)
 
         if [[ "$dns_res" == "CYRILLIC" ]]; then
-            warn "Домен '$domain' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+            warn "Домен '$domain' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен." >&2
             return 1
         elif [[ "$dns_res" == "INVALID_FQDN" ]]; then
-            warn "Некорректный формат домена: '$domain'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)."
+            warn "Некорректный формат домена: '$domain'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)." >&2
             return 1
         elif echo "$dns_res" | grep -q "^INVALID_EXPECTED|"; then
             local bad_exp="${dns_res#INVALID_EXPECTED|}"
-            warn "Ожидаемый IP сервера '$bad_exp' не является валидным IPv4 адресом. Сверка DNS A-записи невозможна."
+            warn "Ожидаемый IP сервера '$bad_exp' не является валидным IPv4 адресом. Сверка DNS A-записи невозможна." >&2
         elif echo "$dns_res" | grep -q "^OK|"; then
             local resolved_ip="${dns_res#OK|}"
-            log "✔ DNS A-запись подтверждена: $domain ➔ $resolved_ip"
+            log "✔ DNS A-запись подтверждена: $domain ➔ $resolved_ip" >&2
             return 0
         elif echo "$dns_res" | grep -q "^MISMATCH|"; then
             local mismatch_ip="${dns_res#MISMATCH|}"
-            warn "DNS A-запись для '$domain' указывает на IP $mismatch_ip, а ожидаемый IP этого сервера: $expected_ip."
-            warn "Возможные причины: в Cloudflare включен Proxy (оранжевое облако вместо серого) или не обновился кэш DNS."
+            warn "DNS A-запись для '$domain' указывает на IP $mismatch_ip, а ожидаемый IP этого сервера: $expected_ip." >&2
+            warn "Возможные причины: в Cloudflare включен Proxy (оранжевое облако вместо серого) или не обновился кэш DNS." >&2
         elif echo "$dns_res" | grep -q "^NO_EXPECTED|"; then
             local resolved_ip="${dns_res#NO_EXPECTED|}"
-            warn "DNS A-запись для '$domain' указывает на IP $resolved_ip, но публичный IPv4 этого сервера не определен."
-            warn "Невозможно автоматически подтвердить соответствие IP серверу."
+            warn "DNS A-запись для '$domain' указывает на IP $resolved_ip, но публичный IPv4 этого сервера не определен." >&2
+            warn "Невозможно автоматически подтвердить соответствие IP серверу." >&2
         else
             local err_msg="${dns_res#ERROR|}"
-            warn "DNS-запись для '$domain' пока не найдена ($err_msg)."
+            warn "DNS-запись для '$domain' пока не найдена ($err_msg)." >&2
         fi
 
         # Интерактивный диалог при задержке DNS-репликации
         if [[ -t 0 ]]; then
-            echo -e "\n${YELLOW}Действие:${NC}"
-            echo -e "  [1] Повторить проверку DNS через 5 секунд (подождать обновление)"
-            echo -e "  [2] Игнорировать и продолжить (если вы уверены, что A-запись верна)"
-            echo -e "  [0] Отмена"
+            echo -e "\n${YELLOW}Действие:${NC}" >&2
+            echo -e "  [1] Повторить проверку DNS через 5 секунд (подождать обновление)" >&2
+            echo -e "  [2] Игнорировать и продолжить (если вы уверены, что A-запись верна)" >&2
+            echo -e "  [0] Отмена" >&2
             local retry_choice=""
             read -rp "Выберите вариант [1/2/0, по умолчанию 1]: " retry_choice || return 1
             case "${retry_choice:-1}" in
                 1) sleep 5; continue ;;
-                2) log "Проверка DNS пропущена по выбору пользователя."; return 0 ;;
-                *) warn "Настройка отменена."; return 1 ;;
+                2) log "Проверка DNS пропущена по выбору пользователя." >&2; return 0 ;;
+                *) warn "Настройка отменена." >&2; return 1 ;;
             esac
         else
             if [[ -n "$expected_ip" ]]; then
@@ -795,12 +795,12 @@ install_xray_relay_node() {
             while true; do
                 if ! read -rp "Порт туннеля Relay [по умолчанию: 10443, 0 для отмены]: " relay_port_in; then
                     warn "Ввод прерван."
-                    return 1
+                    return 0
                 fi
                 relay_port_in="$(echo "$relay_port_in" | tr -d '[:space:]')"
                 if [[ "$relay_port_in" == "0" || "$relay_port_in" == "q" || "$relay_port_in" == "Q" ]]; then
                     warn "Настройка Relay отменена."
-                    return 1
+                    return 0
                 fi
                 relay_port="${relay_port_in:-10443}"
                 if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
@@ -822,16 +822,30 @@ install_xray_relay_node() {
         fi
     fi
 
+    # Безусловная валидация порта туннеля Relay (для CLI-аргументов и дефолта)
+    if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
+        error "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}')."
+        return 1
+    fi
+    if [[ "$relay_port" == "443" ]]; then
+        error "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
+        return 1
+    fi
+    if is_ssh_port "$relay_port"; then
+        error "Порт ${relay_port} занят службой SSH. Запрещено использовать порт SSH для Relay туннеля."
+        return 1
+    fi
+
     if [[ -z "$origin_ip" && -t 0 ]]; then
         while true; do
             if ! read -rp "Введите IP-адрес Origin-сервера в РФ (или 0 для отмены): " origin_ip_in; then
                 warn "Ввод прерван."
-                return 1
+                return 0
             fi
             origin_ip_in="$(echo "$origin_ip_in" | tr -d '[:space:]')"
             if [[ "$origin_ip_in" == "0" || "$origin_ip_in" == "q" || "$origin_ip_in" == "Q" ]]; then
                 warn "Настройка Relay отменена."
-                return 1
+                return 0
             fi
             if [[ -z "$origin_ip_in" ]] || ! validate_ipv4 "$origin_ip_in"; then
                 warn "IP-адрес Origin ('${origin_ip_in}') некорректен или пуст. Требуется валидный IPv4-адрес. Попробуйте еще раз."
@@ -887,23 +901,32 @@ if cands:
                     echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
                     if ! read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                     dest_in="${dest_in:-$auto_domain}"
                 else
                     echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-relay.yourdomain.com ➔ ${my_ip}${NC}\n"
                     if ! read -rp "Введите домен Relay (например: your-relay.yourdomain.com, или 0 для отмены): " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                 fi
                 dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                 if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
                     warn "Настройка Relay отменена."
-                    return 1
+                    return 0
                 fi
                 if [[ -z "$dest_in" ]]; then
                     warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                    continue
+                fi
+                local dom_syntax
+                dom_syntax="$(check_domain_syntax "$dest_in")"
+                if [[ "$dom_syntax" == "CYRILLIC" ]]; then
+                    warn "Домен '$dest_in' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+                    continue
+                elif [[ "$dom_syntax" == "INVALID_FQDN" ]]; then
+                    warn "Некорректный формат домена: '$dest_in'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)."
                     continue
                 fi
                 dest_server="$dest_in"
@@ -1420,6 +1443,7 @@ setup_relay_domain() {
     check_root
     init_state_dir
     acquire_just1knode_lock
+    trap release_just1knode_lock RETURN
 
     local role cur_has_r
     role="$(get_state_val "role")"
@@ -1483,15 +1507,24 @@ print('')
                 while true; do
                     if ! read -rp "Введите персональный домен для этого Relay (например: your-relay.yourdomain.com, или 0 для отмены): " domain_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                     domain_in="$(echo "$domain_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                     if [[ "$domain_in" == "0" || "$domain_in" == "q" || "$domain_in" == "Q" ]]; then
                         warn "Смена домена Relay отменена."
-                        return 1
+                        return 0
                     fi
                     if [[ -z "$domain_in" ]]; then
                         warn "Домен Relay не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                        continue
+                    fi
+                    local dom_syntax
+                    dom_syntax="$(check_domain_syntax "$domain_in")"
+                    if [[ "$dom_syntax" == "CYRILLIC" ]]; then
+                        warn "Домен '$domain_in' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+                        continue
+                    elif [[ "$dom_syntax" == "INVALID_FQDN" ]]; then
+                        warn "Некорректный формат домена: '$domain_in'. Ожидается валидное имя FQDN (например: your-relay.yourdomain.com)."
                         continue
                     fi
                     domain="$domain_in"
@@ -1642,6 +1675,7 @@ heal_and_update_relay_config() {
     check_root
     init_state_dir
     acquire_just1knode_lock
+    trap release_just1knode_lock RETURN
 
     local role cur_has_r cur_has_v
     role="$(get_state_val "role")"
@@ -2072,23 +2106,32 @@ if cands:
                     echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
                     if ! read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                     dest_in="${dest_in:-$auto_domain}"
                 else
                     echo -e "Создайте DNS A-запись у вашего регистратора: ${CYAN}your-vless.yourdomain.com ➔ ${my_ip}${NC}\n"
                     if ! read -rp "Введите домен VLESS (например: your-vless.yourdomain.com, или 0 для отмены): " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                 fi
                 dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                 if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
                     warn "Настройка VLESS TLS отменена."
-                    return 1
+                    return 0
                 fi
                 if [[ -z "$dest_in" ]]; then
                     warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                    continue
+                fi
+                local dom_syntax
+                dom_syntax="$(check_domain_syntax "$dest_in")"
+                if [[ "$dom_syntax" == "CYRILLIC" ]]; then
+                    warn "Домен '$dest_in' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+                    continue
+                elif [[ "$dom_syntax" == "INVALID_FQDN" ]]; then
+                    warn "Некорректный формат домена: '$dest_in'. Ожидается валидное имя FQDN (например: your-vless.yourdomain.com)."
                     continue
                 fi
                 dest_server="$dest_in"
@@ -2406,22 +2449,31 @@ setup_vless_domain() {
                     echo -e "${GREEN}✔ Обнаружен готовый сертификат Let's Encrypt для домена:${NC} ${BOLD}${auto_domain}${NC}"
                     if ! read -rp "Использовать этот домен [Enter = ${auto_domain}, 0 = отмена]: " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                     dest_in="${dest_in:-$auto_domain}"
                 else
                     if ! read -rp "Введите новый домен VLESS (например: your-vless.domain.com, или 0 для отмены): " dest_in; then
                         warn "Ввод прерван."
-                        return 1
+                        return 0
                     fi
                 fi
                 dest_in="$(echo "$dest_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                 if [[ "$dest_in" == "0" || "$dest_in" == "q" || "$dest_in" == "Q" ]]; then
                     warn "Смена домена VLESS TLS отменена."
-                    return 1
+                    return 0
                 fi
                 if [[ -z "$dest_in" ]]; then
                     warn "Домен не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                    continue
+                fi
+                local dom_syntax
+                dom_syntax="$(check_domain_syntax "$dest_in")"
+                if [[ "$dom_syntax" == "CYRILLIC" ]]; then
+                    warn "Домен '$dest_in' содержит русские (кириллические) буквы! Проверьте раскладку клавиатуры и введите латинский домен."
+                    continue
+                elif [[ "$dom_syntax" == "INVALID_FQDN" ]]; then
+                    warn "Некорректный формат домена: '$dest_in'. Ожидается валидное имя FQDN (например: your-vless.yourdomain.com)."
                     continue
                 fi
                 new_domain="$dest_in"

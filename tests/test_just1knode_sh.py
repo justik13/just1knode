@@ -4018,7 +4018,7 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("setup_vless_domain()", relay_sh)
 
         # 3. just1knode.sh menu has option [2] for VLESS domain configuration
-        self.assertIn("setup_vless_domain; read -rp", just1knode_sh)
+        self.assertTrue(re.search(r"setup_vless_domain.*read -rp", just1knode_sh), "setup_vless_domain must be followed by read -rp in menu")
 
         # 4. just1knode.sh CLI dispatcher routes vless domain
         self.assertIn("domain|set-domain|change-domain) setup_vless_domain", just1knode_sh)

@@ -252,6 +252,31 @@ validate_ipv4() {
     fi
 }
 
+check_domain_syntax() {
+    local domain="${1:-}"
+    [[ -z "$domain" ]] && { echo "EMPTY"; return 0; }
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import sys, re
+d = sys.argv[1].strip()
+if re.search(r'[\u0400-\u04FF]', d):
+    print('CYRILLIC')
+elif not re.match(r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', d):
+    print('INVALID_FQDN')
+else:
+    print('OK')
+" "$domain" 2>/dev/null || echo "OK"
+    else
+        if [[ "$domain" =~ [а-яА-ЯёЁ] ]]; then
+            echo "CYRILLIC"
+        elif [[ ! "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+            echo "INVALID_FQDN"
+        else
+            echo "OK"
+        fi
+    fi
+}
+
 validate_ip() {
     local ip="${1:-}"
     [[ -z "$ip" ]] && return 1
