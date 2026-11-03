@@ -139,9 +139,12 @@ install_xray_origin_node() {
     local bot_domain="${7:-${BOT_DOMAIN:-}}"
 
     # Интерактивный опросник параметров
-    if [[ -z "$domain" ]]; then
+    if [[ -z "$domain" && -t 0 ]]; then
         while true; do
-            read -rp "Введите домен Origin-сервера (например: origin.example.com, или 0 для отмены): " domain_in || true
+            if ! read -rp "Введите домен Origin-сервера (например: origin.example.com, или 0 для отмены): " domain_in; then
+                warn "Ввод прерван."
+                return 1
+            fi
             domain_in="$(echo "$domain_in" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
             if [[ "$domain_in" == "0" || "$domain_in" == "q" || "$domain_in" == "Q" ]]; then
                 warn "Настройка Origin отменена."
@@ -155,13 +158,10 @@ install_xray_origin_node() {
             break
         done
     fi
-    if [[ -z "$domain" ]]; then
-        warn "Домен не может быть пустым."
-        return 1
-    fi
+    if [[ -z "$domain" ]]; then error "Домен не может быть пустым."; fi
 
     if [[ -z "$cdn_domain" ]]; then
-        if [[ $# -eq 0 ]]; then
+        if [[ $# -eq 0 && -t 0 ]]; then
             read -rp "Введите домен Yandex Cloud CDN (CNAME) [по умолчанию: ${domain}]: " input_cdn || true
             input_cdn="$(echo "$input_cdn" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
             cdn_domain="${input_cdn:-$domain}"
@@ -170,19 +170,20 @@ install_xray_origin_node() {
         fi
     fi
 
-    if [[ -z "$email" ]]; then
+    if [[ -z "$email" && -t 0 ]]; then
         read -rp "Введите Email для SSL Let's Encrypt [по умолчанию: admin@${domain}]: " email_in || true
         email_in="$(echo "$email_in" | tr -d '[:space:]')"
         email="${email_in:-admin@${domain}}"
     fi
-    if [[ -z "$email" ]]; then
-        warn "Email не может быть пустым."
-        return 1
-    fi
+    email="${email:-admin@${domain}}"
+    if [[ -z "$email" ]]; then error "Email не может быть пустым."; fi
 
-    if [[ -z "$bot_ip" ]]; then
+    if [[ -z "$bot_ip" && -t 0 ]]; then
         while true; do
-            read -rp "Введите IP-адрес Telegram-бота (для защиты порта 8444, или 0 для отмены): " input_bip || true
+            if ! read -rp "Введите IP-адрес Telegram-бота (для защиты порта 8444, или 0 для отмены): " input_bip; then
+                warn "Ввод прерван."
+                return 1
+            fi
             input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
             if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
                 warn "Настройка Origin отменена."
@@ -201,8 +202,7 @@ install_xray_origin_node() {
         done
     fi
     if [[ -z "$bot_ip" ]]; then
-        warn "BOT_IP обязателен для безопасной настройки порта 8444."
-        return 1
+        error "BOT_IP обязателен для безопасной настройки порта 8444."
     fi
 
     if [[ -z "$bot_domain" ]]; then
@@ -210,12 +210,15 @@ install_xray_origin_node() {
         existing_bot_domain="$(get_state_val "bot_domain" 2>/dev/null || true)"
         if [[ -n "$existing_bot_domain" && ! "$existing_bot_domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$existing_bot_domain" != "localhost" ]]; then
             bot_domain="$existing_bot_domain"
-        else
+        elif [[ -t 0 ]]; then
             if [[ -n "$existing_bot_domain" ]]; then
                 warn "Обнаружено устаревшее значение bot_domain в state.json (IP: '$existing_bot_domain'). Для защищенного TLS-проксирования требуется FQDN."
             fi
             while true; do
-                read -rp "Введите домен Telegram-бота (например: bot.example.com, или 0 для отмены): " input_bot_domain || true
+                if ! read -rp "Введите домен Telegram-бота (например: bot.example.com, или 0 для отмены): " input_bot_domain; then
+                    warn "Ввод прерван."
+                    return 1
+                fi
                 input_bot_domain="$(echo "$input_bot_domain" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
                 if [[ "$input_bot_domain" == "0" || "$input_bot_domain" == "q" || "$input_bot_domain" == "Q" ]]; then
                     warn "Настройка Origin отменена."
@@ -238,13 +241,11 @@ install_xray_origin_node() {
     bot_domain="$(normalize_domain "$bot_domain")"
 
     if [[ -z "$bot_domain" ]]; then
-        warn "BOT_DOMAIN обязателен для настройки безопасного проксирования подписок."
-        return 1
+        error "BOT_DOMAIN обязателен для настройки безопасного проксирования подписок."
     fi
 
     if ! validate_fqdn "$bot_domain"; then
-        warn "BOT_DOMAIN должен быть доменным именем (FQDN) с доверенным SSL-сертификатом, а не IP-адресом или недопустимым хостом: '$bot_domain'"
-        return 1
+        error "BOT_DOMAIN должен быть доменным именем (FQDN) с доверенным SSL-сертификатом, а не IP-адресом или недопустимым хостом: '$bot_domain'"
     fi
 
     install_base_deps
@@ -990,9 +991,13 @@ set_origin_bot_ip() {
     fi
 
     local new_bot_ip="${1:-}"
-    if [[ -z "$new_bot_ip" ]]; then
+    if [[ -z "$new_bot_ip" && -t 0 ]]; then
         while true; do
-            read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip || true
+            if ! read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip; then
+                release_just1knode_lock
+                warn "Ввод прерван."
+                return 1
+            fi
             input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
             if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
                 release_just1knode_lock
@@ -1015,14 +1020,14 @@ set_origin_bot_ip() {
     new_bot_ip="$(echo "$new_bot_ip" | tr -d '[:space:]')"
     if [[ -z "$new_bot_ip" ]]; then
         release_just1knode_lock
-        warn "IP-адрес не может быть пустым."
+        error "IP-адрес не может быть пустым."
         return 1
     fi
 
     # Строгая валидация формата IPv4 (0..255 октеты, без any и wildcard)
     if ! validate_ipv4 "$new_bot_ip"; then
         release_just1knode_lock
-        warn "Недопустимый формат IP-адреса: '$new_bot_ip' (ожидается валидный IPv4 адрес)."
+        error "Недопустимый формат IP-адреса: '$new_bot_ip' (ожидается валидный IPv4 адрес)."
         return 1
     fi
 
