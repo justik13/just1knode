@@ -500,7 +500,9 @@ run_doctor() {
             fi
         fi
         if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
-            services_to_check+=("amnezia-api")
+            if [[ "$cur_has_v" != "1" && "$cur_has_r" != "1" ]]; then
+                services_to_check+=("amnezia-api")
+            fi
             if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
                 services_to_check+=("nginx")
             fi
@@ -1835,7 +1837,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
             uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
             install-amnezia|install-awg|add-amnezia) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
-            uninstall-amnezia|uninstall-awg|remove-amnezia) uninstall_amnezia_component "${2:-}" ;;
+            uninstall-amnezia|uninstall-awg|remove-amnezia|purge-amnezia|purge-awg|clean-amnezia) uninstall_amnezia_component "${2:-}" ;;
             install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
             uninstall-relay|remove-relay)
                 if [[ "$(get_state_val "role")" == "origin" ]]; then
@@ -1894,7 +1896,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
                     backup) backup_amnezia_node "${3:-}" ;;
                     restore) restore_amnezia_node "${3:-}" ;;
-                    uninstall|remove|del) uninstall_amnezia_component ;;
+                    uninstall|remove|del|purge|clean) uninstall_amnezia_component ;;
                     *) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
                 esac
                 ;;
