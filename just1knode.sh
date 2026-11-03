@@ -1171,8 +1171,8 @@ reset_node() {
     echo ""
 
     local confirm=""
-    read -rp "Вы уверены, что хотите сбросить узел? (введите 'yes' для подтверждения, Enter для отмены): " confirm
-    if [[ "$confirm" != "yes" ]]; then
+    read -rp "Вы уверены, что хотите сбросить узел? (введите 'yes' или 'СБРОСИТЬ' для подтверждения, Enter для отмены): " confirm
+    if [[ "$confirm" != "yes" && "$confirm" != "СБРОСИТЬ" ]]; then
         info "Сброс отменен пользователем."
         return
     fi
