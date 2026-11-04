@@ -836,8 +836,9 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         detected_services.append("vless")
     if str(node_meta.get("has_relay", "")) == "1" or node_meta.get("role") == "relay":
         detected_services.append("relay")
-    if str(node_meta.get("has_awg", "")) == "1" or node_meta.get("role") == "awg":
-        detected_services.append("awg")
+    if node_meta.get("role") not in ("origin", "vless", "relay"):
+        if str(node_meta.get("has_awg", "")) == "1" or node_meta.get("role") == "awg":
+            detected_services.append("awg")
 
     capabilities: List[str] = []
     if "vless" in detected_services:

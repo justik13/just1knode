@@ -561,7 +561,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
+    if [[ "$role" == "awg" ]] || [[ "$role" != "vless" && "$role" != "origin" && "$role" != "relay" && "$cur_has_a" == "1" ]]; then
         log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
         if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
@@ -581,7 +581,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
+    if [[ "$role" == "awg" ]] || [[ "$role" != "vless" && "$role" != "origin" && "$role" != "relay" && "$cur_has_a" == "1" ]]; then
         log "3b. Проверка контейнера и конфигурации AmneziaWG..."
         local c_doc
         c_doc="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"

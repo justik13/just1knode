@@ -592,7 +592,7 @@ heal_node_firewall_and_stealth() {
         # Проверка доверенного BOT_IP из state.json (Fail-Closed, без эвристического угадывания)
         local bot_ip
         bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" && "$bot_ip" != "-" ]] && validate_ipv4 "$bot_ip"; then
+        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" && "$bot_ip" != "-" ]] && (validate_ip "$bot_ip" || validate_ipv4 "$bot_ip"); then
             if ! ufw status 2>/dev/null | grep -F "$bot_ip" | grep -q "$awg_port"; then
                 if ufw allow from "$bot_ip" to any port "$awg_port" proto tcp comment "just1knode amnezia api" >/dev/null 2>&1; then
                     log "Фаервол UFW: подтвержден доступ к порту ${awg_port} строго для BOT_IP (${bot_ip})"
@@ -625,7 +625,7 @@ heal_node_firewall_and_stealth() {
         fi
 
         # Проверка доверенного BOT_IP из state.json (Fail-Closed)
-        if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && validate_ipv4 "$origin_bot_ip"; then
+        if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
             if ! ufw status 2>/dev/null | grep -F "$origin_bot_ip" | grep -q "8444"; then
                 if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
                     log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
@@ -690,7 +690,7 @@ heal_node_firewall_and_stealth() {
         local v_bot_ip
         v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
         if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then
-            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && validate_ipv4 "$v_bot_ip"; then
+            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && (validate_ip "$v_bot_ip" || validate_ipv4 "$v_bot_ip"); then
                 if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
                     ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
                 fi

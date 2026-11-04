@@ -517,9 +517,7 @@ update_node() {
                 fi
                 if [[ -x "${amnezia_api_dir}/venv/bin/pip" && -f "${amnezia_api_dir}/requirements.txt" ]]; then
                     if ! "${amnezia_api_dir}/venv/bin/pip" install -q -r "${amnezia_api_dir}/requirements.txt" --no-cache-dir; then
-                        rollback_node_components || true
-                        rm -rf "$tmp_tar" "$tmp_dir"
-                        error "Ошибка обновления зависимостей Python для amnezia-api. Обновление прервано."
+                        warn "Не удалось обновить зависимости Python для amnezia-api (пропускаем)."
                     fi
                 fi
                 chmod -R 750 "$amnezia_api_dir" 2>/dev/null || true
@@ -529,12 +527,10 @@ update_node() {
                 fi
                 if [[ "$amnezia_api_was_active" == "true" ]]; then
                     if ! systemctl restart amnezia-api 2>/dev/null || ! systemctl is-active --quiet amnezia-api 2>/dev/null; then
-                        rollback_node_components || true
-                        rm -rf "$tmp_tar" "$tmp_dir"
-                        error "Служба amnezia-api не смогла перезапуститься после обновления."
+                        warn "Служба amnezia-api не смогла перезапуститься после обновления (не критично для Xray узла)."
                     fi
                 fi
-                log "Компоненты ${amnezia_api_dir} успешно обновлены с синхронизацией Python-зависимостей и перезапуском службы."
+                log "Компоненты ${amnezia_api_dir} обновлены."
             fi
 
             # Полный успех обновления компонентов узла - очистка бэкапов
