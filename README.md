@@ -1,6 +1,6 @@
 # JUST1KNODE
 
-Модульная серверная утилита, панель управления и микросервисы для автономных узлов AmneziaWG и Xray (VLESS over XHTTP и VLESS TLS).
+Модульная серверная утилита, панель управления и микросервисы для автономных узлов Xray (VLESS over XHTTP и VLESS TLS).
 
 ---
 
@@ -32,11 +32,6 @@ curl -fsSL https://raw.githubusercontent.com/justik13/just1knode/main/just1knode
    - Прямой высокоскоростной VLESS TLS узел на собственном домене.
    - Локальный микросервис `xray-api` (порт 8444, доступ строго по `BOT_IP`).
    - Клиентское подключение через INCY по subscription feed (`/sub/access/{token}`).
-4. **AmneziaWG (узел стандартного доступа AWG):**
-   - Нативный сетевой стек WireGuard/AmneziaWG в ядре Linux (`awg0`).
-   - Поддержка параметров обфускации (`Jc`, `Jmin`, `Jmax`, `S1-S4`, `H1-H4`, `I1-I5`).
-   - Изолированный FastAPI микросервис `amnezia-api` (порт 8443, доступ строго по `BOT_IP`).
-   - Динамическое распределение IP-адресов подсети `/22` без ограничения в 254 пира.
 
 ---
 
@@ -52,7 +47,7 @@ just1knode
 
 | Команда | Описание |
 |---|---|
-| `just1knode status` | Статус служб (`xray`, `nginx`, `xray-api`, `amnezia-api`), открытые порты, пиры |
+| `just1knode status` | Статус служб (`xray`, `nginx`, `xray-api`), открытые порты, пиры |
 | `just1knode doctor` | 12 уровней самодиагностики: службы, порты, API, Xray, Nginx, SSL, DNS, UFW, IPv6, ICMP |
 | `just1knode heal` | Автоматическое самовосстановление поврежденных конфигураций Nginx и Xray |
 | `just1knode update` | Обновление модулей утилиты и перепроверка конфигураций |
@@ -69,7 +64,6 @@ just1knode
 | `just1knode install origin` | Развертывание роли Origin (Xray VLESS XHTTP + Nginx + Certbot) |
 | `just1knode install relay` | Развертывание роли Relay (Xray VLESS TLS) |
 | `just1knode install vless` | Развертывание роли прямого узла VLESS TLS |
-| `just1knode install amnezia` | Развертывание роли узла AmneziaWG |
 
 ### Управление релеями (на сервере Origin)
 
@@ -89,18 +83,11 @@ just1knode
 | `just1knode limit check` | Ручная проверка расхода трафика |
 | `just1knode limit disable` | Отключение лимитирования трафика |
 
-### Бэкап и восстановление AmneziaWG
-
-| Команда | Описание |
-|---|---|
-| `just1knode amnezia backup` | Создание резервной копии ключей и конфигураций AWG |
-| `just1knode amnezia restore` | Восстановление конфигурации AWG из бэкапа |
-
 ---
 
 ## Сетевая безопасность и периметр
 
-- **UFW Fail-Closed:** Управляющие порты `amnezia-api` (`8443/tcp`) и `xray-api` (`8444/tcp`) открываются строго и адресно для `BOT_IP`. Прямые запросы из внешней сети сбрасываются.
+- **UFW Fail-Closed:** Управляющий порт `xray-api` (`8444/tcp`) открывается строго и адресно для `BOT_IP`. Прямые запросы из внешней сети сбрасываются.
 - **Stealth ICMP:** Отключение ответов на ICMP Echo Request (`net.ipv4.icmp_echo_ignore_all = 1`) с персистентным сохранением в `/etc/sysctl.d/99-just1k-stealth.conf` для защиты от сетевого сканирования.
 - **Отключение IPv6:** Принудительное отключение IPv6 стека на уровне ядра (`disable_ipv6 = 1`) для исключения утечек сетевого трафика.
 - **Защита от абуза:** Блокировка SMTP спам-портов (`25/tcp`) и сигнатур BitTorrent на уровне правил фаервола.
@@ -121,11 +108,9 @@ just1knode/
 │   ├── traffic_watchdog.sh    # Служба мониторинга трафика
 │   └── traffic_watchdog.py    # Логика подсчета байтов и Telegram-алертов
 ├── modules/
-│   ├── amnezia/               # Модуль установки и настройки AmneziaWG
 │   └── xray/                  # Модули Xray (core, origin, relay, relays_manage, api)
 ├── scripts/
-│   ├── xray_api/              # FastAPI служба Xray API + proto + gRPC
-│   └── amnezia_api/           # FastAPI служба Amnezia API
+│   └── xray_api/              # FastAPI служба Xray API + proto + gRPC
 ├── docs/                      # Инженерно-техническая документация
 ├── tests/                     # Сьют автоматических тестов
 └── .github/workflows/         # CI/CD автоматизация
@@ -137,6 +122,5 @@ just1knode/
 
 Подробные руководства доступны в каталоге [`docs/`](docs/README.md):
 - [Руководство по Белому Интернету (Whitelist Master Guide)](docs/WL/WHITELIST_MASTER_GUIDE.md)
-- [Спецификация AmneziaWG 2.0 (Amnezia Technical Reference)](docs/amnezia_docs.md)
 - [Спецификация клиента INCY (INCY Master Guide)](docs/INCY_MASTER_GUIDE.md)
 - [Модель угроз и сетевая безопасность ТСПУ](docs/NETWORK_SECURITY_AND_TSPU.md)
