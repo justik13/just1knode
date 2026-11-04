@@ -41,12 +41,6 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a /app/scripts/xray_api/. "$INSTALL_DIR/scripts/xray_api/"
         fi
-        if [[ -d "/app/scripts/amnezia_api" ]]; then
-            mkdir -p "${AMNEZIA_API_DIR:-/opt/amnezia-api}"
-            cp -a /app/scripts/amnezia_api/. "${AMNEZIA_API_DIR:-/opt/amnezia-api}/"
-            mkdir -p "$INSTALL_DIR/scripts/amnezia_api"
-            cp -a /app/scripts/amnezia_api/. "$INSTALL_DIR/scripts/amnezia_api/"
-        fi
     else
         JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
         JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
@@ -100,12 +94,6 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             cp -a "$tmp_extract/scripts/xray_api/." "${XRAY_API_DIR:-/opt/xray-api}/"
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a "$tmp_extract/scripts/xray_api/." "$INSTALL_DIR/scripts/xray_api/"
-        fi
-        if [[ -d "$tmp_extract/scripts/amnezia_api" ]]; then
-            mkdir -p "${AMNEZIA_API_DIR:-/opt/amnezia-api}"
-            cp -a "$tmp_extract/scripts/amnezia_api/." "${AMNEZIA_API_DIR:-/opt/amnezia-api}/"
-            mkdir -p "$INSTALL_DIR/scripts/amnezia_api"
-            cp -a "$tmp_extract/scripts/amnezia_api/." "$INSTALL_DIR/scripts/amnezia_api/"
         fi
         bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
@@ -240,8 +228,6 @@ source "${SCRIPT_DIR}/modules/xray/origin.sh"
 source "${SCRIPT_DIR}/modules/xray/relay.sh"
 # shellcheck source=modules/xray/relays_manage.sh
 source "${SCRIPT_DIR}/modules/xray/relays_manage.sh"
-# shellcheck source=modules/amnezia/amnezia.sh
-source "${SCRIPT_DIR}/modules/amnezia/amnezia.sh"
 
 # Автоматическая регистрация команды в /usr/local/bin
 ensure_global_symlink() {
@@ -310,20 +296,10 @@ show_status() {
         if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
             systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         fi
-        if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+        if [[ "$cur_has_v" == "1" || "$role" == "vless" || "$role" == "origin" ]]; then
             systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
         fi
-        if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
-            local c_name
-            c_name="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
-            if is_amnezia_container_running 2>/dev/null; then
-                echo -e "    Docker (${c_name}): ${GREEN}● Активен${NC}"
-            else
-                echo -e "    Docker (${c_name}): ${RED}○ Не запущен${NC}"
-            fi
-            systemctl is-active --quiet amnezia-api && echo -e "    amnezia-api:          ${GREEN}● Активен${NC}" || echo -e "    amnezia-api:          ${RED}○ Не работает${NC}"
-            systemctl is-active --quiet nginx && echo -e "    Nginx (8443):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8443):         ${RED}○ Не работает${NC}"
-        elif [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
+        if [[ "$cur_has_v" == "1" || "$role" == "vless" || "$role" == "origin" || "$role" == "relay" ]]; then
             systemctl is-active --quiet nginx && echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444):         ${RED}○ Не работает${NC}"
         fi
     fi
@@ -487,8 +463,6 @@ run_doctor() {
         services_to_check+=("xray")
     elif [[ "$role" == "vless" ]]; then
         services_to_check+=("xray" "nginx" "xray-api")
-    elif [[ "$role" == "awg" ]]; then
-        services_to_check+=("amnezia-api" "nginx")
     elif [[ "$role" == "node" ]]; then
         if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
             services_to_check+=("xray")
@@ -499,14 +473,7 @@ run_doctor() {
                 services_to_check+=("nginx")
             fi
         fi
-        if [[ "$cur_has_a" == "1" ]] || ( [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]] && systemctl is-enabled --quiet amnezia-api 2>/dev/null ); then
-            if [[ "$cur_has_v" != "1" && "$cur_has_r" != "1" ]]; then
-                services_to_check+=("amnezia-api")
-            fi
-            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
-                services_to_check+=("nginx")
-            fi
-        elif [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
+        if [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
             services_to_check+=("xray")
         fi
     fi
@@ -561,16 +528,6 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
-        log "2b. Проверка Amnezia API сокета (127.0.0.1:4001)..."
-        if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 4001), timeout=2); s.close()" 2>/dev/null; then
-            echo -e "  ${GREEN}✔${NC} Локальный порт 4001 (amnezia-api) отвечает"
-        else
-            echo -e "  ${RED}✗${NC} Локальный порт 4001 (amnezia-api) недоступен (выполните: just1knode heal)"
-            failed=$((failed + 1))
-        fi
-    fi
-
     if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
@@ -581,43 +538,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
-        log "3b. Проверка контейнера и конфигурации AmneziaWG..."
-        local c_doc
-        c_doc="$(detect_amnezia_container 2>/dev/null || echo "amnezia-awg2")"
-        if is_amnezia_container_running 2>/dev/null; then
-            echo -e "  ${GREEN}✔${NC} Docker контейнер: ${c_doc} (активен)"
-        else
-            echo -e "  ${RED}✗${NC} Docker контейнер: ${c_doc} (не запущен)"
-            failed=$((failed + 1))
-        fi
-        local conf_name="awg0.conf"
-        local conf_found=false
-        if docker exec "$c_doc" test -f "/opt/amnezia/awg/$conf_name" 2>/dev/null; then
-            conf_found=true
-        elif [[ -f "/opt/amnezia/awg/$conf_name" ]]; then
-            conf_found=true
-        fi
-        if [[ "$conf_found" == "true" ]]; then
-            echo -e "  ${GREEN}✔${NC} Конфигурационный файл ${conf_name} найден"
-            local proto_id proto_display
-            proto_id="$(detect_awg_protocol_version 2>/dev/null || echo "amneziawg2")"
-            case "$proto_id" in
-                "amneziawg3.1") proto_display="AmneziaWG 3.1" ;;
-                "amneziawg3")   proto_display="AmneziaWG 3.0" ;;
-                *)              proto_display="AmneziaWG 2.0" ;;
-            esac
-            echo -e "  ${GREEN}✔${NC} Протокол: ${proto_display} (${proto_id})"
-            if docker exec "$c_doc" awg show awg0 >/dev/null 2>&1; then
-                echo -e "  ${GREEN}✔${NC} Интерфейс awg0 активен в ядре"
-            fi
-        else
-            echo -e "  ${RED}✗${NC} Конфигурационный файл ${conf_name} отсутствует"
-            failed=$((failed + 1))
-        fi
-    fi
-
-    if [[ "$role" == "origin" || "$role" == "awg" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" || "$cur_has_a" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
+    if [[ "$role" == "origin" || "$role" == "vless" || "$role" == "node" || "$cur_has_v" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"

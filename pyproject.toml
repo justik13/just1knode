@@ -1,7 +1,7 @@
 [project]
 name = "just1knode"
 version = "2.5.0"
-description = "Modular server node utility and microservices for AmneziaWG and Xray VLESS over XHTTP"
+description = "Modular server node utility and microservices for Xray (VLESS over XHTTP and VLESS TLS)"
 requires-python = ">=3.12"
 
 [tool.ruff]
@@ -30,5 +30,5 @@ ignore = [
 "scripts/xray_api/generated/*" = ["F401", "F821", "E402", "E741", "E501"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "scripts/xray_api/tests", "scripts/amnezia_api/tests"]
+testpaths = ["tests", "scripts/xray_api/tests"]
 norecursedirs = [".git", ".pytest_cache"]

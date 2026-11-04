@@ -225,19 +225,15 @@ update_node() {
         fi
 
         # Обновление модулей утилиты и/или API
-        if [[ -n "$node_src_dir" || -d "${tmp_dir}/scripts/xray_api" || -d "${tmp_dir}/scripts/amnezia_api" ]]; then
+        if [[ -n "$node_src_dir" || -d "${tmp_dir}/scripts/xray_api" ]]; then
             # Подготовка безопасного каталога для резервных копий
             local backup_root=""
             local node_backup=""
             local code_backup=""
             local venv_backup=""
-            local amnezia_code_backup=""
-            local amnezia_venv_backup=""
             local node_dir="${INSTALL_DIR:-/opt/just1knode}"
             local api_dir="${XRAY_API_DIR:-/opt/xray-api}"
-            local amnezia_api_dir="${AMNEZIA_API_DIR:-/opt/amnezia-api}"
             local api_was_active=false
-            local amnezia_api_was_active=false
 
             mkdir -p "${BACKUP_DIR:-/var/backups/just1knode}"
             chmod 700 "${BACKUP_DIR:-/var/backups/just1knode}" 2>/dev/null || true
@@ -272,28 +268,6 @@ update_node() {
                     if ! cp -a "${api_dir}/venv" "$venv_backup" 2>/dev/null; then
                         rm -rf "$backup_root" "$venv_backup" "$tmp_tar" "$tmp_dir"
                         error "Не удалось создать резервную копию venv для ${api_dir}. Обновление отменено."
-                    fi
-                fi
-            fi
-
-            # 2b. Резервная копия amnezia-api и venv
-            if [[ -d "${tmp_dir}/scripts/amnezia_api" && -d "$amnezia_api_dir" ]]; then
-                if systemctl is-active --quiet amnezia-api 2>/dev/null; then
-                    amnezia_api_was_active=true
-                fi
-                amnezia_code_backup="${backup_root}/amnezia_api"
-                mkdir -p "$amnezia_code_backup"
-                if ! cp -a "${amnezia_api_dir}/." "$amnezia_code_backup/" 2>/dev/null; then
-                    rm -rf "$backup_root" "$venv_backup" "$tmp_tar" "$tmp_dir"
-                    error "Не удалось создать резервную копию исходных файлов ${amnezia_api_dir}. Обновление отменено."
-                fi
-                rm -rf "$amnezia_code_backup"/venv*
-
-                if [[ -d "${amnezia_api_dir}/venv" ]]; then
-                    amnezia_venv_backup="${amnezia_api_dir}/venv_bak_$$"
-                    if ! cp -a "${amnezia_api_dir}/venv" "$amnezia_venv_backup" 2>/dev/null; then
-                        rm -rf "$backup_root" "$venv_backup" "$amnezia_venv_backup" "$tmp_tar" "$tmp_dir"
-                        error "Не удалось создать резервную копию venv для ${amnezia_api_dir}. Обновление отменено."
                     fi
                 fi
             fi
@@ -349,35 +323,6 @@ update_node() {
                     fi
                 fi
 
-                # Откат amnezia-api
-                if [[ -n "$amnezia_code_backup" && -d "$amnezia_code_backup" ]]; then
-                    find "$amnezia_api_dir" -mindepth 1 -maxdepth 1 ! -name 'venv*' -exec rm -rf {} + 2>/dev/null || true
-                    if ! cp -a "$amnezia_code_backup"/. "${amnezia_api_dir}/" 2>/dev/null; then
-                        warn "Критическая ошибка: не удалось восстановить файлы ${amnezia_api_dir} из бэкапа!"
-                        rb_ok=false
-                    fi
-                    if [[ -n "$amnezia_venv_backup" && -d "$amnezia_venv_backup" ]]; then
-                        rm -rf "${amnezia_api_dir}/venv"
-                        if ! mv "$amnezia_venv_backup" "${amnezia_api_dir}/venv" 2>/dev/null; then
-                            warn "Критическая ошибка: не удалось восстановить venv для ${amnezia_api_dir}!"
-                            rb_ok=false
-                        fi
-                        amnezia_venv_backup=""
-                    fi
-                    chmod -R 750 "$amnezia_api_dir" 2>/dev/null || true
-                    if [[ "$amnezia_api_was_active" == "true" ]]; then
-                        if ! systemctl restart amnezia-api 2>/dev/null && ! systemctl start amnezia-api 2>/dev/null; then
-                            warn "Служба amnezia-api не смогла перезапуститься после отката."
-                            rb_ok=false
-                        elif ! systemctl is-active --quiet amnezia-api 2>/dev/null; then
-                            warn "Служба amnezia-api не активна после отката."
-                            rb_ok=false
-                        else
-                            log "Служба amnezia-api успешно восстановлена и перезапущена на исходной версии."
-                        fi
-                    fi
-                fi
-
                 if [[ "$rb_ok" == "true" ]]; then
                     log "Транзакционный откат компонентов узла успешно завершен и подтвержден."
                     rm -rf "$backup_root"
@@ -423,25 +368,6 @@ update_node() {
                 if [[ -f "${node_dir}/just1knode.sh" ]]; then
                     chmod +x "${node_dir}/just1knode.sh" 2>/dev/null || true
                     ln -sf "${node_dir}/just1knode.sh" /usr/local/bin/just1knode 2>/dev/null || true
-                fi
-                if [[ -f "${tmp_dir}/scripts/amnezia_api/app.py" && \
-                      -f "${tmp_dir}/scripts/amnezia_api/requirements.txt" && \
-                      -f "${tmp_dir}/scripts/amnezia_api/amnezia-api.service" ]]; then
-                    local cache_staging="${node_dir}/scripts/.amnezia_api_stage_$$"
-                    local cache_dest="${node_dir}/scripts/amnezia_api"
-                    rm -rf "$cache_staging"
-                    mkdir -p "$cache_staging"
-                    if cp -a "${tmp_dir}/scripts/amnezia_api/." "$cache_staging/" 2>/dev/null; then
-                        if [[ -f "${cache_staging}/app.py" && \
-                              -f "${cache_staging}/requirements.txt" && \
-                              -f "${cache_staging}/amnezia-api.service" ]]; then
-                            rm -rf "${cache_dest}.old"
-                            [[ -d "$cache_dest" ]] && mv "$cache_dest" "${cache_dest}.old" 2>/dev/null || true
-                            mv "$cache_staging" "$cache_dest" 2>/dev/null || true
-                            rm -rf "${cache_dest}.old"
-                        fi
-                    fi
-                    rm -rf "$cache_staging"
                 fi
                 if [[ -f "${tmp_dir}/scripts/xray_api/app.py" && \
                       -f "${tmp_dir}/scripts/xray_api/requirements.txt" && \
@@ -497,50 +423,9 @@ update_node() {
                 log "Компоненты ${api_dir} успешно обновлены с синхронизацией Python-зависимостей и перезапуском службы."
             fi
 
-            # 5. Установка обновлений amnezia-api
-            if [[ -d "${tmp_dir}/scripts/amnezia_api" && -d "$amnezia_api_dir" ]]; then
-                if ! cp -a "${tmp_dir}/scripts/amnezia_api/." "${amnezia_api_dir}/" 2>/dev/null; then
-                    rollback_node_components || true
-                    rm -rf "$tmp_tar" "$tmp_dir"
-                    error "Не удалось скопировать исходные файлы ${amnezia_api_dir}. Обновление прервано."
-                fi
-                if [[ -d "${amnezia_api_dir}/amnezia_api" && ! -f "${amnezia_api_dir}/app.py" ]]; then
-                    if [[ -f "${amnezia_api_dir}/amnezia_api/app.py" && \
-                          -f "${amnezia_api_dir}/amnezia_api/requirements.txt" && \
-                          -f "${amnezia_api_dir}/amnezia_api/amnezia-api.service" ]]; then
-                        if cp -a "${amnezia_api_dir}/amnezia_api/." "${amnezia_api_dir}/" 2>/dev/null; then
-                            if [[ -f "${amnezia_api_dir}/app.py" ]]; then
-                                rm -rf "${amnezia_api_dir}/amnezia_api"
-                            fi
-                        fi
-                    fi
-                fi
-                if [[ -x "${amnezia_api_dir}/venv/bin/pip" && -f "${amnezia_api_dir}/requirements.txt" ]]; then
-                    if ! "${amnezia_api_dir}/venv/bin/pip" install -q -r "${amnezia_api_dir}/requirements.txt" --no-cache-dir; then
-                        rollback_node_components || true
-                        rm -rf "$tmp_tar" "$tmp_dir"
-                        error "Ошибка обновления зависимостей Python для amnezia-api. Обновление прервано."
-                    fi
-                fi
-                chmod -R 750 "$amnezia_api_dir" 2>/dev/null || true
-                if [[ -f "${amnezia_api_dir}/amnezia-api.service" ]]; then
-                    cp "${amnezia_api_dir}/amnezia-api.service" /etc/systemd/system/amnezia-api.service 2>/dev/null || true
-                    systemctl daemon-reload 2>/dev/null || true
-                fi
-                if [[ "$amnezia_api_was_active" == "true" ]]; then
-                    if ! systemctl restart amnezia-api 2>/dev/null || ! systemctl is-active --quiet amnezia-api 2>/dev/null; then
-                        rollback_node_components || true
-                        rm -rf "$tmp_tar" "$tmp_dir"
-                        error "Служба amnezia-api не смогла перезапуститься после обновления."
-                    fi
-                fi
-                log "Компоненты ${amnezia_api_dir} успешно обновлены с синхронизацией Python-зависимостей и перезапуском службы."
-            fi
-
             # Полный успех обновления компонентов узла - очистка бэкапов
             rm -rf "$backup_root"
             [[ -n "$venv_backup" && -d "$venv_backup" ]] && rm -rf "$venv_backup"
-            [[ -n "$amnezia_venv_backup" && -d "$amnezia_venv_backup" ]] && rm -rf "$amnezia_venv_backup"
         fi
 
         rm -rf "$tmp_tar" "$tmp_dir"
@@ -566,7 +451,6 @@ update_node() {
         source "${node_dir}/modules/xray/core.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/origin.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/relay.sh" 2>/dev/null || true
-        source "${node_dir}/modules/amnezia/amnezia.sh" 2>/dev/null || true
     fi
 
     update_node_post "$target" "${is_menu:-0}"
@@ -598,19 +482,12 @@ update_node_post() {
         if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
             heal_and_update_relay_config
         fi
-        if [[ "$cur_a" == "1" ]]; then
-            ensure_amnezia_api_service_and_env
-            apply_amnezia_abuse_protection
-            heal_node_firewall_and_stealth
-        fi
     elif [[ "$role" == "relay" ]]; then
         heal_and_update_relay_config
     elif [[ "$role" == "vless" ]]; then
         heal_and_update_relay_config
     elif [[ "$role" == "awg" ]]; then
-        apply_amnezia_abuse_protection
-        heal_node_firewall_and_stealth
-        info "Узел настроен как AWG. Конфигурация ядра и сетевая защита актуализированы."
+        warn "Протокол AmneziaWG выведен из эксплуатации. Рекомендуется мигрировать узел на VLESS: just1knode install vless"
     else
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi

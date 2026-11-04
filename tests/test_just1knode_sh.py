@@ -603,7 +603,6 @@ exit 0
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
         node_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
 
         # common.sh must define validate_public_ipv4 and get_public_ipv4
@@ -623,8 +622,7 @@ exit 0
         origin_deps_idx = origin_sh.index("install_base_deps\n    apply_node_sysctl_hardening")
         self.assertLess(origin_role_idx, origin_deps_idx, "Origin role check must occur before install_base_deps/hardening")
 
-        # amnezia.sh and just1knode.sh must use get_public_ipv4
-        self.assertIn('my_ip="$(get_public_ipv4 || true)"', amnezia_sh)
+        # just1knode.sh must use get_public_ipv4
         self.assertIn('my_ip="$(get_public_ipv4 || true)"', node_sh)
 
         # validate_relay_dns must explicitly report NO_EXPECTED and INVALID_EXPECTED instead of false OK
@@ -2749,151 +2747,6 @@ remove_traffic_watchdog_timer
         self.assertFalse(timer_file.exists(), "Traffic timer unit must be removed")
         self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be removed")
 
-    def test_amnezia_node_and_api_artifacts_invariants(self):
-        """Verify amnezia_api microservice files and just1knode Amnezia module invariants."""
-        amnezia_api_dir = REPO_ROOT / "scripts" / "amnezia_api"
-        self.assertTrue((amnezia_api_dir / "app.py").exists(), "app.py must exist in amnezia_api")
-        self.assertTrue((amnezia_api_dir / "requirements.txt").exists(), "requirements.txt must exist in amnezia_api")
-        self.assertTrue((amnezia_api_dir / "amnezia-api.service").exists(), "amnezia-api.service unit must exist")
-        self.assertTrue((amnezia_api_dir / "tests" / "test_api.py").exists(), "test_api.py must exist in amnezia_api/tests")
-
-        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
-        self.assertTrue(amnezia_sh.exists(), "just1knode amnezia.sh must exist")
-        content = amnezia_sh.read_text(encoding="utf-8")
-        self.assertIn("install_amnezia_node", content)
-        self.assertIn("apply_amnezia_abuse_protection", content)
-        self.assertIn("--dport 25 -j REJECT --reject-with tcp-reset", content)
-        self.assertIn('--string "BitTorrent protocol" --algo bm', content)
-        self.assertIn("sync_ufw_before_rules_antiabuse", content)
-        self.assertIn("remove_ufw_before_rules_antiabuse", content)
-        self.assertIn("check_amnezia_abuse_rules", content)
-        self.assertIn("/etc/modules-load.d/just1knode.conf", content)
-        self.assertNotIn("deploy_antiabuse_systemd_service", content)
-
-    def test_amnezia_antiabuse_persistence_and_doctor_invariants(self):
-        """Verify anti-abuse persistence, update_node integration, and doctor auto-heal invariants."""
-        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        self.assertIn('elif [[ "$role" == "awg" ]]; then\n        apply_amnezia_abuse_protection', core_sh)
-
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('apply_amnezia_abuse_protection', relay_sh)
-
-        main_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn("anti-abuse|antiabuse|apply-abuse-protection)", main_sh)
-        self.assertNotIn("remove-anti-abuse|remove-antiabuse)", main_sh)
-        self.assertIn("Запуск автоматического восстановления (Auto-Heal)...", main_sh)
-        self.assertIn("check_amnezia_abuse_rules", main_sh)
-        self.assertIn("apply_amnezia_abuse_protection", main_sh)
-        self.assertIn("failed=$((failed + 1))", main_sh)
-
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        self.assertNotIn("iptables-persistent netfilter-persistent", common_sh)
-        self.assertNotIn("debconf-set-selections", common_sh)
-
-    def test_amnezia_migration_and_rollback_invariants(self):
-        """Verify Amnezia node migration path, legacy env discovery, and rollback handling."""
-        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
-        content = amnezia_sh.read_text(encoding="utf-8")
-        # Configuration discovery (native only, zero legacy artifacts)
-        self.assertIn('$AMNEZIA_API_ETC/config.env', content)
-        self.assertNotIn('/opt/amnezia-api/.env', content)
-        self.assertNotIn('/root/amnezia-api', content)
-        self.assertIn("AMNEZIA_API_KEY", content)
-        self.assertIn("SERVER_MAX_PEERS", content)
-        # Rollback logic for native service
-        self.assertIn("rollback_amnezia_if_needed()", content)
-        self.assertIn("systemctl stop amnezia-api.service", content)
-        self.assertNotIn("docker start amnezia-api", content)
-        self.assertNotIn("pm2", content)
-        # Nginx proxy generation, rate limiting and security headers
-        self.assertIn("/etc/nginx/sites-available/just1k-amnezia.conf", content)
-        self.assertIn("limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;", content)
-        self.assertIn("limit_req zone=just1k_amnezia_api burst=50 nodelay;", content)
-        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', content)
-        self.assertIn('add_header X-Frame-Options "DENY" always;', content)
-        self.assertIn("location ~ ^/(docs|redoc|openapi.json|metrics)", content)
-        self.assertIn("proxy_pass http://127.0.0.1:${AMNEZIA_LOCAL_PORT};", content)
-        self.assertIn("client_max_body_size 10M;", content)
-
-        # Microservice Swagger/OpenAPI disabling in app.py
-        app_py = REPO_ROOT / "scripts" / "amnezia_api" / "app.py"
-        app_content = app_py.read_text(encoding="utf-8")
-        self.assertIn("docs_url=None", app_content)
-        self.assertIn("redoc_url=None", app_content)
-        self.assertIn("openapi_url=None", app_content)
-
-        # Origin subscription proxy domestic resolvers
-        origin_sh = NODE_ROOT / "modules" / "xray" / "origin.sh"
-        origin_content = origin_sh.read_text(encoding="utf-8")
-        self.assertIn('local resolved_servers="77.88.8.8 77.88.8.1 195.208.4.1"', origin_content)
-
-    def test_amnezia_dual_mode_nginx_and_certbot_coexistence(self):
-        """Verify Amnezia module properly handles port 80 coexistence, protocol detection, and clean renewal hooks."""
-        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
-        content = amnezia_sh.read_text(encoding="utf-8")
-
-        # 1. Removal of default site to prevent port 80 conflict with Docker proxies (using cp -L to dereference symlink)
-        self.assertIn('cp -L "$def_site" "/etc/nginx/sites-available/default.user.bak"', content)
-        self.assertIn('rm -f "$def_site"', content)
-
-        # 2. UFW port 80 opening before Certbot challenge with rollback on failure
-        self.assertIn('ufw allow 80/tcp comment "just1knode certbot verification"', content)
-        self.assertIn('ufw delete allow 80/tcp', content)
-
-        # 3. Dynamic container detection on host port 80 with fail-closed non-interactive mode and trap
-        common_sh = NODE_ROOT / "lib" / "common.sh"
-        common_content = common_sh.read_text(encoding="utf-8")
-        self.assertIn("detect_host_port80_container()", common_content)
-        self.assertIn("detect_host_port80_container", content)
-        self.assertIn('pause_ans="N"', content)
-        self.assertIn('read -rp', content)
-        self.assertIn("trap 'if [[ -n", content)
-        self.assertIn('docker stop "$port80_container"', content)
-        self.assertIn('docker start "$stopped_container"', content)
-
-        # 4. Strict Nginx lifecycle check with default site restoration on failure
-        self.assertIn('systemctl restart nginx', content)
-        self.assertIn('systemctl is-active --quiet nginx', content)
-        self.assertIn('ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default', content)
-
-        # 5. Wildcard and IP in server_name
-        self.assertIn('server_name ${api_domain} ${my_ip} _;', content)
-
-        # 6. Streamlined Certbot deploy renewal hook (graceful reload, no unnecessary amnezia-api restart)
-        self.assertIn('deploy/restart-amnezia-nginx.sh', content)
-        self.assertIn('systemctl reload nginx', content)
-        hook_match = re.search(r'deploy_amnezia_certbot_renewal_hook\(\)\s*\{(.*?)\n\}', content, re.DOTALL)
-        self.assertIsNotNone(hook_match)
-        self.assertNotIn('systemctl restart amnezia-api', hook_match.group(1))
-
-        # 7. Common lib installer purges default site immediately after apt install with cp -L and protects web ports in UFW
-        self.assertIn('cp -L "$def_site" "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/default.user.bak"', common_content)
-        self.assertIn('rm -f "$def_site"', common_content)
-        self.assertIn('ufw allow 80/tcp comment "http web service"', common_content)
-        self.assertIn('ufw allow 443/tcp comment "https web service"', common_content)
-
-        # 8. Protocol version detection and display (differentiating awg2, awg3, awg3.1)
-        self.assertIn("detect_awg_protocol_version()", content)
-        self.assertIn("amneziawg3.1", content)
-        self.assertIn("amneziawg3", content)
-        self.assertIn("amneziawg2", content)
-        self.assertIn("🌐 Протокол:", content)
-        self.assertIn("📦 Docker контейнер:", content)
-
-        # 9. Doctor check 3b displays protocol version and container status
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn("Docker контейнер:", just1knode_sh)
-        self.assertIn("Протокол:", just1knode_sh)
-
-        # 10. Amnezia Nginx Catch-All default_server with ssl_reject_handshake on domain mode
-        self.assertIn("listen ${public_port} ssl default_server;", content)
-        self.assertIn("ssl_reject_handshake on;", content)
-        self.assertIn("server_tokens off;", content)
-
-        # 11. Amnezia API UFW rule restricts to bot_ip via heal_node_firewall_and_stealth
-        self.assertIn("heal_node_firewall_and_stealth", content)
-        self.assertIn('ufw allow from "$bot_ip" to any port "$awg_port" proto tcp comment "just1knode amnezia api"', common_content)
-
     def test_detect_host_port80_container_filtering_behaviour(self):
         """Verify detect_host_port80_container correctly matches host TCP :80 bindings and ignores container-only :80 or UDP :80."""
         # Simulated docker ps outputs
@@ -3084,14 +2937,11 @@ remove_traffic_watchdog_timer
         self.assertFalse(run_validate_ip("not-an-ip"))
 
     def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
-        """Verify uninstall_node and uninstall_amnezia_component remove awg_port and bot_ip from UFW."""
+        """Verify uninstall_node removes awg_port and bot_ip from UFW."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('st_awg_port="$(get_state_val "awg_port" 2>/dev/null || true)"', just1knode_sh)
         self.assertIn('ufw delete allow from "$st_bot_ip" to any port "$st_awg_port" proto tcp', just1knode_sh)
         self.assertIn('ufw delete allow "${st_awg_port}/tcp"', just1knode_sh)
-
-        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
-        self.assertIn('ufw delete allow from "$bot_ip" to any port "$pub_port" proto tcp', amnezia_sh)
 
     def test_origin_catchall_dummy_fallback_on_old_nginx(self):
         """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
@@ -3101,14 +2951,6 @@ remove_traffic_watchdog_timer
         self.assertIn("ssl_certificate ${dummy_dir}/dummy.crt;", origin_sh)
         self.assertIn("ssl_certificate {dummy_dir}/dummy.crt;", origin_sh)
         self.assertNotIn("ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;", origin_sh)
-
-    def test_amnezia_catchall_dummy_fallback_on_old_nginx(self):
-        """Verify amnezia fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
-        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
-        self.assertIn("dummy_dir=", amnezia_sh)
-        self.assertIn("CN=invalid", amnezia_sh)
-        self.assertIn("ssl_certificate ${dummy_dir}/dummy.crt;", amnezia_sh)
-        self.assertIn("listen ${public_port} ssl default_server;", amnezia_sh)
 
     def test_relay_install_strictly_tls_and_validates_dns(self):
         """Verify install_xray_relay_node strictly provisions VLESS TLS and validates DNS A-record."""
@@ -3615,13 +3457,6 @@ COMMIT
         removed = remove_rules(synced)
         self.assertNotIn("# START JUST1KNODE ANTI-ABUSE", removed)
         self.assertEqual(removed.strip(), sample_ufw.strip())
-
-    def test_amnezia_status_uses_unified_check(self):
-        """Verify show_amnezia_status and check_amnezia_abuse_rules share the exact same check."""
-        amnezia_sh = (NODE_ROOT / "modules" / "amnezia" / "amnezia.sh").read_text(encoding="utf-8")
-        self.assertIn("if check_amnezia_abuse_rules; then", amnezia_sh)
-        self.assertIn('dport 25 -j REJECT --reject-with tcp-reset', amnezia_sh)
-        self.assertIn('string \\"BitTorrent protocol\\"', amnezia_sh)
 
     def test_modular_awg_node_doctor_and_status_skips_xray_behavioral(self):
         """Verify run_doctor on modular AWG-only node skips Xray Core and Xray config check."""

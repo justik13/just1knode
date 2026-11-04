@@ -761,7 +761,7 @@ EOF
     if ! is_ssh_port "8444" && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
         ufw delete allow 8444/tcp >/dev/null 2>&1 || true
         ufw delete allow 8444 >/dev/null 2>&1 || true
-        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
+        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && (validate_ip "$bot_ip" || validate_ipv4 "$bot_ip"); then
             ufw allow from "$bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
         else
             warn "BOT_IP не задан в state.json. Порт VLESS API (8444) закрыт от внешнего мира (Fail-Closed)."
@@ -2161,7 +2161,7 @@ if cands:
         read -rp "Введите IP-адрес Telegram-бота (для ограничения доступа к API): " input_bip || true
         bot_ip="$(echo "$input_bip" | tr -d '[:space:]')"
     fi
-    if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && validate_ipv4 "$bot_ip"; then
+    if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && (validate_ip "$bot_ip" || validate_ipv4 "$bot_ip"); then
         set_state_val "bot_ip" "$bot_ip"
         local amnezia_check_p
         amnezia_check_p="$(get_state_val "awg_port" "8443")"
