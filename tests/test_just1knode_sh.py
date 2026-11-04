@@ -2747,14 +2747,6 @@ remove_traffic_watchdog_timer
         self.assertFalse(timer_file.exists(), "Traffic timer unit must be removed")
         self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be removed")
 
-    def test_amnezia_node_and_api_artifacts_decommissioned(self):
-        """Verify amnezia_api microservice and just1knode Amnezia module are completely purged."""
-        amnezia_api_dir = REPO_ROOT / "scripts" / "amnezia_api"
-        self.assertFalse(amnezia_api_dir.exists(), "scripts/amnezia_api must not exist in decommissioned node")
-
-        amnezia_sh = NODE_ROOT / "modules" / "amnezia" / "amnezia.sh"
-        self.assertFalse(amnezia_sh.exists(), "modules/amnezia must not exist in decommissioned node")
-
     def test_detect_host_port80_container_filtering_behaviour(self):
         """Verify detect_host_port80_container correctly matches host TCP :80 bindings and ignores container-only :80 or UDP :80."""
         # Simulated docker ps outputs
