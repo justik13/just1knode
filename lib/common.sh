@@ -1043,6 +1043,426 @@ resolve_relay_geo_interactive() {
     echo "${code}|${country}"
 }
 
+# =============================================================================
+# СИСТЕМА ЗАЩИТЫ ОТ АБУЗА (ANTI-ABUSE: NETFILTER / IPTABLES / UFW)
+# 1. Блокировка исходящего SMTP (порт 25) с tcp-reset
+# 2. Блокировка BitTorrent L7 хэндшейка и DHT пакетов через xt_string
+# =============================================================================
 
+sync_ufw_before_rules_antiabuse() {
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        python3 -c "
+import re, sys
+bf = sys.argv[1]
+with open(bf, 'r', encoding='utf-8') as f:
+    content = f.read()
 
+content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
 
+block = '''# START JUST1KNODE ANTI-ABUSE
+-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset
+-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP
+-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP
+-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP
+# END JUST1KNODE ANTI-ABUSE
+'''
+
+if ':ufw-before-forward' in content:
+    content = re.sub(r'(:\s*ufw-before-forward\s+-\s+\[0:0\]\n)', r'\1' + block, content, count=1)
+elif '*filter' in content:
+    content = content.replace('*filter\n', '*filter\n' + block, 1)
+else:
+    sys.exit(1)
+
+with open(bf, 'w', encoding='utf-8') as f:
+    f.write(content)
+" "$before_rules" 2>/dev/null || return 1
+    else
+        if command -v ufw >/dev/null 2>&1; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+remove_ufw_before_rules_antiabuse() {
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        python3 -c "
+import re, sys
+bf = sys.argv[1]
+try:
+    with open(bf, 'r', encoding='utf-8') as f:
+        content = f.read()
+    new_content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
+    if new_content != content:
+        with open(bf, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+except Exception:
+    pass
+" "$before_rules" 2>/dev/null || true
+    fi
+}
+
+check_antiabuse_rules() {
+    # Проверка 4 обязательных инвариантов сетевой защиты:
+    # 1. SMTP:25 REJECT
+    # 2. BitTorrent L7 TCP DROP
+    # 3. BitTorrent L7 UDP uTP DROP
+    # 4. BitTorrent L7 UDP DHT DROP
+    local missing=0
+
+    # 1. SMTP:25
+    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 2. BitTorrent TCP
+    if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 3. BitTorrent UDP
+    if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 4. BitTorrent UDP DHT
+    if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 5. Проверка сохранения всех 4 правил в persistent источнике /etc/ufw/before.rules (при наличии UFW)
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        if ! grep -q -- "-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null; then
+            missing=$((missing + 1))
+        fi
+    elif command -v ufw >/dev/null 2>&1; then
+        missing=$((missing + 1))
+    fi
+
+    if [[ $missing -eq 0 ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+apply_antiabuse_protection() {
+    log "Настройка сетевой защиты (Anti-Abuse: SMTP 25 + BitTorrent L7)..."
+    apply_node_sysctl_hardening
+
+    # 1. Автозагрузка модуля ядра xt_string для L7 фильтрации
+    modprobe xt_string 2>/dev/null || true
+    mkdir -p /etc/modules-load.d 2>/dev/null || true
+    if ! grep -q "^xt_string" /etc/modules-load.d/just1knode.conf 2>/dev/null; then
+        echo "xt_string" >> /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+    fi
+
+    # 2. Персистентность в UFW (переживает ufw reload и перезагрузку ОС)
+    if ! sync_ufw_before_rules_antiabuse; then
+        warn "Сбой сохранения правил в /etc/ufw/before.rules!"
+        return 1
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        if ! ufw reload >/dev/null 2>&1; then
+            warn "Сбой перезагрузки конфигурации UFW (ufw reload)!"
+            return 1
+        fi
+    fi
+
+    # 3. Применение правил в активный FORWARD и DOCKER-USER (немедленная защита без ожидания перезагрузки)
+    # SMTP:25 reject
+    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
+        iptables -I FORWARD 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    fi
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        if ! iptables -C DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
+            iptables -I DOCKER-USER 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        fi
+    fi
+
+    # BitTorrent L7
+    if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+        if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 2 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 3 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 4 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+        fi
+
+        if iptables -L DOCKER-USER >/dev/null 2>&1; then
+            if ! iptables -C DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 2 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+            fi
+            if ! iptables -C DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 3 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+            fi
+            if ! iptables -C DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 4 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # 4. Итоговая проверка соблюдения инвариантов (Fail-Closed)
+    if check_antiabuse_rules; then
+        if [[ -f /etc/ufw/after.init ]]; then
+            sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+        fi
+        if systemctl is-enabled --quiet just1knode-antiabuse.service 2>/dev/null; then
+            systemctl disable --now just1knode-antiabuse.service >/dev/null 2>&1 || true
+        fi
+        rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+
+        log "✔ Правила сетевой защиты Anti-Abuse (SMTP:25 + BitTorrent L7 TCP/UDP/DHT) успешно активированы."
+        set_state_val "abuse_protection" "enabled"
+        return 0
+    else
+        warn "Не удалось активировать полный набор правил Anti-Abuse (проверьте модуль ядра xt_string)!"
+        return 1
+    fi
+}
+
+remove_antiabuse_protection() {
+    log "Очистка правил сетевой защиты Anti-Abuse..."
+    iptables -D FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    iptables -D DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+
+    iptables -D FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        iptables -D DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        iptables -D DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        iptables -D DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+    fi
+
+    # Удаление из /etc/ufw/before.rules
+    remove_ufw_before_rules_antiabuse
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        ufw reload >/dev/null 2>&1 || true
+    fi
+
+    # Очистка legacy хуков и сервисов
+    if [[ -f /etc/ufw/after.init ]]; then
+        sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+    fi
+    if systemctl is-enabled --quiet just1knode-antiabuse.service 2>/dev/null; then
+        systemctl disable --now just1knode-antiabuse.service >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+
+    # Удаление xt_string из автозагрузки при удалении
+    if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
+        sed -i '/^xt_string$/d' /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+    fi
+
+    set_state_val "abuse_protection" "disabled"
+}
+
+# Алиасы обратной совместимости
+check_amnezia_abuse_rules() {
+    check_antiabuse_rules "$@"
+}
+
+apply_amnezia_abuse_protection() {
+    apply_antiabuse_protection "$@"
+}
+
+remove_amnezia_abuse_protection() {
+    remove_antiabuse_protection "$@"
+}
+
+# =============================================================================
+# ДЕКОМИССИОНИРОВАННЫЙ КОМПОНЕНТ AMNEZIAWG (STUBS & PURGE)
+# Протокол AmneziaWG выведен из эксплуатации в продакшене.
+# Данные функции предотвращают ошибки 'command not found' и обеспечивают
+# безопасное автономное удаление остаточных компонентов (just1knode purge-amnezia).
+# =============================================================================
+
+detect_amnezia_container() {
+    echo "amnezia-awg2"
+}
+
+detect_awg_protocol_version() {
+    echo "amneziawg2"
+}
+
+is_amnezia_container_running() {
+    return 1
+}
+
+ensure_amnezia_api_service_and_env() {
+    warn "Служба amnezia-api выведена из эксплуатации."
+    return 0
+}
+
+install_amnezia_node() {
+    warn "Протокол AmneziaWG выведен из эксплуатации и более не поддерживается."
+    echo -e "С 27.10.2026 протокол AmneziaWG выведен из продакшена из-за блокировок"
+    echo -e "со стороны ТСПУ РКН. Рекомендуется использовать VLESS:"
+    echo -e "  just1knode install vless\n"
+    return 1
+}
+
+show_amnezia_bot_credentials() {
+    warn "Компонент AmneziaWG выведен из эксплуатации."
+    local api_key api_url
+    api_key="$(get_state_val "awg_api_key" "")"
+    api_url="$(get_state_val "awg_api_url" "")"
+    if [[ -n "$api_key" && -n "$api_url" ]]; then
+        echo -e "Сохраненные данные узла:"
+        echo -e "  URL: ${api_url}"
+        echo -e "  Key: ${api_key}"
+    fi
+}
+
+show_amnezia_status() {
+    warn "Компонент AmneziaWG выведен из эксплуатации."
+    local cur_has_a
+    cur_has_a="$(get_state_val "has_awg" "0")"
+    if [[ "$cur_has_a" == "1" ]]; then
+        echo -e "На узле обнаружены остаточные параметры AmneziaWG. Для очистки выполните:"
+        echo -e "  just1knode purge-amnezia\n"
+    fi
+}
+
+backup_amnezia_node() {
+    warn "Компонент AmneziaWG выведен из эксплуатации. Резервное копирование AmneziaWG более не требуется."
+    local bak_file="${1:-}"
+    if [[ -z "$bak_file" ]]; then
+        bak_file="${BACKUP_DIR:-/var/backups/just1knode}/amnezia_legacy_$(date +%Y%m%d_%H%M%S).tar.gz"
+    fi
+    if [[ -d "/etc/amnezia-api" || -d "/opt/amnezia" ]]; then
+        mkdir -p "$(dirname "$bak_file")"
+        tar -czf "$bak_file" -C / opt/amnezia etc/amnezia-api 2>/dev/null || true
+        log "Остаточные файлы сохранены в $bak_file"
+    fi
+}
+
+restore_amnezia_node() {
+    warn "Восстановление AmneziaWG не поддерживается: компонент выведен из эксплуатации."
+    echo -e "Используйте VLESS over XHTTP: just1knode install vless\n"
+    return 1
+}
+
+uninstall_amnezia_component() {
+    title "УДАЛЕНИЕ КОМПОНЕНТА AMNEZIAWG"
+    check_root
+    init_state_dir
+
+    local cur_has_v cur_has_r
+    cur_has_v="$(get_state_val "has_vless" "0")"
+    cur_has_r="$(get_state_val "has_relay" "0")"
+
+    # Если на узле активен VLESS, гарантируем автономный VLESS API (8444) до удаления конфигов Amnezia
+    if [[ "$cur_has_v" == "1" ]] && declare -f setup_xray_api_proxy >/dev/null 2>&1; then
+        setup_xray_api_proxy 2>/dev/null || true
+    fi
+
+    # 1. Остановка и отключение службы amnezia-api
+    systemctl stop amnezia-api 2>/dev/null || true
+    systemctl disable amnezia-api 2>/dev/null || true
+    rm -f /etc/systemd/system/amnezia-api.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+
+    # 2. Остановка и удаление Docker-контейнеров amnezia-awg2 / amnezia-awg
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        local amnezia_containers
+        amnezia_containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(amnezia-awg2|amnezia-awg)$' || true)"
+        for cont in $amnezia_containers; do
+            log "Остановка и удаление Docker-контейнера $cont..."
+            docker stop "$cont" >/dev/null 2>&1 || true
+            docker rm -f "$cont" >/dev/null 2>&1 || true
+        done
+        local remaining_containers
+        remaining_containers="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(amnezia-awg2|amnezia-awg)$' || true)"
+        if [[ -n "$remaining_containers" ]]; then
+            warn "Не удалось полностью удалить контейнеры: $remaining_containers"
+        fi
+    fi
+
+    # 3. Удаление интерфейса ядра awg0
+    if ip link show awg0 >/dev/null 2>&1; then
+        log "Остановка и удаление сетевого интерфейса awg0..."
+        ip link set awg0 down 2>/dev/null || true
+        ip link delete awg0 2>/dev/null || true
+    fi
+
+    # 4. Удаление Nginx-конфигов Amnezia и перезагрузка nginx
+    local nginx_conf_dir="${NGINX_CONF_DIR:-/etc/nginx}"
+    rm -f "${nginx_conf_dir}/conf.d/amnezia-ratelimit.conf" \
+          "${nginx_conf_dir}/sites-enabled/just1k-amnezia.conf" \
+          "${nginx_conf_dir}/sites-available/just1k-amnezia.conf" 2>/dev/null || true
+    local letsencrypt_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    rm -f "${letsencrypt_dir}/renewal-hooks/deploy/restart-amnezia-nginx.sh" \
+          "${letsencrypt_dir}/renewal-hooks/pre/01-stop-port80-docker.sh" \
+          "${letsencrypt_dir}/renewal-hooks/post/01-start-port80-docker.sh" \
+          "${letsencrypt_dir}/renewal-hooks/pre/stop-port80-docker.sh" \
+          "${letsencrypt_dir}/renewal-hooks/post/start-port80-docker.sh" 2>/dev/null || true
+
+    if [[ ! -f "${nginx_conf_dir}/sites-enabled/just1k-origin.conf" && ! -f "${nginx_conf_dir}/sites-enabled/just1k-vless-api.conf" && ! -e "${nginx_conf_dir}/sites-enabled/default" ]]; then
+        if [[ -f "${nginx_conf_dir}/sites-available/default.user.bak" ]]; then
+            cp -a "${nginx_conf_dir}/sites-available/default.user.bak" "${nginx_conf_dir}/sites-available/default" 2>/dev/null || true
+            ln -sf "${nginx_conf_dir}/sites-available/default" "${nginx_conf_dir}/sites-enabled/default" 2>/dev/null || true
+            rm -f "${nginx_conf_dir}/sites-available/default.user.bak" 2>/dev/null || true
+        fi
+    fi
+
+    if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
+
+    # 5. Очистка каталогов и остаточных файлов
+    rm -rf "${AMNEZIA_API_DIR:-/opt/amnezia-api}" \
+           "${AMNEZIA_API_ETC:-/etc/amnezia-api}" \
+           "${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}" \
+           /etc/ssl/just1k_amnezia 2>/dev/null || true
+    rmdir /opt/amnezia 2>/dev/null || true
+
+    # 6. Очистка портов в UFW
+    local pub_port bot_ip
+    pub_port="$(get_state_val "awg_port" "${AMNEZIA_PUBLIC_PORT:-8443}")"
+    bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    if command -v ufw >/dev/null 2>&1; then
+        if [[ -n "$pub_port" && "$pub_port" != "-" ]] && ! is_ssh_port "$pub_port"; then
+            if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]]; then
+                ufw delete allow from "$bot_ip" to any port "$pub_port" proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow "${pub_port}/tcp" >/dev/null 2>&1 || true
+            ufw delete allow "${pub_port}" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 7. Обновление состояния узла
+    set_state_val "has_awg" "0"
+    set_state_val "awg_installed" "false"
+    set_state_val "awg_api_url" ""
+    set_state_val "awg_api_key" ""
+    set_state_val "awg_domain" ""
+    set_state_val "awg_port" ""
+
+    if [[ "$cur_has_v" == "0" && "$cur_has_r" == "0" ]]; then
+        remove_antiabuse_protection 2>/dev/null || true
+        set_state_val "role" "unconfigured"
+        log "Режим узла сброшен в: НЕ НАСТРОЕН"
+    else
+        set_state_val "role" "node"
+        log "Компонент AmneziaWG удален. Оставшиеся службы активны на узле."
+    fi
+
+    log "✔ Компонент AmneziaWG API успешно удален с сервера."
+}

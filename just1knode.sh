@@ -986,14 +986,14 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
+    if [[ "$role" == "awg" || "$cur_has_a" == "1" || "$role" == "relay" || "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
-        if check_amnezia_abuse_rules; then
+        if check_antiabuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
         else
             echo -e "  ${YELLOW}!${NC} Сетевая защита Anti-Abuse неполная или отсутствует в iptables"
             warn "ВНИМАНИЕ: Сетевая защита Anti-Abuse не активна! Запуск автоматического восстановления (Auto-Heal)..."
-            if apply_amnezia_abuse_protection && check_amnezia_abuse_rules; then
+            if apply_antiabuse_protection && check_antiabuse_rules; then
                 echo -e "  ${GREEN}✔${NC} Правила сетевой защиты Anti-Abuse успешно восстановлены и активны."
             else
                 echo -e "  ${RED}✗${NC} ОШИБКА: Не удалось восстановить правила Anti-Abuse (проверьте модуль ядра xt_string)!"
@@ -1111,7 +1111,7 @@ reset_node() {
     systemctl stop xray xray-api amnezia-api 2>/dev/null || true
     systemctl disable xray xray-api amnezia-api 2>/dev/null || true
     remove_traffic_watchdog_timer
-    remove_amnezia_abuse_protection 2>/dev/null || true
+    remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
@@ -1310,7 +1310,7 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
     rm -rf "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" 2>/dev/null || true
-    remove_amnezia_abuse_protection 2>/dev/null || true
+    remove_antiabuse_protection 2>/dev/null || true
 
     if [[ -f "${nginx_conf_dir}/sites-available/default.user.bak" ]]; then
         info "Восстановление исходного default сайта в Nginx..."
@@ -1745,12 +1745,12 @@ heal_node_config() {
         fi
         if [[ "$has_a" == "1" ]]; then
             ensure_amnezia_api_service_and_env
-            apply_amnezia_abuse_protection
+            apply_antiabuse_protection
         fi
         heal_node_firewall_and_stealth
         log "Конфигурация модульного узла актуализирована."
     elif [[ "$role" == "awg" ]]; then
-        apply_amnezia_abuse_protection
+        apply_antiabuse_protection
         heal_node_firewall_and_stealth
         log "Сетевая защита AmneziaWG актуализирована."
     else
@@ -1868,11 +1868,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             anti-abuse|antiabuse|apply-abuse-protection)
                 check_root
-                apply_amnezia_abuse_protection
+                apply_antiabuse_protection
                 ;;
             remove-anti-abuse|remove-antiabuse|disable-anti-abuse)
                 check_root
-                remove_amnezia_abuse_protection
+                remove_antiabuse_protection
                 ;;
             update-post)
                 check_root

@@ -1225,7 +1225,7 @@ EOF
     set_state_val "role" "node"
     if [[ "$prev_role" == "awg" || "$cur_has_vless" == "1" ]]; then
         log "Компоненты узла актуализированы (Relay активен)."
-        apply_amnezia_abuse_protection
+        apply_antiabuse_protection
         if [[ "$cur_has_vless" == "1" ]]; then
             setup_xray_api_proxy "$dest_server"
         fi
