@@ -2597,6 +2597,7 @@ if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', []))
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
     if [[ "$cur_has_a" == "0" && "$cur_has_r" == "0" ]]; then
+        remove_antiabuse_protection 2>/dev/null || true
         set_state_val "role" "unconfigured"
     else
         set_state_val "role" "node"
@@ -2677,6 +2678,7 @@ if os.path.exists(cfg_file):
     cur_has_a="$(get_state_val "has_awg" "0")"
     cur_has_v="$(get_state_val "has_vless" "0")"
     if [[ "$cur_has_a" == "0" && "$cur_has_v" == "0" ]]; then
+        remove_antiabuse_protection 2>/dev/null || true
         set_state_val "role" "unconfigured"
     else
         set_state_val "role" "node"

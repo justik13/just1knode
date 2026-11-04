@@ -1735,6 +1735,7 @@ heal_node_config() {
         heal_and_update_origin_config
     elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
         heal_and_update_relay_config
+        apply_antiabuse_protection
     elif [[ "$role" == "node" ]]; then
         local has_v has_r has_a
         has_v="$(get_state_val "has_vless" "0")"
@@ -1743,8 +1744,10 @@ heal_node_config() {
         if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
             heal_and_update_relay_config
         fi
-        if [[ "$has_a" == "1" ]]; then
-            ensure_amnezia_api_service_and_env
+        if [[ "$has_a" == "1" || "$has_v" == "1" || "$has_r" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
+            if [[ "$has_a" == "1" ]]; then
+                ensure_amnezia_api_service_and_env
+            fi
             apply_antiabuse_protection
         fi
         heal_node_firewall_and_stealth
@@ -1888,8 +1891,21 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             reset) reset_node ;;
             uninstall|remove|purge)
-                shift
-                uninstall_node "$@"
+                case "${2:-}" in
+                    amnezia|awg) uninstall_amnezia_component ;;
+                    vless|tls) uninstall_vless_component "${3:-}" ;;
+                    relay)
+                        if [[ "$(get_state_val "role")" == "origin" && -n "${3:-}" ]]; then
+                            remove_relay_node "${3:-}"
+                        else
+                            uninstall_relay_component "${3:-}"
+                        fi
+                        ;;
+                    *)
+                        shift
+                        uninstall_node "$@"
+                        ;;
+                esac
                 ;;
             *) error "Неизвестная команда: $1. Запустите 'just1knode' без аргументов для входа в меню." ;;
         esac

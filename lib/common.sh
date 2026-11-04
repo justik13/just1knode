@@ -20,6 +20,15 @@ export LANG="${LANG:-C.UTF-8}"
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+if ! declare -f get_state_val >/dev/null 2>&1; then
+    _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    if [[ -f "${_lib_dir}/state.sh" ]]; then
+        # shellcheck source=lib/state.sh
+        source "${_lib_dir}/state.sh"
+    fi
+    unset _lib_dir
+fi
+
 
 log() {
     echo -e "${GREEN}[+]${NC} $1"
@@ -1053,7 +1062,7 @@ sync_ufw_before_rules_antiabuse() {
     local before_rules="/etc/ufw/before.rules"
     if [[ -f "$before_rules" ]]; then
         python3 -c "
-import re, sys
+import os, re, sys, tempfile
 bf = sys.argv[1]
 with open(bf, 'r', encoding='utf-8') as f:
     content = f.read()
@@ -1075,8 +1084,13 @@ elif '*filter' in content:
 else:
     sys.exit(1)
 
-with open(bf, 'w', encoding='utf-8') as f:
+d = os.path.dirname(os.path.abspath(bf))
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     f.write(content)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(t_path, bf)
 " "$before_rules" 2>/dev/null || return 1
     else
         if command -v ufw >/dev/null 2>&1; then
@@ -1090,15 +1104,20 @@ remove_ufw_before_rules_antiabuse() {
     local before_rules="/etc/ufw/before.rules"
     if [[ -f "$before_rules" ]]; then
         python3 -c "
-import re, sys
+import os, re, sys, tempfile
 bf = sys.argv[1]
 try:
     with open(bf, 'r', encoding='utf-8') as f:
         content = f.read()
     new_content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
     if new_content != content:
-        with open(bf, 'w', encoding='utf-8') as f:
+        d = os.path.dirname(os.path.abspath(bf))
+        t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+        with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
             f.write(new_content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(t_path, bf)
 except Exception:
     pass
 " "$before_rules" 2>/dev/null || true
@@ -1221,10 +1240,10 @@ apply_antiabuse_protection() {
         if [[ -f /etc/ufw/after.init ]]; then
             sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
         fi
-        if systemctl is-enabled --quiet just1knode-antiabuse.service 2>/dev/null; then
-            systemctl disable --now just1knode-antiabuse.service >/dev/null 2>&1 || true
+        if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
+            rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+            systemctl daemon-reload 2>/dev/null || true
         fi
-        rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
 
         log "✔ Правила сетевой защиты Anti-Abuse (SMTP:25 + BitTorrent L7 TCP/UDP/DHT) успешно активированы."
         set_state_val "abuse_protection" "enabled"
@@ -1260,10 +1279,10 @@ remove_antiabuse_protection() {
     if [[ -f /etc/ufw/after.init ]]; then
         sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
     fi
-    if systemctl is-enabled --quiet just1knode-antiabuse.service 2>/dev/null; then
-        systemctl disable --now just1knode-antiabuse.service >/dev/null 2>&1 || true
+    if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
+        rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
     fi
-    rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
 
     # Удаление xt_string из автозагрузки при удалении
     if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
@@ -1370,7 +1389,12 @@ uninstall_amnezia_component() {
 
     # Если на узле активен VLESS, гарантируем автономный VLESS API (8444) до удаления конфигов Amnezia
     if [[ "$cur_has_v" == "1" ]] && declare -f setup_xray_api_proxy >/dev/null 2>&1; then
-        setup_xray_api_proxy 2>/dev/null || true
+        local v_target_dom
+        v_target_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "$(get_state_val "awg_domain" "")")")"
+        if [[ -z "$(get_state_val "vless_domain" "")" && -n "$v_target_dom" ]]; then
+            set_state_val "vless_domain" "$v_target_dom"
+        fi
+        setup_xray_api_proxy "$v_target_dom" 2>/dev/null || true
     fi
 
     # 1. Остановка и отключение службы amnezia-api
@@ -1429,13 +1453,16 @@ uninstall_amnezia_component() {
     # 5. Очистка каталогов и остаточных файлов
     rm -rf "${AMNEZIA_API_DIR:-/opt/amnezia-api}" \
            "${AMNEZIA_API_ETC:-/etc/amnezia-api}" \
-           "${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}" \
-           /etc/ssl/just1k_amnezia 2>/dev/null || true
+           "${AMNEZIA_AWG_DIR:-/opt/amnezia/awg}" 2>/dev/null || true
+    if ! grep -rq "/etc/ssl/just1k_amnezia" "${nginx_conf_dir}/sites-enabled" 2>/dev/null; then
+        rm -rf /etc/ssl/just1k_amnezia 2>/dev/null || true
+    fi
     rmdir /opt/amnezia 2>/dev/null || true
 
     # 6. Очистка портов в UFW
     local pub_port bot_ip
     pub_port="$(get_state_val "awg_port" "${AMNEZIA_PUBLIC_PORT:-8443}")"
+    [[ -z "$pub_port" || "$pub_port" == "-" ]] && pub_port="${AMNEZIA_PUBLIC_PORT:-8443}"
     bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
     if command -v ufw >/dev/null 2>&1; then
         if [[ -n "$pub_port" && "$pub_port" != "-" ]] && ! is_ssh_port "$pub_port"; then
