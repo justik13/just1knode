@@ -1370,24 +1370,6 @@ remove_antiabuse_protection() {
         rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
         systemctl daemon-reload 2>/dev/null || true
     fi
-    set_state_val "abuse_protection" "disabled"
-    log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
-}
-
-    # Удаление из /etc/ufw/before.rules
-    remove_ufw_before_rules_antiabuse
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-        ufw reload >/dev/null 2>&1 || true
-    fi
-
-    # Очистка legacy хуков и сервисов
-    if [[ -f /etc/ufw/after.init ]]; then
-        sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
-    fi
-    if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
-        rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-    fi
 
     # Удаление xt_string из автозагрузки при удалении
     if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
@@ -1395,5 +1377,6 @@ remove_antiabuse_protection() {
     fi
 
     set_state_val "abuse_protection" "disabled"
+    log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
 }
 
