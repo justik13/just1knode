@@ -423,7 +423,7 @@ stream_settings = {
     'tlsSettings': {
         'serverName': r_sni if r_sni else r_ip,
         'fingerprint': 'firefox',
-        'alpn': ['h2', 'http/1.1']
+        'alpn': ['http/1.1']
     }
 }
 
@@ -1192,7 +1192,7 @@ st.pop('realitySettings', None)
 st['tlsSettings'] = {
     'serverName': new_sni,
     'fingerprint': 'firefox',
-    'alpn': ['h2', 'http/1.1']
+    'alpn': ['http/1.1']
 }
 
 # Сохраняем обновленный config.json

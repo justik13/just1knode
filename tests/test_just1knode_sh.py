@@ -3614,8 +3614,11 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
 
         # 3. Fallback and anti-probing invariants
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
         self.assertIn("deploy_vless_fallback_nginx", relay_sh)
         self.assertIn("'alpn': ['http/1.1']", relay_sh)
+        self.assertIn("'alpn': ['http/1.1']", relays_manage_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relays_manage_sh)
         self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
         self.assertIn("server_tokens off;", relay_sh)
         self.assertNotIn("Edge Gateway Infrastructure", relay_sh)
@@ -3628,6 +3631,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
         self.assertNotIn("just1k-amnezia.conf", common_sh)
+        self.assertIn('ufw delete allow 80/tcp', common_sh)
         self.assertIn("timeout=5.0", just1knode_sh)
         self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
 

@@ -668,6 +668,23 @@ heal_node_firewall_and_stealth() {
             fi
         fi
     fi
+
+    # 7. Защита веб-периметра: закрытие порта 80 на узлах без внешних веб-сервисов
+    # На нодах без роли Origin и без локального контейнера (Caddy) порт 80 не должен быть открыт наружу.
+    # Фолбэк Nginx слушает строго на 127.0.0.1:80 (локальный fallback ядра Xray).
+    if [[ "$role" != "origin" ]]; then
+        if [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
+           [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
+           ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
+            if ! is_ssh_port "80"; then
+                if ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
+                    ufw delete allow 80/tcp >/dev/null 2>&1 || true
+                    ufw delete allow 80 >/dev/null 2>&1 || true
+                    log "Фаервол UFW: закрыт неиспользуемый публичный порт 80 (маскировка Zero-Signature)."
+                fi
+            fi
+        fi
+    fi
 }
 
 sync_xhttp_upstreams_conf() {
