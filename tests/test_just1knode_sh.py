@@ -2898,7 +2898,8 @@ remove_traffic_watchdog_timer
     def test_doctor_ufw_acl_validation_xray_api(self):
         """Verify run_doctor checks port 8444 for Xray API."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('ufw status 2>/dev/null | grep -E "^8444(/tcp)?\\s+ALLOW"', just1knode_sh)
+        self.assertIn('echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"', just1knode_sh)
+        self.assertIn("Порт 8444 защищен и доступен только с BOT_IP", just1knode_sh)
 
     def test_doctor_ufw_perimeter_audit(self):
         """Verify run_doctor audits full UFW perimeter for dead rules and unauthorized anywhere ports."""

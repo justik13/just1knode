@@ -960,7 +960,7 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" || "$role" == "relay" || "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
+    if [[ "$role" == "relay" || "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
         if check_antiabuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
