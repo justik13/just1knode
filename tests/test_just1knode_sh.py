@@ -555,6 +555,7 @@ exit 0
         self.assertTrue(any(r.get("ip") == ["geoip:private"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "geoip:private block rule must be present on Origin")
         self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
+        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "Port 6881-6889 block rule must be present on Origin")
 
         # 6. Check gRPC API, stats and user traffic policy invariants
         self.assertEqual(updated.get("api", {}).get("tag"), "just1k-wl-api")
@@ -2432,6 +2433,7 @@ ensure_xrayapi_user
         self.assertTrue(any("geoip:private" in r.get("ip", []) and r.get("outboundTag") == "block" for r in rules), "geoip:private block rule must be present on Relay")
         self.assertTrue(any("bittorrent" in r.get("protocol", []) for r in rules), "BitTorrent protocol rule must be present")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "block" for r in rules), "SMTP:25 block rule must be present on Relay")
+        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "block" for r in rules), "Port 6881-6889 block rule must be present on Relay")
         self.assertTrue(any(ob.get("tag") == "block" and ob.get("protocol") == "blackhole" for ob in updated_cfg.get("outbounds", [])), "Blackhole outbound must be present")
 
     # -------------------------------------------------------------------------
@@ -2789,55 +2791,26 @@ remove_traffic_watchdog_timer
         cgroup_host = "0::/system.slice/nginx.service"
         self.assertIsNone(cgroup_pattern.search(cgroup_host))
 
-    def test_detect_awg_protocol_version_behaviour(self):
-        """Verify detect_awg_protocol_version properly parses active vs disabled toggle flags and protocol_version."""
-        import re
-        re_3_1 = re.compile(r'^[ \t]*(RandomTrailers|DisableCookies)[ \t]*=[ \t]*(on|yes|true|1)|^[ \t]*protocol_version[ \t]*=[ \t]*3\.1', re.IGNORECASE | re.MULTILINE)
-        re_3_0 = re.compile(r'^[ \t]*(HeaderProtectionKey|Hpk)[ \t]*=[ \t]*[^ \t#;]|^[ \t]*(ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts)[ \t]*=[ \t]*[^ \t#;]|^[ \t]*protocol_version[ \t]*=[ \t]*3(\.0)?', re.IGNORECASE | re.MULTILINE)
+    def test_backup_and_restore_node_structure_and_dispatch(self):
+        """Verify backup_node and restore_node handle Xray configs, permissions, and CLI dispatch."""
+        backup_sh = (NODE_ROOT / "lib" / "backup.sh").read_text(encoding="utf-8")
+        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
-        def mock_detect(conf: str) -> str:
-            if re_3_1.search(conf):
-                return "amneziawg3.1"
-            if re_3_0.search(conf):
-                return "amneziawg3"
-            return "amneziawg2"
+        # 1. backup_node archives real Xray and just1knode paths
+        self.assertIn('usr/local/etc/xray', backup_sh)
+        self.assertIn('state_dir="${STATE_DIR:-/etc/just1knode}"', backup_sh)
+        self.assertIn('tar -czf "$bak_file" -C /', backup_sh)
 
-        # 1. Base AWG 2.0 configuration
-        conf_2_0 = "[Interface]\nPrivateKey = aaaa\nJc = 4\nS1 = 12\nH1 = 1\n"
-        self.assertEqual(mock_detect(conf_2_0), "amneziawg2")
+        # 2. restore_node extracts and restores services
+        self.assertIn('tar -xzf "$bak_file" -C /', backup_sh)
+        self.assertIn('systemctl restart xray', backup_sh)
+        self.assertIn('systemctl restart xray-api', backup_sh)
 
-        # 2. AWG 3.1 with disabled flags (must NOT falsely detect as 3.1)
-        conf_disabled_3_1 = "[Interface]\nPrivateKey = aaaa\nRandomTrailers = off\nDisableCookies = 0\n"
-        self.assertEqual(mock_detect(conf_disabled_3_1), "amneziawg2")
-
-        # 3. AWG 3.0 with HeaderProtectionKey and disabled RandomTrailers
-        conf_3_0 = "[Interface]\nPrivateKey = aaaa\nHeaderProtectionKey = 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\nRandomTrailers = off\n"
-        self.assertEqual(mock_detect(conf_3_0), "amneziawg3")
-
-        # 3b. AWG 3.0 with HeaderProtectionKey starting with '0' (valid base64 char)
-        conf_3_0_zero = "[Interface]\nPrivateKey = aaaa\nHeaderProtectionKey = 0VzSecretKeyCurve25519String=\n"
-        self.assertEqual(mock_detect(conf_3_0_zero), "amneziawg3")
-
-        # 3c. AWG 3.0 with timing parameters set to '0' (must detect as 3.0 matching vpn_parser.py)
-        conf_3_0_timing_zero = "[Interface]\nPrivateKey = aaaa\nContentPaddingAddition = 0\n"
-        self.assertEqual(mock_detect(conf_3_0_timing_zero), "amneziawg3")
-
-        # 4. AWG 3.1 with active flags
-        conf_3_1_on = "[Interface]\nPrivateKey = aaaa\nRandomTrailers = on\nDisableCookies = on\n"
-        self.assertEqual(mock_detect(conf_3_1_on), "amneziawg3.1")
-
-        conf_3_1_numeric = "[Interface]\nPrivateKey = aaaa\nRandomTrailers = 1\n"
-        self.assertEqual(mock_detect(conf_3_1_numeric), "amneziawg3.1")
-
-        # 5. AWG versions specified via protocol_version field
-        conf_pv_3_1 = "[Interface]\nPrivateKey = aaaa\nprotocol_version = 3.1\n"
-        self.assertEqual(mock_detect(conf_pv_3_1), "amneziawg3.1")
-
-        conf_pv_3_0 = "[Interface]\nPrivateKey = aaaa\nprotocol_version = 3.0\n"
-        self.assertEqual(mock_detect(conf_pv_3_0), "amneziawg3")
-
-        conf_pv_2 = "[Interface]\nPrivateKey = aaaa\nprotocol_version = 2\n"
-        self.assertEqual(mock_detect(conf_pv_2), "amneziawg2")
+        # 3. CLI dispatches to backup_node and restore_node
+        self.assertIn('backup_node "${2:-}"', just1knode_sh)
+        self.assertIn('restore_node "${2:-}"', just1knode_sh)
+        self.assertNotIn('backup_amnezia_node', just1knode_sh)
+        self.assertNotIn('restore_amnezia_node', just1knode_sh)
 
     def test_default_site_symlink_dereference_behaviour(self):
         """Verify cp -L correctly dereferences symlinks to avoid creating broken circular symlink backups."""
@@ -2878,11 +2851,12 @@ remove_traffic_watchdog_timer
         self.assertIsNotNone(match, "catchall_ssl_block with ssl_reject_handshake on; must be defined")
         self.assertNotIn("ssl_certificate", match.group(0), "ssl_certificate must NOT be inside catchall when ssl_reject_handshake on is active")
 
-    def test_set_bot_ip_supports_origin_awg_and_dual_roles(self):
+    def test_set_bot_ip_supports_origin_and_modular_roles(self):
         """Verify set_origin_bot_ip dynamically adapts target port based on role."""
         origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn('target_port="8444"', origin_sh)
-        self.assertIn('target_port="$(get_state_val "awg_port" "8443")"', origin_sh)
+        self.assertIn('role_descr="Origin API (порт 8444)"', origin_sh)
+        self.assertIn('role_descr="Xray API (порт 8444)"', origin_sh)
         self.assertIn('ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp', origin_sh)
         self.assertIn('ufw delete allow 8443/tcp', origin_sh)
 
@@ -2894,12 +2868,11 @@ remove_traffic_watchdog_timer
         self.assertIn('listen 443 ssl default_server', origin_sh)
         self.assertIn("re.sub(r'server\\s*\\{[^}]*listen\\s+8443\\s+ssl[^}]*\\}\\n*', '', content, flags=re.DOTALL)", origin_sh)
 
-    def test_doctor_ufw_acl_validation_awg_and_dual(self):
-        """Verify run_doctor checks awg_port for awg and dual nodes."""
+    def test_doctor_ufw_acl_validation_xray_api(self):
+        """Verify run_doctor checks port 8444 for Xray API."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('awg_p="$(get_state_val "awg_port" "8443")"', just1knode_sh)
-        self.assertIn("Порт API AmneziaWG $awg_p открыт для всех", just1knode_sh)
-        self.assertIn("Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP", just1knode_sh)
+        self.assertIn('echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"', just1knode_sh)
+        self.assertIn("Порт 8444 защищен и доступен только с BOT_IP", just1knode_sh)
 
     def test_doctor_ufw_perimeter_audit(self):
         """Verify run_doctor audits full UFW perimeter for dead rules and unauthorized anywhere ports."""
@@ -2936,12 +2909,13 @@ remove_traffic_watchdog_timer
         self.assertFalse(run_validate_ip("::"))
         self.assertFalse(run_validate_ip("not-an-ip"))
 
-    def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
-        """Verify uninstall_node removes awg_port and bot_ip from UFW."""
+    def test_uninstall_and_cleanup_cleans_vless_port_in_ufw(self):
+        """Verify uninstall_node removes VLESS 443, relay_port and API port 8444 from UFW."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('st_awg_port="$(get_state_val "awg_port" 2>/dev/null || true)"', just1knode_sh)
-        self.assertIn('ufw delete allow from "$st_bot_ip" to any port "$st_awg_port" proto tcp', just1knode_sh)
-        self.assertIn('ufw delete allow "${st_awg_port}/tcp"', just1knode_sh)
+        self.assertIn('ufw delete allow 443/tcp', just1knode_sh)
+        self.assertIn('ufw delete allow from "$st_bot_ip" to any port 8444 proto tcp', just1knode_sh)
+        self.assertIn('ufw delete allow 8444/tcp', just1knode_sh)
+        self.assertIn('ufw delete allow "$st_relay_port"/tcp', just1knode_sh)
 
     def test_origin_catchall_dummy_fallback_on_old_nginx(self):
         """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
@@ -3029,7 +3003,6 @@ remove_traffic_watchdog_timer
 
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
-        self.assertIn('chmod 644 "$amnezia_nginx"', relay_sh)
 
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('core|xray) shift 2; update_xray_core "$@" ;;', just1knode_sh)
@@ -3407,7 +3380,7 @@ remove_traffic_watchdog_timer
         self.assertIn("server 127.0.0.1:8005;", output)
 
     def test_ufw_before_rules_sync_and_remove_behavior(self):
-        """Behavioral test: UFW before.rules sync inserts 4 rules and removal cleanly cleans them up."""
+        """Behavioral test: UFW before.rules sync inserts SMTP 25 (FORWARD and OUTPUT) and BitTorrent rules."""
         sample_ufw = """#
 # rules.before
 #
@@ -3423,15 +3396,29 @@ COMMIT
 """
         import re
 
-        def sync_rules(content):
+        def sync_rules(content, has_xt_string=True):
             content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
-            block = """# START JUST1KNODE ANTI-ABUSE
--A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset
--A ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP
--A ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP
--A ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP
-# END JUST1KNODE ANTI-ABUSE
-"""
+            rules = [
+                '-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
+                '-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
+                '-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP',
+                '-A ufw-before-forward -p udp --dport 6881:6889 -j DROP',
+                '-A ufw-before-output -p tcp --dport 6881:6889 -j DROP',
+                '-A ufw-before-output -p udp --dport 6881:6889 -j DROP',
+            ]
+            if has_xt_string:
+                rules.extend([
+                    '-A ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP',
+                    '-A ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP',
+                ])
+            block = '# START JUST1KNODE ANTI-ABUSE\n' + '\n'.join(rules) + '\n# END JUST1KNODE ANTI-ABUSE\n'
             if ':ufw-before-forward' in content:
                 content = re.sub(r'(:\s*ufw-before-forward\s+-\s+\[0:0\]\n)', r'\1' + block, content, count=1)
             elif '*filter' in content:
@@ -3441,15 +3428,26 @@ COMMIT
         def remove_rules(content):
             return re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
 
-        synced = sync_rules(sample_ufw)
+        synced = sync_rules(sample_ufw, has_xt_string=True)
         self.assertIn("# START JUST1KNODE ANTI-ABUSE", synced)
         self.assertIn("-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced)
+        self.assertIn("-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced)
+        self.assertIn("-A ufw-before-output -p tcp --dport 6881:6889 -j DROP", synced)
+        self.assertIn("-A ufw-before-output -p udp --dport 6881:6889 -j DROP", synced)
         self.assertIn('-A ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
-        self.assertIn('-A ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
-        self.assertIn('-A ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP', synced)
+
+        # Without xt_string, only port rules (SMTP:25 and 6881:6889) are added
+        synced_no_xt = sync_rules(sample_ufw, has_xt_string=False)
+        self.assertIn("-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced_no_xt)
+        self.assertIn("-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced_no_xt)
+        self.assertIn("-A ufw-before-output -p tcp --dport 6881:6889 -j DROP", synced_no_xt)
+        self.assertNotIn("BitTorrent protocol", synced_no_xt)
 
         # Idempotence: syncing again does not duplicate block
-        synced_again = sync_rules(synced)
+        synced_again = sync_rules(synced, has_xt_string=True)
         self.assertEqual(synced.count("# START JUST1KNODE ANTI-ABUSE"), 1)
         self.assertEqual(synced_again, synced)
 
@@ -3458,11 +3456,11 @@ COMMIT
         self.assertNotIn("# START JUST1KNODE ANTI-ABUSE", removed)
         self.assertEqual(removed.strip(), sample_ufw.strip())
 
-    def test_modular_awg_node_doctor_and_status_skips_xray_behavioral(self):
-        """Verify run_doctor on modular AWG-only node skips Xray Core and Xray config check."""
+    def test_modular_node_without_xray_doctor_and_status_skips_xray_behavioral(self):
+        """Verify run_doctor on modular node without Xray components skips Xray Core and Xray config check."""
         self._prepare_base_env()
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "node", "has_relay": "0", "has_vless": "0"}, f)
 
         res = self._run_shell_snippet("run_doctor")
         self.assertNotIn("3. Проверка конфигурации Xray...", res.stdout)
@@ -3476,14 +3474,13 @@ COMMIT
                 "role": "node",
                 "domain": "vless.test.example",
                 "vless_domain": "vless.test.example",
-                "awg_domain": "awg.test.example",
-                "sni": "None",
+                "sni": "sni.test.example",
             }, f)
 
         res = self._run_shell_snippet("run_doctor")
         # Both unique domains must be checked
         self.assertIn("vless.test.example", res.stdout)
-        self.assertIn("awg.test.example", res.stdout)
+        self.assertIn("sni.test.example", res.stdout)
         # Deduplication: vless.test.example checked once
         self.assertEqual(res.stdout.count("vless.test.example"), 1)
         # Case-insensitive null/none filtered out: None must not be checked as domain
@@ -3581,7 +3578,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
 
         # Doctor check 5 domain verification loop
-        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
+        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
         self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
 
         # Relay domain setup emoji flag
@@ -3622,7 +3619,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 4. Doctor and firewall UFW regex invariants
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
-        self.assertIn("just1k-amnezia.conf", common_sh)
+        self.assertNotIn("just1k-amnezia.conf", common_sh)
         self.assertIn("timeout=5.0", just1knode_sh)
         self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
 
@@ -3670,13 +3667,12 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('local def_site="/etc/nginx/sites-enabled/default"', relay_sh)
         self.assertIn('rm -f "$def_site"', relay_sh)
 
-    def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
-        """Verify heal_node_firewall preserves 8444 when VLESS is active, and removes dead 8444 when only Amnezia is active."""
+    def test_heal_firewall_and_vless_install_port_8444_isolation(self):
+        """Verify heal_node_firewall preserves 8444 when VLESS is active and isolates from legacy 8443."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then', common_sh)
-        self.assertIn('elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
-        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then', common_sh)
+        self.assertNotIn('just1k-amnezia.conf', common_sh)
         self.assertIn('just1k-vless-api.conf', relay_sh)
         self.assertIn('listen 8444 ssl http2;', relay_sh)
         self.assertIn('show_vless_bot_credentials', relay_sh)
@@ -3693,7 +3689,6 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
         self.assertIn('ufw delete allow 443/tcp', relay_sh)
         self.assertIn('systemctl stop xray-api', relay_sh)
-        self.assertIn('local amnezia_bak="${amnezia_nginx}.user.bak"', relay_sh)
         # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
         idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
         idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
@@ -3759,86 +3754,17 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 7. install_nginx_if_missing in install_vless_direct_node
         self.assertIn('install_nginx_if_missing', relay_sh)
 
-        # 8. amnezia_bak restoration on reload/restart failure
-        self.assertIn('if [[ -f "$amnezia_bak" ]]; then\n                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true', relay_sh)
-
-        # 9. Format json in run_doctor and tmp.json in heal_and_update_relay_config
+        # 8. Format json in run_doctor and tmp.json in heal_and_update_relay_config
         self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
         self.assertIn("suffix='.tmp.json'", relay_sh)
 
-    def test_setup_xray_api_proxy_injects_v1_into_all_nginx_server_blocks(self):
-        """Verify setup_xray_api_proxy iterates over all server blocks and injects /v1/ into each."""
+    def test_setup_xray_api_proxy_uses_standalone_vless_api_conf(self):
+        """Verify setup_xray_api_proxy uses standalone just1k-vless-api.conf on port 8444 without Amnezia injection."""
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("parts = re.split(r'(\\bserver\\s*\\{)', content)", relay_sh)
-        self.assertIn("missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))", relay_sh)
-
-        # Test the injection logic directly on a simulated multi-server config
-        simulated_nginx = """# 0. Catch-All
-server {
-    listen 8443 ssl default_server;
-    server_name _;
-    return 444;
-}
-
-# Domain 1 (Amnezia)
-server {
-    listen 8443 ssl;
-    server_name nl.just1k.pro;
-    location / {
-        proxy_pass http://127.0.0.1:4001;
-    }
-}
-
-# Domain 2 (VLESS)
-server {
-    listen 8443 ssl;
-    server_name nl.just1k.best;
-    location / {
-        proxy_pass http://127.0.0.1:4001;
-    }
-}
-"""
-        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as tf:
-            tf.write(simulated_nginx)
-            temp_path = tf.name
-
-        try:
-            py_code = """
-import re, sys
-path = sys.argv[1]
-with open(path, 'r', encoding='utf-8') as f:
-    content = f.read()
-v1_block = '''    location /v1/ {
-        proxy_pass http://127.0.0.1:5001;
-    }
-
-'''
-
-parts = re.split(r'(\\bserver\\s*\\{)', content)
-new_parts = []
-for i, part in enumerate(parts):
-    if i % 2 == 0 and i > 0:
-        if 'location / {' in part and 'location /v1/' not in part:
-            part = part.replace('location / {', v1_block + '    location / {', 1)
-    new_parts.append(part)
-
-new_content = ''.join(new_parts)
-with open(path, 'w', encoding='utf-8') as f:
-    f.write(new_content)
-"""
-            res = subprocess.run([sys.executable, "-c", py_code, temp_path], capture_output=True, text=True, check=False)
-            self.assertEqual(res.returncode, 0)
-
-            result_content = Path(temp_path).read_text(encoding="utf-8")
-            # Must contain location /v1/ in both server blocks (pro and best)
-            self.assertEqual(result_content.count("location /v1/"), 2)
-            # Re-running must be idempotent and not duplicate
-            res2 = subprocess.run([sys.executable, "-c", py_code, temp_path], capture_output=True, text=True, check=False)
-            self.assertEqual(res2.returncode, 0)
-            result_content2 = Path(temp_path).read_text(encoding="utf-8")
-            self.assertEqual(result_content2.count("location /v1/"), 2)
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
+        self.assertNotIn("just1k-amnezia.conf", relay_sh)
+        self.assertIn('just1k-vless-api.conf', relay_sh)
+        self.assertIn('listen 8444 ssl http2;', relay_sh)
+        self.assertIn('proxy_pass http://127.0.0.1:5001;', relay_sh)
 
     def test_vless_domain_management_and_candidate_discovery(self):
         """Verify VLESS domain candidate auto-discovery prioritizes valid DNS/mtime and CLI/menu allows domain setup."""
@@ -3868,15 +3794,15 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']", origin_sh)
         self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", relays_manage_sh)
 
-    def test_modular_awg_node_status_and_doctor_skips_xray(self):
-        """On modular nodes where only AmneziaWG is installed, Xray status and config check must be skipped."""
+    def test_modular_node_status_and_doctor_skips_xray(self):
+        """On modular nodes where Xray is not active, Xray status and config check must be skipped."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
         # 1. show_node_status must not check Xray Core just because role == "node"
         expected_status_cond = 'if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then'
         self.assertIn(expected_status_cond, just1knode_sh)
 
-        # 2. run_doctor step 3 must not fail Xray config check on AWG-only nodes
+        # 2. run_doctor step 3 must not fail Xray config check on nodes without active Xray
         self.assertIn(f'{expected_status_cond}\n        log "3. Проверка конфигурации Xray..."', just1knode_sh)
 
     def test_xray_api_source_bootstrap_caching_and_deployment(self):
@@ -3896,7 +3822,7 @@ with open(path, 'w', encoding='utf-8') as f:
         """Verify run_doctor iterates over all unique configured domains to validate each certificate."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
-        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
+        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
         self.assertIn('for domain in "${check_domains[@]}"; do', just1knode_sh)
         self.assertIn('cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"', just1knode_sh)
         self.assertIn('local d_cand d_cand_lower already existing key domain', just1knode_sh)

@@ -552,9 +552,6 @@ setup_xray_api_proxy() {
     local x_api_key
     x_api_key="$(get_state_val "xray_api_key" "")"
     if [[ -z "$x_api_key" ]]; then
-        x_api_key="$(get_state_val "awg_api_key" "")"
-    fi
-    if [[ -z "$x_api_key" ]]; then
         x_api_key="$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
     fi
     set_state_val "xray_api_key" "$x_api_key"
@@ -569,123 +566,7 @@ setup_xray_api_proxy() {
         return 1
     fi
 
-    # Интеграция обратного прокси xray-api (/v1/) в существующий Nginx Amnezia
-    local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
-    local amnezia_enabled="/etc/nginx/sites-enabled/just1k-amnezia.conf"
-    if [[ -f "$amnezia_nginx" || -f "$amnezia_enabled" ]]; then
-        if [[ ! -f "$amnezia_nginx" && -f "$amnezia_enabled" ]]; then
-            cp -a "$amnezia_enabled" "$amnezia_nginx" 2>/dev/null || true
-        fi
-        local amnezia_bak="${amnezia_nginx}.user.bak"
-        local needs_v1_injection=0
-        if python3 -c "
-import re, sys
-try:
-    with open(sys.argv[1], 'r', encoding='utf-8') as f:
-        content = f.read()
-    parts = re.split(r'(\bserver\s*\{)', content)
-    missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))
-    sys.exit(0 if missing else 1)
-except Exception:
-    sys.exit(1)
-" "$amnezia_nginx" 2>/dev/null; then
-            needs_v1_injection=1
-        fi
-
-        if [[ $needs_v1_injection -eq 1 ]]; then
-            cp -p "$amnezia_nginx" "$amnezia_bak" 2>/dev/null || true
-            mkdir -p /etc/nginx/conf.d
-            if [[ ! -f "/etc/nginx/conf.d/amnezia-ratelimit.conf" ]]; then
-                cat > "/etc/nginx/conf.d/amnezia-ratelimit.conf" <<'EOF'
-# JUST1KNODE: AmneziaWG API Rate Limiting Zone
-limit_req_zone $binary_remote_addr zone=just1k_amnezia_api:10m rate=30r/s;
-EOF
-            fi
-            python3 -c "
-import re, sys, os, tempfile
-path = sys.argv[1]
-with open(path, 'r', encoding='utf-8') as f:
-    content = f.read()
-v1_block = '''    location /v1/ {
-        limit_req zone=just1k_amnezia_api burst=50 nodelay;
-        limit_req_status 429;
-
-        proxy_pass http://127.0.0.1:5001;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_connect_timeout 10s;
-        proxy_read_timeout 30s;
-        proxy_send_timeout 30s;
-    }
-
-'''
-
-parts = re.split(r'(\bserver\s*\{)', content)
-new_parts = []
-for i, part in enumerate(parts):
-    if i % 2 == 0 and i > 0:
-        if 'location / {' in part and 'location /v1/' not in part:
-            part = part.replace('location / {', v1_block + '    location / {', 1)
-    new_parts.append(part)
-
-new_content = ''.join(new_parts)
-d = os.path.dirname(os.path.abspath(path))
-os.makedirs(d, exist_ok=True)
-t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
-with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
-    f.write(new_content)
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(t_path, path)
-" "$amnezia_nginx" 2>/dev/null || true
-            chmod 644 "$amnezia_nginx" 2>/dev/null || true
-
-            if python3 -c "
-import re, sys
-try:
-    with open(sys.argv[1], 'r', encoding='utf-8') as f:
-        content = f.read()
-    parts = re.split(r'(\bserver\s*\{)', content)
-    missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))
-    sys.exit(0 if missing else 1)
-except Exception:
-    sys.exit(0)
-" "$amnezia_nginx" 2>/dev/null; then
-                warn "Nginx: не удалось внедрить маршрут /v1/ во все блоки server в $amnezia_nginx"
-                if [[ -f "$amnezia_bak" ]]; then
-                    cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
-                    rm -f "$amnezia_bak" 2>/dev/null || true
-                fi
-                return 1
-            fi
-        fi
-
-        ln -sf "$amnezia_nginx" "$amnezia_enabled" 2>/dev/null || true
-        if ! nginx -t >/dev/null 2>&1; then
-            warn "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси xray-api (/v1/)."
-            if [[ -f "$amnezia_bak" ]]; then
-                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
-                rm -f "$amnezia_bak" 2>/dev/null || true
-            fi
-            return 1
-        fi
-
-        if ! systemctl reload nginx 2>/dev/null && ! systemctl restart nginx 2>/dev/null; then
-            warn "Nginx: не удалось применить конфигурацию для Amnezia Nginx."
-            if [[ -f "$amnezia_bak" ]]; then
-                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true
-                rm -f "$amnezia_bak" 2>/dev/null || true
-            fi
-            return 1
-        fi
-        rm -f "$amnezia_bak" 2>/dev/null || true
-        log "Nginx: подключен обратный прокси для xray-api (/v1/ ➔ 127.0.0.1:5001) в Amnezia Nginx."
-    fi
-
-    # 2. Автономный виртуальный хост VLESS API на порту 8444
+    # Виртуальный хост VLESS API на порту 8444
     local v_dom
     v_dom="${target_domain:-$(get_state_val "vless_domain" "$(get_state_val "sni" "")")}"
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
@@ -698,15 +579,6 @@ except Exception:
     if [[ ! -f "$cert_file" ]]; then
         cert_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/fullchain.pem"
         key_file="${XRAY_TLS_DIR:-/usr/local/etc/xray/tls}/privkey.pem"
-    fi
-    if [[ ! -f "$cert_file" && -f "$amnezia_nginx" ]]; then
-        local amnezia_cert amnezia_key
-        amnezia_cert="$(grep -E "ssl_certificate\s+" "$amnezia_nginx" | head -n1 | awk '{print $2}' | tr -d ';')"
-        amnezia_key="$(grep -E "ssl_certificate_key\s+" "$amnezia_nginx" | head -n1 | awk '{print $2}' | tr -d ';')"
-        if [[ -f "$amnezia_cert" && -f "$amnezia_key" ]]; then
-            cert_file="$amnezia_cert"
-            key_file="$amnezia_key"
-        fi
     fi
 
     local vless_api_nginx="/etc/nginx/sites-available/just1k-vless-api.conf"
@@ -751,10 +623,6 @@ EOF
         warn "Nginx: не найдены SSL сертификаты или домен для автономного VLESS API ($v_dom)."
         return 1
     fi
-
-    local cur_awg_port
-    cur_awg_port="$(get_state_val "awg_port" "8443")"
-    [[ -z "$cur_awg_port" || "$cur_awg_port" == "-" ]] && cur_awg_port="8443"
 
     local bot_ip
     bot_ip="$(get_state_val "bot_ip" "")"
@@ -949,12 +817,6 @@ if cands:
         return 1
     fi
 
-    # Проверка на наличие AmneziaWG (Zero-Collateral-Damage принцип)
-    if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Ports}}' 2>/dev/null | grep -q "51820"; then
-        info "Обнаружен работающий AmneziaWG (Docker: 51820/udp)."
-        log "Zero-Collateral: порт 51820/udp и Amnezia-контейнеры НЕ затрагиваются!"
-    fi
-
     # Проверка доступности порта туннеля Relay
     if ss -tlnp 2>/dev/null | grep -q ":${relay_port} " || netstat -tlnp 2>/dev/null | grep -q ":${relay_port} "; then
         local conflict_proc
@@ -1135,6 +997,11 @@ print('[]')
         "type": "field",
         "port": "25",
         "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "port": "6881-6889",
+        "outboundTag": "block"
       }
     ]
   },
@@ -1188,7 +1055,7 @@ EOF
         fi
     fi
 
-    # Защита портов через UFW (строго без открытия Amnezia API всему миру)
+    # Защита портов через UFW
     local extra_ufw_ports=()
     if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
         extra_ufw_ports+=("443/tcp")
@@ -1223,12 +1090,10 @@ EOF
 
     set_state_val "has_relay" "1"
     set_state_val "role" "node"
-    if [[ "$prev_role" == "awg" || "$cur_has_vless" == "1" ]]; then
+    apply_antiabuse_protection
+    if [[ "$cur_has_vless" == "1" ]]; then
         log "Компоненты узла актуализированы (Relay активен)."
-        apply_amnezia_abuse_protection
-        if [[ "$cur_has_vless" == "1" ]]; then
-            setup_xray_api_proxy "$dest_server"
-        fi
+        setup_xray_api_proxy "$dest_server"
     fi
 
     local geo_resolved
@@ -1955,6 +1820,13 @@ if not has_smtp_port:
         'port': '25',
         'outboundTag': 'block'
     })
+has_bt_ports = any(r.get('type') == 'field' and r.get('port') == '6881-6889' for r in rules)
+if not has_bt_ports:
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'port': '6881-6889',
+        'outboundTag': 'block'
+    })
 
 for ib in cfg.get('inbounds', []):
     if not isinstance(ib, dict):
@@ -2163,14 +2035,7 @@ if cands:
     fi
     if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" ]] && (validate_ip "$bot_ip" || validate_ipv4 "$bot_ip"); then
         set_state_val "bot_ip" "$bot_ip"
-        local amnezia_check_p
-        amnezia_check_p="$(get_state_val "awg_port" "8443")"
-        [[ -z "$amnezia_check_p" || "$amnezia_check_p" == "-" ]] && amnezia_check_p="8443"
-        if [[ -f "/etc/nginx/sites-available/just1k-amnezia.conf" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
-            log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip} (AmneziaWG API на порту ${amnezia_check_p})"
-        else
-            log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
-        fi
+        log "Фаервол UFW: API 8444 будет разрешен строго для BOT_IP: ${bot_ip}"
     else
         warn "BOT_IP не указан или невалиден. API будет закрыт от внешнего мира в UFW (Fail-Closed)."
     fi
@@ -2244,11 +2109,29 @@ if not cfg:
                 {'type': 'field', 'inboundTag': ['just1k-wl-api-grpc'], 'outboundTag': 'api'},
                 {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'},
                 {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
-                {'type': 'field', 'port': '25', 'outboundTag': 'block'}
+                {'type': 'field', 'port': '25', 'outboundTag': 'block'},
+                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'}
             ]
         },
         'dns': {'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'], 'queryStrategy': 'UseIPv4'}
     }
+
+outbounds = cfg.setdefault('outbounds', [])
+if not any(ob.get('tag') == 'block' for ob in outbounds):
+    outbounds.append({'tag': 'block', 'protocol': 'blackhole'})
+
+routing = cfg.setdefault('routing', {})
+routing.setdefault('domainStrategy', 'IPIfNonMatch')
+rules = routing.setdefault('rules', [])
+insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
+if not any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and 'bittorrent' in r.get('protocol', []) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and (r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '25', 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and r.get('port') == '6881-6889' and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'})
 
 inbounds = cfg.setdefault('inbounds', [])
 if not any(ib.get('tag') == 'just1k-wl-api-grpc' for ib in inbounds):
@@ -2393,6 +2276,7 @@ with open(out_f, 'w', encoding='utf-8') as f:
     fi
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
+    apply_antiabuse_protection
     echo ""
     show_vless_bot_credentials
 }
@@ -2404,7 +2288,7 @@ show_vless_bot_credentials() {
 
     local v_dom x_key
     v_dom="$(get_state_val "vless_domain" "$(get_state_val "sni" "")")"
-    x_key="$(get_state_val "xray_api_key" "$(get_state_val "awg_api_key" "")")"
+    x_key="$(get_state_val "xray_api_key" "")"
 
     local api_endpoint
     if [[ -n "$v_dom" ]]; then
@@ -2495,6 +2379,11 @@ uninstall_vless_component() {
     check_root
     init_state_dir
 
+    if [[ "$(get_state_val "role")" == "origin" ]]; then
+        error "Компонент VLESS не может быть удален на узле Origin."
+        return 1
+    fi
+
     local confirm_del=""
     if [[ "${1:-}" == "--yes" || "${1:-}" == "-y" || "${FORCE:-}" == "1" ]]; then
         confirm_del="y"
@@ -2524,28 +2413,6 @@ uninstall_vless_component() {
             rm -f "/etc/nginx/sites-available/default.user.bak" 2>/dev/null || true
             log "Nginx: восстановлен исходный сайт default из default.user.bak"
         fi
-    fi
-    local amnezia_nginx="/etc/nginx/sites-available/just1k-amnezia.conf"
-    if [[ "$cur_has_r_init" != "1" && -f "$amnezia_nginx" ]] && grep -q "location /v1/" "$amnezia_nginx"; then
-        python3 -c "
-import re, sys, os, tempfile
-p = sys.argv[1]
-try:
-    with open(p, 'r', encoding='utf-8') as f:
-        c = f.read()
-    c = re.sub(r'[ \t]*location\s+/v1/\s*\{[^}]*\}\n?', '', c)
-    d = os.path.dirname(os.path.abspath(p))
-    os.makedirs(d, exist_ok=True)
-    t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
-    with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
-        f.write(c)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(t_path, p)
-except Exception:
-    pass
-" "$amnezia_nginx" 2>/dev/null || true
-        chmod 644 "$amnezia_nginx" 2>/dev/null || true
     fi
     if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || true
@@ -2593,10 +2460,10 @@ if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', []))
     set_state_val "vless_domain" ""
 
     migrate_legacy_state
-    local cur_has_a cur_has_r
-    cur_has_a="$(get_state_val "has_awg" "0")"
+    local cur_has_r
     cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$cur_has_a" == "0" && "$cur_has_r" == "0" ]]; then
+    if [[ "$cur_has_r" == "0" ]]; then
+        remove_antiabuse_protection 2>/dev/null || true
         set_state_val "role" "unconfigured"
     else
         set_state_val "role" "node"
@@ -2618,6 +2485,11 @@ uninstall_relay_component() {
     title "УДАЛЕНИЕ КОМПОНЕНТА RELAY (БЕЛЫЙ ИНТЕРНЕТ)"
     check_root
     init_state_dir
+
+    if [[ "$(get_state_val "role")" == "origin" ]]; then
+        error "Компонент Relay не может быть удален на узле Origin этим методом. Используйте: just1knode relay remove <код_узла>"
+        return 1
+    fi
 
     local confirm_del=""
     if [[ "${1:-}" == "--yes" || "${1:-}" == "-y" || "${FORCE:-}" == "1" ]]; then
@@ -2673,10 +2545,10 @@ if os.path.exists(cfg_file):
 
     set_state_val "has_relay" "0"
 
-    local cur_has_a cur_has_v
-    cur_has_a="$(get_state_val "has_awg" "0")"
+    local cur_has_v
     cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$cur_has_a" == "0" && "$cur_has_v" == "0" ]]; then
+    if [[ "$cur_has_v" == "0" ]]; then
+        remove_antiabuse_protection 2>/dev/null || true
         set_state_val "role" "unconfigured"
     else
         set_state_val "role" "node"

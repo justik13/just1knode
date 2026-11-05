@@ -836,9 +836,6 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         detected_services.append("vless")
     if str(node_meta.get("has_relay", "")) == "1" or node_meta.get("role") == "relay":
         detected_services.append("relay")
-    if node_meta.get("role") not in ("origin", "vless", "relay"):
-        if str(node_meta.get("has_awg", "")) == "1" or node_meta.get("role") == "awg":
-            detected_services.append("awg")
 
     capabilities: List[str] = []
     if "vless" in detected_services:
@@ -847,8 +844,6 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         capabilities.append("white_internet")
     if "relay" in detected_services:
         capabilities.append("relay")
-    if "awg" in detected_services:
-        capabilities.append("awg")
 
     pid, starttime, boot_id, running_epoch = (
         epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
@@ -1057,7 +1052,7 @@ def _get_host_net_bytes() -> tuple[int, int]:
                         continue
                     name, stats = line.split(":", 1)
                     name = name.strip()
-                    if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "awg", "tun", "tap")):
+                    if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "tun", "tap")):
                         continue
                     cols = stats.split()
                     if len(cols) >= 9:

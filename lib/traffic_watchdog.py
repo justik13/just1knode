@@ -53,7 +53,7 @@ def main():
                             continue
                         name, stats = line.split(':', 1)
                         name = name.strip()
-                        if name == 'lo' or name.startswith(('docker', 'veth', 'br-', 'wg', 'awg', 'tun', 'tap')):
+                        if name == 'lo' or name.startswith(('docker', 'veth', 'br-', 'wg', 'tun', 'tap')):
                             continue
                         cols = stats.split()
                         if len(cols) >= 9:

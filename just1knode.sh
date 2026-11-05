@@ -267,8 +267,7 @@ show_status() {
 
         list_relays
     else
-        local cur_has_a cur_has_r cur_has_v
-        cur_has_a="$(get_state_val "has_awg" "0")"
+        local cur_has_r cur_has_v
         cur_has_r="$(get_state_val "has_relay" "0")"
         cur_has_v="$(get_state_val "has_vless" "0")"
 
@@ -276,12 +275,6 @@ show_status() {
             local v_dom
             v_dom="$(get_state_val "vless_domain" "-")"
             echo -e "  [TLS/VLESS] Домен:    ${CYAN}${v_dom}${NC} (Порт: 443 TLS XTLS-Vision)"
-        fi
-        if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
-            local a_url a_port
-            a_url="$(get_state_val "awg_api_url" "-")"
-            a_port="$(get_state_val "awg_port" "8443")"
-            echo -e "  [AWG]   API URL:      ${CYAN}${a_url}${NC} (HTTPS Порт: ${a_port})"
         fi
         if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
             local r_port r_orig r_sni r_sec
@@ -450,8 +443,7 @@ run_doctor() {
     local warnings=0
     local role
     role="$(get_state_val "role" "не определена")"
-    local cur_has_a cur_has_v cur_has_r
-    cur_has_a="$(get_state_val "has_awg" "0")"
+    local cur_has_v cur_has_r
     cur_has_v="$(get_state_val "has_vless" "0")"
     cur_has_r="$(get_state_val "has_relay" "0")"
 
@@ -551,7 +543,7 @@ run_doctor() {
     log "5. Проверка SSL сертификатов Let's Encrypt..."
     local check_domains=()
     local d_cand d_cand_lower already existing key domain
-    for key in "domain" "vless_domain" "awg_domain" "sni"; do
+    for key in "domain" "vless_domain" "sni"; do
         d_cand="$(get_state_val "$key" "")"
         d_cand_lower="${d_cand,,}"
         if [[ -n "$d_cand" && "$d_cand" != "-" && "$d_cand_lower" != "none" && "$d_cand_lower" != "null" ]]; then
@@ -635,28 +627,12 @@ run_doctor() {
                 echo -e "  ${YELLOW}!${NC} BOT_IP не настроен в state.json"
                 warnings=$((warnings + 1))
             fi
-        elif [[ "$role" == "awg" || "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
-            local cur_has_a cur_has_v cur_has_r
-            cur_has_a="$(get_state_val "has_awg" "0")"
+        elif [[ "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
+            local cur_has_v cur_has_r
             cur_has_v="$(get_state_val "has_vless" "0")"
             cur_has_r="$(get_state_val "has_relay" "0")"
             local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
-
-            if [[ "$cur_has_a" == "1" || "$role" == "awg" ]]; then
-                local awg_p
-                awg_p="$(get_state_val "awg_port" "8443")"
-
-                if echo "$ufw_out" | grep -E "${awg_p}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    echo -e "  ${YELLOW}!${NC} Порт API AmneziaWG $awg_p открыт для всех (рекомендуется ограничить: just1knode set-bot-ip <IP>)"
-                    warnings=$((warnings + 1))
-                elif [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "$awg_p"; then
-                    echo -e "  ${GREEN}✔${NC} Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP ($bot_ip)"
-                elif [[ -n "$bot_ip" ]]; then
-                    echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт $awg_p не найдено в UFW"
-                    failed=$((failed + 1))
-                fi
-            fi
 
             if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
                 if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
@@ -665,13 +641,11 @@ run_doctor() {
                     echo -e "  ${YELLOW}!${NC} Порт VLESS 443 не найден среди разрешенных в UFW"
                     warnings=$((warnings + 1))
                 fi
-                if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_a" != "1" ]]; then
-                    if [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
-                        echo -e "  ${GREEN}✔${NC} Порт 8444 защищен и доступен только с BOT_IP ($bot_ip)"
-                    elif [[ -n "$bot_ip" ]]; then
-                        echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт 8444 не найдено в UFW"
-                        failed=$((failed + 1))
-                    fi
+                if [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
+                    echo -e "  ${GREEN}✔${NC} Порт 8444 защищен и доступен только с BOT_IP ($bot_ip)"
+                elif [[ -n "$bot_ip" ]]; then
+                    echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт 8444 не найдено в UFW"
+                    failed=$((failed + 1))
                 fi
             fi
 
@@ -986,14 +960,14 @@ if os.path.exists(rf):
         fi
     fi
 
-    if [[ "$role" == "awg" || "$cur_has_a" == "1" ]]; then
+    if [[ "$role" == "relay" || "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
-        if check_amnezia_abuse_rules; then
+        if check_antiabuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
         else
             echo -e "  ${YELLOW}!${NC} Сетевая защита Anti-Abuse неполная или отсутствует в iptables"
             warn "ВНИМАНИЕ: Сетевая защита Anti-Abuse не активна! Запуск автоматического восстановления (Auto-Heal)..."
-            if apply_amnezia_abuse_protection && check_amnezia_abuse_rules; then
+            if apply_antiabuse_protection && check_antiabuse_rules; then
                 echo -e "  ${GREEN}✔${NC} Правила сетевой защиты Anti-Abuse успешно восстановлены и активны."
             else
                 echo -e "  ${RED}✗${NC} ОШИБКА: Не удалось восстановить правила Anti-Abuse (проверьте модуль ядра xt_string)!"
@@ -1081,7 +1055,7 @@ reset_node() {
     echo ""
     echo -e "${BOLD}Что произойдет:${NC}"
     echo -e "  1. ${BOLD}Защитный бэкап:${NC} автоматическое сохранение текущего состояния в /var/backups/just1knode/"
-    echo -e "  2. ${BOLD}Системные службы:${NC} остановка и отключение xray, xray-api, amnezia-api"
+    echo -e "  2. ${BOLD}Системные службы:${NC} остановка и отключение xray, xray-api"
     echo -e "  3. ${BOLD}Конфигурация узла:${NC} очистка /etc/just1knode (роль, релеи, state.json)"
     echo -e "  4. ${BOLD}Веб-сервер Nginx:${NC} удаление хостов just1knode, восстановление дефолтного сайта"
     echo -e "  5. ${BOLD}Сохранение системы:${NC} утилита just1knode, ядро Xray и системные пакеты НЕ удаляются"
@@ -1108,11 +1082,11 @@ reset_node() {
         fi
     fi
 
-    systemctl stop xray xray-api amnezia-api 2>/dev/null || true
-    systemctl disable xray xray-api amnezia-api 2>/dev/null || true
+    systemctl stop xray xray-api 2>/dev/null || true
+    systemctl disable xray xray-api 2>/dev/null || true
     remove_traffic_watchdog_timer
-    remove_amnezia_abuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-amnezia.conf /etc/nginx/sites-available/just1k-amnezia.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/deploy/restart-amnezia-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/pre/01-stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/01-start-port80-docker.sh /etc/letsencrypt/renewal-hooks/pre/stop-port80-docker.sh /etc/letsencrypt/renewal-hooks/post/start-port80-docker.sh 2>/dev/null || true
+    remove_antiabuse_protection 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1121,7 +1095,7 @@ reset_node() {
             fi
         done
     fi
-    rm -rf /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api /etc/amnezia-api /opt/amnezia-api /etc/ssl/just1k_amnezia 2>/dev/null || true
+    rm -rf /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api 2>/dev/null || true
     if [[ ! -e /etc/nginx/sites-enabled/default ]]; then
         if [[ -f /etc/nginx/sites-available/default.user.bak ]]; then
             cp -a /etc/nginx/sites-available/default.user.bak /etc/nginx/sites-available/default 2>/dev/null || true
@@ -1249,8 +1223,6 @@ uninstall_node() {
         "${XRAY_API_DIR:-/opt/xray-api}"
         "${XRAY_API_ETC:-/etc/xray-api}"
         "${XRAY_API_LIB:-/var/lib/xray-api}"
-        "${AMNEZIA_API_DIR:-/opt/amnezia-api}"
-        "${AMNEZIA_API_ETC:-/etc/amnezia-api}"
         "${STATE_DIR:-/etc/just1knode}"
         "${BACKUP_DIR:-/var/backups/just1knode}"
     )
@@ -1264,11 +1236,11 @@ uninstall_node() {
 
     info "1/11. Остановка и отключение системных служб systemd..."
     remove_traffic_watchdog_timer
-    systemctl stop xray xray-api amnezia-api 2>/dev/null || true
-    systemctl disable xray xray-api amnezia-api 2>/dev/null || true
-    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" 2>/dev/null || true
+    systemctl stop xray xray-api 2>/dev/null || true
+    systemctl disable xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl reset-failed xray xray-api amnezia-api just1knode-traffic 2>/dev/null || true
+    systemctl reset-failed xray xray-api just1knode-traffic 2>/dev/null || true
 
     info "2/11. Завершение активных процессов ядра и API..."
     local xray_proc_name
@@ -1289,19 +1261,15 @@ uninstall_node() {
     rm -rf "${XRAY_CONFIG_DIR:-/usr/local/etc/xray}" 2>/dev/null || true
     rm -rf "${XRAY_SHARE_DIR:-/usr/local/share/xray}" 2>/dev/null || true
 
-    info "5/11. Удаление агентов API (Xray-API, Amnezia-API) и виртуальных окружений..."
+    info "5/11. Удаление агентов API (Xray-API) и виртуальных окружений..."
     rm -rf "${XRAY_API_DIR:-/opt/xray-api}" 2>/dev/null || true
     rm -rf "${XRAY_API_ETC:-/etc/xray-api}" 2>/dev/null || true
     rm -rf "${XRAY_API_LIB:-/var/lib/xray-api}" 2>/dev/null || true
-    rm -rf "${AMNEZIA_API_DIR:-/opt/amnezia-api}" 2>/dev/null || true
-    rm -rf "${AMNEZIA_API_ETC:-/etc/amnezia-api}" 2>/dev/null || true
 
     info "6/11. Очистка конфигурации Nginx и сетевых правил..."
     local nginx_conf_dir="${NGINX_CONF_DIR:-/etc/nginx}"
     rm -f "${nginx_conf_dir}/sites-enabled/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
-    rm -f "${nginx_conf_dir}/sites-enabled/just1k-amnezia.conf" 2>/dev/null || true
-    rm -f "${nginx_conf_dir}/sites-available/just1k-amnezia.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-enabled/just1k-vless-api.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-available/just1k-vless-api.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
@@ -1310,7 +1278,7 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
     rm -rf "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" 2>/dev/null || true
-    remove_amnezia_abuse_protection 2>/dev/null || true
+    remove_antiabuse_protection 2>/dev/null || true
 
     if [[ -f "${nginx_conf_dir}/sites-available/default.user.bak" ]]; then
         info "Восстановление исходного default сайта в Nginx..."
@@ -1345,13 +1313,8 @@ uninstall_node() {
     rm -f "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/20-just1knode-restart-xray.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/restart-xray.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/restart-xray-nginx.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/restart-amnezia-nginx.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/05-just1knode-nginx.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/05-just1knode-nginx.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/01-stop-port80-docker.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/01-start-port80-docker.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/stop-port80-docker.sh" \
-          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/start-port80-docker.sh" 2>/dev/null || true
+          "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/05-just1knode-nginx.sh" 2>/dev/null || true
     if [[ -d "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal" ]]; then
         for rconf in "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal"/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1384,12 +1347,10 @@ uninstall_node() {
 
     info "9/11. Очистка правил фаервола (UFW)..."
     if command -v ufw >/dev/null 2>&1; then
-        local st_relay_port st_origin_ip st_bot_ip st_awg_port
+        local st_relay_port st_origin_ip st_bot_ip
         st_relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
         st_origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
         st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        st_awg_port="$(get_state_val "awg_port" 2>/dev/null || true)"
-        [[ -z "$st_awg_port" && (-f /etc/nginx/sites-available/just1k-amnezia.conf || -f /etc/systemd/system/amnezia-api.service) ]] && st_awg_port="8443"
 
         if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
             if [[ -n "$st_origin_ip" ]]; then
@@ -1405,12 +1366,9 @@ uninstall_node() {
             ufw delete allow 8444/tcp >/dev/null 2>&1 || true
             ufw delete allow 8444 >/dev/null 2>&1 || true
         fi
-        if [[ -n "$st_awg_port" ]] && ! is_ssh_port "$st_awg_port"; then
-            if [[ -n "$st_bot_ip" ]]; then
-                ufw delete allow from "$st_bot_ip" to any port "$st_awg_port" proto tcp >/dev/null 2>&1 || true
-            fi
-            ufw delete allow "${st_awg_port}/tcp" >/dev/null 2>&1 || true
-            ufw delete allow "${st_awg_port}" >/dev/null 2>&1 || true
+        if ! is_ssh_port "443"; then
+            ufw delete allow 443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 443 >/dev/null 2>&1 || true
         fi
     fi
 
@@ -1452,9 +1410,6 @@ uninstall_node() {
     fi
     if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
         node_cleanup_errors+=("Служба systemd xray-api.service все еще существует")
-    fi
-    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/amnezia-api.service" ]]; then
-        node_cleanup_errors+=("Служба systemd amnezia-api.service все еще существует")
     fi
 
     echo ""
@@ -1558,19 +1513,17 @@ main_menu() {
             echo -e "  Статус текущего сервера: ${BOLD}${YELLOW}⚪ НЕ НАСТРОЕН${NC}\n"
             echo -e "  ${BOLD}[1]${NC} 🌐 Установить Origin узел (Белый Интернет — Входной шлюз в РФ)"
             echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход)"
-            echo -e "  ${BOLD}[3]${NC} ⚡ Настроить AmneziaWG узел (Зарубежный выход AmneziaWG API)"
-            echo -e "  ${BOLD}[4]${NC} 🚀 Настроить VLESS TLS узел (Зарубежный выход для Sub-ссылки)"
-            echo -e "  ${BOLD}[5]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[3]${NC} 🚀 Настроить VLESS TLS узел (Зарубежный выход для Sub-ссылки)"
+            echo -e "  ${BOLD}[4]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-5]: " choice
+            read -rp "Выберите действие [0-4]: " choice
 
             case "$choice" in
                 1) install_xray_origin_node || true; read -rp "Нажмите Enter для продолжения...";;
                 2) install_xray_relay_node || true; read -rp "Нажмите Enter для продолжения...";;
-                3) install_amnezia_node || true; read -rp "Нажмите Enter для продолжения...";;
-                4) install_vless_direct_node || true; read -rp "Нажмите Enter для продолжения...";;
-                5) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                3) install_vless_direct_node || true; read -rp "Нажмите Enter для продолжения...";;
+                4) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1612,8 +1565,7 @@ main_menu() {
             esac
 
         else
-            local cur_has_a cur_has_r cur_has_v
-            cur_has_a="$(get_state_val "has_awg" "0")"
+            local cur_has_r cur_has_v
             cur_has_r="$(get_state_val "has_relay" "0")"
             cur_has_v="$(get_state_val "has_vless" "0")"
 
@@ -1627,14 +1579,6 @@ main_menu() {
                 echo -e "    🚀 VLESS TLS (443):  ${YELLOW}○ Не установлен${NC}"
             fi
 
-            if [[ "$cur_has_a" == "1" ]]; then
-                local a_url
-                a_url="$(get_state_val "awg_api_url" "-")"
-                echo -e "    ⚡ AmneziaWG (UDP):  ${GREEN}● Активен${NC}  (API: ${CYAN}${a_url}${NC})"
-            else
-                echo -e "    ⚡ AmneziaWG (UDP):  ${YELLOW}○ Не установлен${NC}"
-            fi
-
             if [[ "$cur_has_r" == "1" ]]; then
                 local r_port r_orig
                 r_port="$(get_state_val "relay_port" "10443")"
@@ -1646,18 +1590,17 @@ main_menu() {
             echo ""
 
             echo -e "  ${BOLD}[1]${NC} 🚀 VLESS TLS    $([[ "$cur_has_v" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
-            echo -e "  ${BOLD}[2]${NC} ⚡ AmneziaWG    $([[ "$cur_has_a" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
-            echo -e "  ${BOLD}[3]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
-            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
-            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[9]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[10]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[2]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
+            echo -e "  ${BOLD}[3]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
+            echo -e "  ${BOLD}[4]${NC} 📊 Статус всех служб и активные клиенты"
+            echo -e "  ${BOLD}[5]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[7]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-10]: " choice
+            read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
                 1)
@@ -1679,24 +1622,6 @@ main_menu() {
                     fi
                     ;;
                 2)
-                    if [[ "$cur_has_a" == "1" ]]; then
-                        echo -e "\n${BOLD}=== УПРАВЛЕНИЕ AMNEZIAWG ===${NC}"
-                        echo "[1] Показать данные для Telegram-бота (/admin)"
-                        echo "[2] Резервная копия (Backup AmneziaWG)"
-                        echo "[3] Удалить AmneziaWG с этого сервера"
-                        echo "[0] Назад"
-                        read -rp "Выбор [0-3]: " a_choice
-                        case "$a_choice" in
-                            1) show_amnezia_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                            2) backup_amnezia_node || true; read -rp "Нажмите Enter для продолжения...";;
-                            3) uninstall_amnezia_component || true; read -rp "Нажмите Enter для продолжения...";;
-                        esac
-                    else
-                        install_amnezia_node || true
-                        read -rp "Нажмите Enter для продолжения..."
-                    fi
-                    ;;
-                3)
                     if [[ "$cur_has_r" == "1" ]]; then
                         echo -e "\n${BOLD}=== УПРАВЛЕНИЕ RELAY (БЕЛЫЙ ИНТЕРНЕТ) ===${NC}"
                         echo "[1] Показать данные подключения (команда для Origin)"
@@ -1714,13 +1639,13 @@ main_menu() {
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
-                4) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                5) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                6) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                8) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
-                9) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                10) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                3) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                4) show_status || true; read -rp "Нажмите Enter для продолжения...";;
+                5) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                7) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1735,24 +1660,19 @@ heal_node_config() {
         heal_and_update_origin_config
     elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
         heal_and_update_relay_config
+        apply_antiabuse_protection
     elif [[ "$role" == "node" ]]; then
-        local has_v has_r has_a
+        local has_v has_r
         has_v="$(get_state_val "has_vless" "0")"
         has_r="$(get_state_val "has_relay" "0")"
-        has_a="$(get_state_val "has_awg" "0")"
         if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
             heal_and_update_relay_config
         fi
-        if [[ "$has_a" == "1" ]]; then
-            ensure_amnezia_api_service_and_env
-            apply_amnezia_abuse_protection
+        if [[ "$has_v" == "1" || "$has_r" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
+            apply_antiabuse_protection
         fi
         heal_node_firewall_and_stealth
         log "Конфигурация модульного узла актуализирована."
-    elif [[ "$role" == "awg" ]]; then
-        apply_amnezia_abuse_protection
-        heal_node_firewall_and_stealth
-        log "Сетевая защита AmneziaWG актуализирована."
     else
         error "Узел не настроен."
     fi
@@ -1768,15 +1688,12 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 case "${2:-}" in
                     origin|xray-origin) install_xray_origin_node "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" ;;
                     relay|xray-relay|exit|xray-exit) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
-                    amnezia|awg) install_amnezia_node "${3:-}" "${4:-}" "${5:-}" ;;
                     vless|tls|xray-vless) install_vless_direct_node "${3:-}" ;;
-                    *) error "Неизвестный тип установки: $2. Доступно: origin, relay, amnezia, awg, vless, tls" ;;
+                    *) error "Неизвестный тип установки: $2. Доступно: origin, relay, vless, tls" ;;
                 esac
                 ;;
             install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
             uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
-            install-amnezia|install-awg|add-amnezia) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
-            uninstall-amnezia|uninstall-awg|remove-amnezia|purge-amnezia|purge-awg|clean-amnezia) uninstall_amnezia_component "${2:-}" ;;
             install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
             uninstall-relay|remove-relay)
                 if [[ "$(get_state_val "role")" == "origin" ]]; then
@@ -1827,29 +1744,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     *) manage_relays_menu ;;
                 esac
                 ;;
-            amnezia|awg)
-                case "${2:-}" in
-                    install|setup) install_amnezia_node "${3:-}" "${4:-}" "${5:-}" ;;
-                    status) show_amnezia_status ;;
-                    creds|bot) show_amnezia_bot_credentials ;;
-                    bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
-                    backup) backup_amnezia_node "${3:-}" ;;
-                    restore) restore_amnezia_node "${3:-}" ;;
-                    uninstall|remove|del|purge|clean) uninstall_amnezia_component ;;
-                    *) install_amnezia_node "${2:-}" "${3:-}" "${4:-}" ;;
-                esac
-                ;;
             backup)
-                case "${2:-}" in
-                    amnezia|awg) backup_amnezia_node "${3:-}" ;;
-                    *) backup_amnezia_node "${2:-}" ;;
-                esac
+                backup_node "${2:-}"
                 ;;
             restore)
-                case "${2:-}" in
-                    amnezia|awg) restore_amnezia_node "${3:-}" ;;
-                    *) restore_amnezia_node "${2:-}" ;;
-                esac
+                restore_node "${2:-}"
                 ;;
             limit|traffic)
                 case "${2:-}" in
@@ -1868,11 +1767,11 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             anti-abuse|antiabuse|apply-abuse-protection)
                 check_root
-                apply_amnezia_abuse_protection
+                apply_antiabuse_protection
                 ;;
             remove-anti-abuse|remove-antiabuse|disable-anti-abuse)
                 check_root
-                remove_amnezia_abuse_protection
+                remove_antiabuse_protection
                 ;;
             update-post)
                 check_root
@@ -1888,8 +1787,20 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             reset) reset_node ;;
             uninstall|remove|purge)
-                shift
-                uninstall_node "$@"
+                case "${2:-}" in
+                    vless|tls) uninstall_vless_component "${3:-}" ;;
+                    relay)
+                        if [[ "$(get_state_val "role")" == "origin" && -n "${3:-}" ]]; then
+                            remove_relay_node "${3:-}"
+                        else
+                            uninstall_relay_component "${3:-}"
+                        fi
+                        ;;
+                    *)
+                        shift
+                        uninstall_node "$@"
+                        ;;
+                esac
                 ;;
             *) error "Неизвестная команда: $1. Запустите 'just1knode' без аргументов для входа в меню." ;;
         esac

@@ -193,14 +193,6 @@ try:
     changed = False
     role = str(data.get('role', '')).lower()
 
-    if 'has_awg' not in data:
-        if role in ('awg', 'dual') or str(data.get('awg_installed', '')).lower() == 'true' or bool(data.get('awg_api_url')):
-            data['has_awg'] = '1'
-            changed = True
-        else:
-            data['has_awg'] = '0'
-            changed = True
-
     if 'has_relay' not in data:
         relay_p = str(data.get('relay_port', '')).strip()
         if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
@@ -219,16 +211,24 @@ try:
             data['has_vless'] = '0'
             changed = True
 
-    has_a = data.get('has_awg') == '1'
     has_r = data.get('has_relay') == '1'
     has_v = data.get('has_vless') == '1'
-    if role != 'origin' and (has_a or has_r or has_v) and data.get('role') != 'node':
+    if role != 'origin' and (has_r or has_v) and data.get('role') != 'node':
         data['role'] = 'node'
+        changed = True
+    elif role in ('awg', 'dual') and not (has_r or has_v):
+        data['role'] = 'unconfigured'
         changed = True
 
     if not data.get('xray_api_key') and data.get('awg_api_key'):
         data['xray_api_key'] = data['awg_api_key']
         changed = True
+
+    legacy_keys = ['has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port']
+    for k in legacy_keys:
+        if k in data:
+            del data[k]
+            changed = True
 
     if changed:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
@@ -265,13 +265,12 @@ get_node_status() {
         return
     fi
 
-    local has_a has_v has_r
-    has_a="$(get_state_val "has_awg" "0")"
+    local has_v has_r
     has_v="$(get_state_val "has_vless" "0")"
     has_r="$(get_state_val "has_relay" "0")"
 
-    # Модульный зарубежный узел (TLS / AWG / Relay)
-    if [[ "$has_a" == "1" || "$has_v" == "1" || "$has_r" == "1" || "$role" == "node" || "$role" =~ ^(awg|vless|relay|dual)$ ]]; then
+    # Модульный зарубежный узел (TLS / Relay)
+    if [[ "$has_v" == "1" || "$has_r" == "1" || "$role" == "node" || "$role" =~ ^(vless|relay)$ ]]; then
         echo "node"
     else
         echo "unconfigured"

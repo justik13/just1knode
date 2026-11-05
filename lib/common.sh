@@ -20,6 +20,15 @@ export LANG="${LANG:-C.UTF-8}"
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
 
+if ! declare -f get_state_val >/dev/null 2>&1; then
+    _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    if [[ -f "${_lib_dir}/state.sh" ]]; then
+        # shellcheck source=lib/state.sh
+        source "${_lib_dir}/state.sh"
+    fi
+    unset _lib_dir
+fi
+
 
 log() {
     echo -e "${GREEN}[+]${NC} $1"
@@ -371,7 +380,7 @@ ensure_xray_api_healthy() {
         return 0
     fi
 
-    # На узлах Relay или AWG без VLESS служба xray-api не используется и не должна запускаться
+    # На узлах Relay без VLESS служба xray-api не используется и не должна запускаться
     local role cur_has_v
     role="$(get_state_val "role" "")"
     cur_has_v="$(get_state_val "has_vless" "0")"
@@ -568,38 +577,12 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. AmneziaWG API (порты для ролей awg либо при наличии has_awg/активного конфига amnezia)
-    local is_awg_node=0
-    if [[ "$role" == "awg" || "$(get_state_val "has_awg" "0")" == "1" || -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" ]]; then
-        is_awg_node=1
-    fi
-
-    if [[ $is_awg_node -eq 1 ]]; then
-        local awg_port
-        awg_port="$(get_state_val "awg_port" "8443")"
-        [[ -z "$awg_port" || "$awg_port" == "-" ]] && awg_port="8443"
-
-        # Zero-Lockout: никогда не удаляем порт, если на нем слушает SSH
-        if ! is_ssh_port "$awg_port"; then
-            # Устраняем уязвимость: удаляем публичный доступ к порту Amnezia API
-            if ufw status 2>/dev/null | grep -E "${awg_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow "${awg_port}/tcp" >/dev/null 2>&1 || true
-                ufw delete allow "${awg_port}" >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено публичное правило для порта API AmneziaWG (${awg_port})."
-            fi
-        fi
-
-        # Проверка доверенного BOT_IP из state.json (Fail-Closed, без эвристического угадывания)
-        local bot_ip
-        bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        if [[ -n "$bot_ip" && "$bot_ip" != "any" && "$bot_ip" != "0.0.0.0/0" && "$bot_ip" != "-" ]] && (validate_ip "$bot_ip" || validate_ipv4 "$bot_ip"); then
-            if ! ufw status 2>/dev/null | grep -F "$bot_ip" | grep -q "$awg_port"; then
-                if ufw allow from "$bot_ip" to any port "$awg_port" proto tcp comment "just1knode amnezia api" >/dev/null 2>&1; then
-                    log "Фаервол UFW: подтвержден доступ к порту ${awg_port} строго для BOT_IP (${bot_ip})"
-                fi
-            fi
-        else
-            warn "BOT_IP не задан в state.json. Порт Amnezia API (${awg_port}) закрыт от мира (Fail-Closed)."
+    # 3. Очистка устаревшего порта 8443 (Amnezia) во всех ролях при условии, что на нем не слушает SSH
+    if ! is_ssh_port "8443"; then
+        if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
+            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8443 >/dev/null 2>&1 || true
+            warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
         fi
     fi
 
@@ -608,19 +591,12 @@ heal_node_firewall_and_stealth() {
         local origin_bot_ip
         origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
-        # Zero-Lockout: не удаляем 8444 или 8443, если на них слушает SSH
+        # Zero-Lockout: не удаляем 8444, если на нем слушает SSH
         if ! is_ssh_port "8444"; then
             if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
                 ufw delete allow 8444 >/dev/null 2>&1 || true
                 warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
-            fi
-        fi
-        if ! is_ssh_port "8443"; then
-            if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
-                ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8443 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
             fi
         fi
 
@@ -673,13 +649,8 @@ heal_node_firewall_and_stealth() {
             ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         fi
 
-        # Защита xray-api (порт 8444 активен ТОЛЬКО при наличии автономного just1k-vless-api.conf либо на узлах без Amnezia Nginx)
-        local cur_awg_port
-        cur_awg_port="$(get_state_val "awg_port" "8443")"
-        [[ -z "$cur_awg_port" || "$cur_awg_port" == "-" ]] && cur_awg_port="8443"
-
-        # Гарантированно устраняем уязвимость: удаляем публичное Anywhere правило для 8444 (если 8444 не используется Amnezia)
-        if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then
+        # Защита xray-api (порт 8444)
+        if ! is_ssh_port "8444"; then
             if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
                 ufw delete allow 8444 >/dev/null 2>&1 || true
@@ -694,15 +665,6 @@ heal_node_firewall_and_stealth() {
                 if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
                     ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
                 fi
-            fi
-        elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then
-            # На узлах чисто Amnezia без VLESS удаляем неиспользуемое правило 8444
-            if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then
-                if [[ -n "$v_bot_ip" ]]; then
-                    ufw delete allow from "$v_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
-                fi
-                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8444 >/dev/null 2>&1 || true
             fi
         fi
     fi
@@ -1043,6 +1005,378 @@ resolve_relay_geo_interactive() {
     echo "${code}|${country}"
 }
 
+# =============================================================================
+# СИСТЕМА ЗАЩИТЫ ОТ АБУЗА (ANTI-ABUSE: NETFILTER / IPTABLES / UFW)
+# 1. Блокировка исходящего SMTP (порт 25) с tcp-reset
+# 2. Блокировка BitTorrent L7 хэндшейка и DHT пакетов через xt_string
+# =============================================================================
 
+sync_ufw_before_rules_antiabuse() {
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        local has_xt_string=0
+        if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+            has_xt_string=1
+        fi
+        python3 -c "
+import os, re, sys, tempfile
+bf = sys.argv[1]
+has_xt_string = sys.argv[2] == '1'
+with open(bf, 'r', encoding='utf-8') as f:
+    content = f.read()
 
+content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
+
+rules = [
+    '-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
+    '-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
+    '-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP',
+    '-A ufw-before-forward -p udp --dport 6881:6889 -j DROP',
+    '-A ufw-before-output -p tcp --dport 6881:6889 -j DROP',
+    '-A ufw-before-output -p udp --dport 6881:6889 -j DROP',
+]
+if has_xt_string:
+    rules.extend([
+        '-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
+        '-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
+        '-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP',
+        '-A ufw-before-output -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
+        '-A ufw-before-output -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
+        '-A ufw-before-output -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP',
+        '-A ufw-before-output -p udp -m string --string \"d1:rd2:id20:\" --algo bm -j DROP',
+        '-A ufw-before-output -p udp -m string --hex-string \"|0000041727101980|\" --algo bm -j DROP',
+        '-A ufw-before-output -p tcp -m string --string \"/announce?info_hash=\" --algo bm -j DROP',
+    ])
+
+block = '# START JUST1KNODE ANTI-ABUSE\n' + '\n'.join(rules) + '\n# END JUST1KNODE ANTI-ABUSE\n'
+
+if ':ufw-before-forward' in content:
+    content = re.sub(r'(:\s*ufw-before-forward\s+-\s+\[0:0\]\n)', r'\1' + block, content, count=1)
+elif '*filter' in content:
+    content = content.replace('*filter\n', '*filter\n' + block, 1)
+else:
+    sys.exit(1)
+
+d = os.path.dirname(os.path.abspath(bf))
+t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
+    f.write(content)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(t_path, bf)
+" "$before_rules" "$has_xt_string" 2>/dev/null || return 1
+    else
+        if command -v ufw >/dev/null 2>&1; then
+            return 1
+        fi
+    fi
+    return 0
+}
+
+remove_ufw_before_rules_antiabuse() {
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        python3 -c "
+import os, re, sys, tempfile
+bf = sys.argv[1]
+try:
+    with open(bf, 'r', encoding='utf-8') as f:
+        content = f.read()
+    new_content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
+    if new_content != content:
+        d = os.path.dirname(os.path.abspath(bf))
+        t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
+        with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(t_path, bf)
+except Exception:
+    pass
+" "$before_rules" 2>/dev/null || true
+    fi
+}
+
+check_antiabuse_rules() {
+    # Проверка обязательных инвариантов сетевой защиты:
+    # 1. SMTP:25 REJECT (FORWARD + OUTPUT)
+    # 2. BitTorrent:6881-6889 DROP (FORWARD + OUTPUT)
+    # 3. BitTorrent L7 TCP/UDP DROP (FORWARD + OUTPUT при поддержке xt_string)
+    # 4. BitTorrent L7 UDP DHT DROP (FORWARD + OUTPUT при поддержке xt_string)
+    # 5. BitTorrent UDP-трекеры & HTTP-анонсы DROP (OUTPUT при поддержке xt_string)
+    local missing=0
+
+    # 1. SMTP:25 FORWARD & OUTPUT
+    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+    if ! iptables -C OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null && \
+       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 2. BitTorrent порты 6881:6889 (FORWARD + OUTPUT)
+    if ! iptables -C FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp --dport 6881:6889 -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+    if ! iptables -C FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp --dport 6881:6889 -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+    if ! iptables -C OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp --dport 6881:6889 -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+    if ! iptables -C OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null && \
+       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp --dport 6881:6889 -j DROP 2>/dev/null); then
+        missing=$((missing + 1))
+    fi
+
+    # 3. BitTorrent L7 (FORWARD + OUTPUT)
+    if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+        if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+
+        # OUTPUT chain (для трафика локального процесса Xray)
+        if ! iptables -C OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+        if ! iptables -C OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null && \
+           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null); then
+            missing=$((missing + 1))
+        fi
+    fi
+
+    # Проверка сохранения правил в /etc/ufw/before.rules (при наличии UFW)
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        if ! grep -q -- "-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-forward -p udp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-output -p tcp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
+           ! grep -q -- "-A ufw-before-output -p udp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null; then
+            missing=$((missing + 1))
+        fi
+        if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+            if ! grep -q -- "-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"d1:rd2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p udp -m string --hex-string \"|0000041727101980|\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
+               ! grep -q -- "-A ufw-before-output -p tcp -m string --string \"/announce?info_hash=\" --algo bm -j DROP" "$before_rules" 2>/dev/null; then
+                missing=$((missing + 1))
+            fi
+        fi
+    elif command -v ufw >/dev/null 2>&1; then
+        missing=$((missing + 1))
+    fi
+
+    if [[ $missing -eq 0 ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+apply_antiabuse_protection() {
+    log "Настройка сетевой защиты (Anti-Abuse: SMTP 25 + BitTorrent L7/Ports)..."
+    apply_node_sysctl_hardening
+
+    # 1. Автозагрузка модуля ядра xt_string для L7 фильтрации (если поддерживается)
+    modprobe xt_string 2>/dev/null || true
+    if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+        mkdir -p /etc/modules-load.d 2>/dev/null || true
+        if ! grep -q "^xt_string" /etc/modules-load.d/just1knode.conf 2>/dev/null; then
+            echo "xt_string" >> /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+        fi
+    fi
+
+    # 2. Персистентность в UFW (переживает ufw reload и перезагрузку ОС)
+    if ! sync_ufw_before_rules_antiabuse; then
+        warn "Сбой сохранения правил в /etc/ufw/before.rules!"
+        return 1
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        if ! ufw reload >/dev/null 2>&1; then
+            warn "Сбой перезагрузки конфигурации UFW (ufw reload)!"
+            return 1
+        fi
+    fi
+
+    # 3. Применение правил в активный FORWARD, OUTPUT и DOCKER-USER (немедленная защита без ожидания перезагрузки)
+    # SMTP:25 reject (FORWARD + OUTPUT)
+    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
+        iptables -I FORWARD 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    fi
+    if ! iptables -C OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
+        iptables -I OUTPUT 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    fi
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        if ! iptables -C DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
+            iptables -I DOCKER-USER 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+        fi
+    fi
+
+    # BitTorrent Standard Ports (6881-6889) (FORWARD + OUTPUT)
+    if ! iptables -C FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null; then
+        iptables -I FORWARD 2 -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
+    fi
+    if ! iptables -C FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null; then
+        iptables -I FORWARD 3 -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
+    fi
+    if ! iptables -C OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null; then
+        iptables -I OUTPUT 2 -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
+    fi
+    if ! iptables -C OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null; then
+        iptables -I OUTPUT 3 -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
+    fi
+
+    # BitTorrent L7
+    if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
+        if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 4 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 5 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
+            iptables -I FORWARD 6 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+        fi
+
+        # OUTPUT chain (для трафика локального процесса Xray)
+        if ! iptables -C OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 4 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 5 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 6 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 7 -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 8 -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || true
+        fi
+        if ! iptables -C OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null; then
+            iptables -I OUTPUT 9 -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || true
+        fi
+
+        if iptables -L DOCKER-USER >/dev/null 2>&1; then
+            if ! iptables -C DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 2 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+            fi
+            if ! iptables -C DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 3 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+            fi
+            if ! iptables -C DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
+                iptables -I DOCKER-USER 4 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # 4. Итоговая проверка соблюдения инвариантов (Fail-Closed)
+    if check_antiabuse_rules; then
+        if [[ -f /etc/ufw/after.init ]]; then
+            sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+        fi
+        if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
+            rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+
+        log "✔ Правила сетевой защиты Anti-Abuse (SMTP:25 + BitTorrent L7/Ports) успешно активированы."
+        set_state_val "abuse_protection" "enabled"
+        return 0
+    else
+        warn "Не удалось активировать полный набор правил Anti-Abuse!"
+        return 1
+    fi
+}
+
+remove_antiabuse_protection() {
+    log "Очистка правил сетевой защиты Anti-Abuse..."
+    iptables -D FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    iptables -D OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    iptables -D DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+
+    iptables -D FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
+
+    iptables -D FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+
+    iptables -D OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || true
+    iptables -D OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || true
+
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        iptables -D DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        iptables -D DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
+        iptables -D DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+    fi
+
+    # Удаление из /etc/ufw/before.rules
+    remove_ufw_before_rules_antiabuse
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+        ufw reload >/dev/null 2>&1 || true
+    fi
+
+    # Очистка legacy хуков и сервисов
+    if [[ -f /etc/ufw/after.init ]]; then
+        sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+    fi
+    if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
+        rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+
+    # Удаление xt_string из автозагрузки при удалении
+    if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
+        sed -i '/^xt_string$/d' /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+    fi
+
+    set_state_val "abuse_protection" "disabled"
+    log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
+}
 

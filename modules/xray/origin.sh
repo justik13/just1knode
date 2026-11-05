@@ -121,11 +121,10 @@ install_xray_origin_node() {
 
     local prev_role
     prev_role="$(get_node_status)"
-    local has_a has_r has_v
-    has_a="$(get_state_val "has_awg" "0")"
+    local has_r has_v
     has_r="$(get_state_val "has_relay" "0")"
     has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$prev_role" == "node" || "$prev_role" == "awg" || "$prev_role" == "relay" || "$has_a" == "1" || "$has_r" == "1" || "$has_v" == "1" ]]; then
+    if [[ "$prev_role" == "node" || "$prev_role" == "relay" || "$prev_role" == "vless" || "$has_r" == "1" || "$has_v" == "1" ]]; then
         error "На узле уже активна роль '${prev_role}'. Origin (Белый Интернет) требует выделенный изолированный сервер."
         return 1
     fi
@@ -472,6 +471,11 @@ security_rules = [
     {
         'type': 'field',
         'port': '25',
+        'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'port': '6881-6889',
         'outboundTag': 'just1k-wl-block'
     }
 ]
@@ -978,24 +982,19 @@ set_origin_bot_ip() {
     local target_port="8444"
     local role_descr="Origin API (порт 8444)"
 
-    local has_a has_v
-    has_a="$(get_state_val "has_awg" "0")"
+    local has_v has_r
     has_v="$(get_state_val "has_vless" "0")"
+    has_r="$(get_state_val "has_relay" "0")"
 
     if [[ "$role" == "origin" ]]; then
         target_port="8444"
         role_descr="Origin API (порт 8444)"
-    elif [[ "$role" == "awg" || "$role" == "node" || "$has_a" == "1" || "$has_v" == "1" || "$role" == "vless" ]]; then
-        if [[ "$has_a" == "1" || "$role" == "awg" ]]; then
-            target_port="$(get_state_val "awg_port" "8443")"
-            role_descr="AmneziaWG API (порт ${target_port})"
-        else
-            target_port="8444"
-            role_descr="Xray API (порт 8444)"
-        fi
+    elif [[ "$role" == "node" || "$role" == "relay" || "$role" == "vless" || "$has_v" == "1" || "$has_r" == "1" ]]; then
+        target_port="8444"
+        role_descr="Xray API (порт 8444)"
     else
         release_just1knode_lock
-        error "Функция доступна только на настроенных узлах (Origin, AmneziaWG или VLESS)."
+        error "Функция доступна только на настроенных узлах (Origin, Relay или VLESS)."
         return 1
     fi
 
@@ -1394,7 +1393,15 @@ if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag
         'outboundTag': 'just1k-wl-block'
     })
 
-# 4.1d. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
+# 4.1d. Блокировка стандартных P2P/BitTorrent портов (6881-6889)
+if not any(r.get('port') == '6881-6889' and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
+    rules.insert(1, {
+        'type': 'field',
+        'port': '6881-6889',
+        'outboundTag': 'just1k-wl-block'
+    })
+
+# 4.1e. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
 if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
     rules.insert(1, {
         'type': 'field',
