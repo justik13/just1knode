@@ -1983,6 +1983,13 @@ esac
         # 1. Zero-Signature: legacy camouflage index.html must be purged
         self.assertFalse(index_file.exists())
 
+        # 1b. Zero-Signature: Edge Gateway camouflage index.html must also be purged
+        edge_index = self.www_html_dir / "index.html"
+        edge_index.write_text("<h1>Edge Gateway Infrastructure</h1>", encoding="utf-8")
+        res_edge = self._run_shell_snippet("deploy_camouflage_site")
+        self.assertEqual(res_edge.returncode, 0)
+        self.assertFalse(edge_index.exists())
+
         # 2. Zero-Collateral: custom user index.html must NOT be purged
         custom_index = self.www_html_dir / "index.html"
         custom_index.write_text("<h1>Custom User Site</h1>", encoding="utf-8")
@@ -3611,7 +3618,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'alpn': ['http/1.1']", relay_sh)
         self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
         self.assertIn("server_tokens off;", relay_sh)
-        self.assertIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertNotIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertIn('return 404 "Not Found\\n";', relay_sh)
         self.assertIn("'minVersion': '1.2'", relay_sh)
         self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', relay_sh)
         self.assertIn('add_header X-Content-Type-Options "nosniff" always;', relay_sh)
