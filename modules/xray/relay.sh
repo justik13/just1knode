@@ -997,6 +997,11 @@ print('[]')
         "type": "field",
         "port": "25",
         "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "port": "6881-6889",
+        "outboundTag": "block"
       }
     ]
   },
@@ -1815,6 +1820,13 @@ if not has_smtp_port:
         'port': '25',
         'outboundTag': 'block'
     })
+has_bt_ports = any(r.get('type') == 'field' and r.get('port') == '6881-6889' for r in rules)
+if not has_bt_ports:
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'port': '6881-6889',
+        'outboundTag': 'block'
+    })
 
 for ib in cfg.get('inbounds', []):
     if not isinstance(ib, dict):
@@ -2097,11 +2109,29 @@ if not cfg:
                 {'type': 'field', 'inboundTag': ['just1k-wl-api-grpc'], 'outboundTag': 'api'},
                 {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'},
                 {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
-                {'type': 'field', 'port': '25', 'outboundTag': 'block'}
+                {'type': 'field', 'port': '25', 'outboundTag': 'block'},
+                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'}
             ]
         },
         'dns': {'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'], 'queryStrategy': 'UseIPv4'}
     }
+
+outbounds = cfg.setdefault('outbounds', [])
+if not any(ob.get('tag') == 'block' for ob in outbounds):
+    outbounds.append({'tag': 'block', 'protocol': 'blackhole'})
+
+routing = cfg.setdefault('routing', {})
+routing.setdefault('domainStrategy', 'IPIfNonMatch')
+rules = routing.setdefault('rules', [])
+insert_pos = 1 if (rules and rules[0].get('outboundTag') in ('api', 'just1k-wl-api')) else 0
+if not any(r.get('type') == 'field' and 'geoip:private' in r.get('ip', []) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and 'bittorrent' in r.get('protocol', []) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and (r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '25', 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and r.get('port') == '6881-6889' and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'})
 
 inbounds = cfg.setdefault('inbounds', [])
 if not any(ib.get('tag') == 'just1k-wl-api-grpc' for ib in inbounds):

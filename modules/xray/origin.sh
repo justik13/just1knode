@@ -472,6 +472,11 @@ security_rules = [
         'type': 'field',
         'port': '25',
         'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'port': '6881-6889',
+        'outboundTag': 'just1k-wl-block'
     }
 ]
 for s_idx, s_rule in enumerate(security_rules):
@@ -1388,7 +1393,15 @@ if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag
         'outboundTag': 'just1k-wl-block'
     })
 
-# 4.1d. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
+# 4.1d. Блокировка стандартных P2P/BitTorrent портов (6881-6889)
+if not any(r.get('port') == '6881-6889' and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
+    rules.insert(1, {
+        'type': 'field',
+        'port': '6881-6889',
+        'outboundTag': 'just1k-wl-block'
+    })
+
+# 4.1e. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
 if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
     rules.insert(1, {
         'type': 'field',

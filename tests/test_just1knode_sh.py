@@ -555,6 +555,7 @@ exit 0
         self.assertTrue(any(r.get("ip") == ["geoip:private"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "geoip:private block rule must be present on Origin")
         self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
+        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "Port 6881-6889 block rule must be present on Origin")
 
         # 6. Check gRPC API, stats and user traffic policy invariants
         self.assertEqual(updated.get("api", {}).get("tag"), "just1k-wl-api")
@@ -2432,6 +2433,7 @@ ensure_xrayapi_user
         self.assertTrue(any("geoip:private" in r.get("ip", []) and r.get("outboundTag") == "block" for r in rules), "geoip:private block rule must be present on Relay")
         self.assertTrue(any("bittorrent" in r.get("protocol", []) for r in rules), "BitTorrent protocol rule must be present")
         self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "block" for r in rules), "SMTP:25 block rule must be present on Relay")
+        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "block" for r in rules), "Port 6881-6889 block rule must be present on Relay")
         self.assertTrue(any(ob.get("tag") == "block" and ob.get("protocol") == "blackhole" for ob in updated_cfg.get("outbounds", [])), "Blackhole outbound must be present")
 
     # -------------------------------------------------------------------------
@@ -3399,12 +3401,22 @@ COMMIT
             rules = [
                 '-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
                 '-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
+                '-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP',
+                '-A ufw-before-forward -p udp --dport 6881:6889 -j DROP',
+                '-A ufw-before-output -p tcp --dport 6881:6889 -j DROP',
+                '-A ufw-before-output -p udp --dport 6881:6889 -j DROP',
             ]
             if has_xt_string:
                 rules.extend([
                     '-A ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP',
                     '-A ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP',
                     '-A ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP',
+                    '-A ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP',
+                    '-A ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP',
                 ])
             block = '# START JUST1KNODE ANTI-ABUSE\n' + '\n'.join(rules) + '\n# END JUST1KNODE ANTI-ABUSE\n'
             if ':ufw-before-forward' in content:
@@ -3420,14 +3432,18 @@ COMMIT
         self.assertIn("# START JUST1KNODE ANTI-ABUSE", synced)
         self.assertIn("-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced)
         self.assertIn("-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced)
+        self.assertIn("-A ufw-before-output -p tcp --dport 6881:6889 -j DROP", synced)
+        self.assertIn("-A ufw-before-output -p udp --dport 6881:6889 -j DROP", synced)
         self.assertIn('-A ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
-        self.assertIn('-A ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
-        self.assertIn('-A ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP', synced)
+        self.assertIn('-A ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP', synced)
 
-        # Without xt_string, only SMTP:25 rules are added
+        # Without xt_string, only port rules (SMTP:25 and 6881:6889) are added
         synced_no_xt = sync_rules(sample_ufw, has_xt_string=False)
         self.assertIn("-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced_no_xt)
         self.assertIn("-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset", synced_no_xt)
+        self.assertIn("-A ufw-before-output -p tcp --dport 6881:6889 -j DROP", synced_no_xt)
         self.assertNotIn("BitTorrent protocol", synced_no_xt)
 
         # Idempotence: syncing again does not duplicate block
