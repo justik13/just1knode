@@ -2936,11 +2936,12 @@ remove_traffic_watchdog_timer
         self.assertFalse(run_validate_ip("::"))
         self.assertFalse(run_validate_ip("not-an-ip"))
 
-    def test_uninstall_and_cleanup_cleans_vless_port_in_ufw(self):
-        """Verify uninstall_node removes VLESS and API ports from UFW."""
+    def test_uninstall_and_cleanup_cleans_api_and_relay_port_in_ufw(self):
+        """Verify uninstall_node removes relay_port and API port 8444 from UFW."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('ufw delete allow 443/tcp', just1knode_sh)
+        self.assertIn('ufw delete allow from "$st_bot_ip" to any port 8444 proto tcp', just1knode_sh)
         self.assertIn('ufw delete allow 8444/tcp', just1knode_sh)
+        self.assertIn('ufw delete allow "$st_relay_port"/tcp', just1knode_sh)
 
     def test_origin_catchall_dummy_fallback_on_old_nginx(self):
         """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
