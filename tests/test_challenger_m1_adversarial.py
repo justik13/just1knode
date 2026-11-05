@@ -609,18 +609,18 @@ ensure_xrayapi_user() {{ return 0; }}
         self.assertIn("Обнаружено ошибок", res.stdout + res.stderr)
 
     def test_install_origin_rejects_node_role_and_active_components(self):
-        """Origin installation must strictly reject nodes with role='node' or active AWG/Relay/VLESS components."""
+        """Origin installation must strictly reject nodes with role='node' or active Relay/VLESS components."""
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "node", "has_relay": "1", "has_vless": "0"}, f)
 
         res = self._run_shell_snippet("install_xray_origin_node 'origin.test'")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("Origin (Белый Интернет) требует выделенный изолированный сервер", res.stdout + res.stderr)
 
-    def test_update_node_post_skips_xray_core_for_awg_only_node(self):
-        """AWG-only nodes (role=node, has_awg=1, has_relay=0, has_vless=0) must not run update_xray_core."""
+    def test_update_node_post_skips_xray_core_for_nodes_without_xray(self):
+        """Nodes without active Xray components (has_relay=0, has_vless=0) must not run update_xray_core."""
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "node", "has_relay": "0", "has_vless": "0"}, f)
 
         # Mock xray binary to fail if invoked for core update
         self._create_mock_script("xray", "#!/bin/sh\necho 'ERROR: xray core updated unexpectedly' >&2\nexit 1\n")
@@ -628,8 +628,7 @@ ensure_xrayapi_user() {{ return 0; }}
         self._create_mock_script("systemctl", "#!/bin/sh\nexit 0\n")
 
         snippet = """
-ensure_amnezia_api_service_and_env() { return 0; }
-apply_amnezia_abuse_protection() { return 0; }
+apply_antiabuse_protection() { return 0; }
 heal_node_firewall_and_stealth() { return 0; }
 acquire_just1knode_lock() { return 0; }
 release_just1knode_lock() { return 0; }

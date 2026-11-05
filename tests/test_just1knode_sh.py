@@ -2878,11 +2878,12 @@ remove_traffic_watchdog_timer
         self.assertIsNotNone(match, "catchall_ssl_block with ssl_reject_handshake on; must be defined")
         self.assertNotIn("ssl_certificate", match.group(0), "ssl_certificate must NOT be inside catchall when ssl_reject_handshake on is active")
 
-    def test_set_bot_ip_supports_origin_awg_and_dual_roles(self):
+    def test_set_bot_ip_supports_origin_and_modular_roles(self):
         """Verify set_origin_bot_ip dynamically adapts target port based on role."""
         origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         self.assertIn('target_port="8444"', origin_sh)
-        self.assertIn('target_port="$(get_state_val "awg_port" "8443")"', origin_sh)
+        self.assertIn('role_descr="Origin API (порт 8444)"', origin_sh)
+        self.assertIn('role_descr="Xray API (порт 8444)"', origin_sh)
         self.assertIn('ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp', origin_sh)
         self.assertIn('ufw delete allow 8443/tcp', origin_sh)
 
@@ -2894,12 +2895,10 @@ remove_traffic_watchdog_timer
         self.assertIn('listen 443 ssl default_server', origin_sh)
         self.assertIn("re.sub(r'server\\s*\\{[^}]*listen\\s+8443\\s+ssl[^}]*\\}\\n*', '', content, flags=re.DOTALL)", origin_sh)
 
-    def test_doctor_ufw_acl_validation_awg_and_dual(self):
-        """Verify run_doctor checks awg_port for awg and dual nodes."""
+    def test_doctor_ufw_acl_validation_xray_api(self):
+        """Verify run_doctor checks port 8444 for Xray API."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('awg_p="$(get_state_val "awg_port" "8443")"', just1knode_sh)
-        self.assertIn("Порт API AmneziaWG $awg_p открыт для всех", just1knode_sh)
-        self.assertIn("Порт API AmneziaWG $awg_p защищен и доступен только с BOT_IP", just1knode_sh)
+        self.assertIn('ufw status 2>/dev/null | grep -E "^8444(/tcp)?\\s+ALLOW"', just1knode_sh)
 
     def test_doctor_ufw_perimeter_audit(self):
         """Verify run_doctor audits full UFW perimeter for dead rules and unauthorized anywhere ports."""
@@ -2936,12 +2935,11 @@ remove_traffic_watchdog_timer
         self.assertFalse(run_validate_ip("::"))
         self.assertFalse(run_validate_ip("not-an-ip"))
 
-    def test_uninstall_and_cleanup_cleans_awg_port_in_ufw(self):
-        """Verify uninstall_node removes awg_port and bot_ip from UFW."""
+    def test_uninstall_and_cleanup_cleans_vless_port_in_ufw(self):
+        """Verify uninstall_node removes VLESS and API ports from UFW."""
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('st_awg_port="$(get_state_val "awg_port" 2>/dev/null || true)"', just1knode_sh)
-        self.assertIn('ufw delete allow from "$st_bot_ip" to any port "$st_awg_port" proto tcp', just1knode_sh)
-        self.assertIn('ufw delete allow "${st_awg_port}/tcp"', just1knode_sh)
+        self.assertIn('ufw delete allow 443/tcp', just1knode_sh)
+        self.assertIn('ufw delete allow 8444/tcp', just1knode_sh)
 
     def test_origin_catchall_dummy_fallback_on_old_nginx(self):
         """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
@@ -3029,7 +3027,6 @@ remove_traffic_watchdog_timer
 
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
-        self.assertIn('chmod 644 "$amnezia_nginx"', relay_sh)
 
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         self.assertIn('core|xray) shift 2; update_xray_core "$@" ;;', just1knode_sh)
@@ -3458,11 +3455,11 @@ COMMIT
         self.assertNotIn("# START JUST1KNODE ANTI-ABUSE", removed)
         self.assertEqual(removed.strip(), sample_ufw.strip())
 
-    def test_modular_awg_node_doctor_and_status_skips_xray_behavioral(self):
-        """Verify run_doctor on modular AWG-only node skips Xray Core and Xray config check."""
+    def test_modular_node_without_xray_doctor_and_status_skips_xray_behavioral(self):
+        """Verify run_doctor on modular node without Xray components skips Xray Core and Xray config check."""
         self._prepare_base_env()
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_awg": "1", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "node", "has_relay": "0", "has_vless": "0"}, f)
 
         res = self._run_shell_snippet("run_doctor")
         self.assertNotIn("3. Проверка конфигурации Xray...", res.stdout)
@@ -3476,14 +3473,13 @@ COMMIT
                 "role": "node",
                 "domain": "vless.test.example",
                 "vless_domain": "vless.test.example",
-                "awg_domain": "awg.test.example",
-                "sni": "None",
+                "sni": "sni.test.example",
             }, f)
 
         res = self._run_shell_snippet("run_doctor")
         # Both unique domains must be checked
         self.assertIn("vless.test.example", res.stdout)
-        self.assertIn("awg.test.example", res.stdout)
+        self.assertIn("sni.test.example", res.stdout)
         # Deduplication: vless.test.example checked once
         self.assertEqual(res.stdout.count("vless.test.example"), 1)
         # Case-insensitive null/none filtered out: None must not be checked as domain
@@ -3581,7 +3577,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
 
         # Doctor check 5 domain verification loop
-        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
+        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
         self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
 
         # Relay domain setup emoji flag
@@ -3622,7 +3618,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 4. Doctor and firewall UFW regex invariants
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
-        self.assertIn("just1k-amnezia.conf", common_sh)
+        self.assertNotIn("just1k-amnezia.conf", common_sh)
         self.assertIn("timeout=5.0", just1knode_sh)
         self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
 
@@ -3671,12 +3667,11 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('rm -f "$def_site"', relay_sh)
 
     def test_heal_firewall_and_vless_install_port_8444_coexistence_with_amnezia(self):
-        """Verify heal_node_firewall preserves 8444 when VLESS is active, and removes dead 8444 when only Amnezia is active."""
+        """Verify heal_node_firewall preserves 8444 when VLESS is active."""
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
         self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then', common_sh)
-        self.assertIn('elif [[ -f "/etc/nginx/sites-enabled/just1k-amnezia.conf" || -f "/etc/nginx/sites-available/just1k-amnezia.conf" ]]; then', common_sh)
-        self.assertIn('if [[ "$cur_awg_port" != "8444" ]] && ! is_ssh_port "8444"; then', common_sh)
+        self.assertNotIn('just1k-amnezia.conf', common_sh)
         self.assertIn('just1k-vless-api.conf', relay_sh)
         self.assertIn('listen 8444 ssl http2;', relay_sh)
         self.assertIn('show_vless_bot_credentials', relay_sh)
@@ -3693,7 +3688,6 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
         self.assertIn('ufw delete allow 443/tcp', relay_sh)
         self.assertIn('systemctl stop xray-api', relay_sh)
-        self.assertIn('local amnezia_bak="${amnezia_nginx}.user.bak"', relay_sh)
         # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
         idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
         idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
@@ -3759,18 +3753,14 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         # 7. install_nginx_if_missing in install_vless_direct_node
         self.assertIn('install_nginx_if_missing', relay_sh)
 
-        # 8. amnezia_bak restoration on reload/restart failure
-        self.assertIn('if [[ -f "$amnezia_bak" ]]; then\n                cp -f "$amnezia_bak" "$amnezia_nginx" 2>/dev/null || true', relay_sh)
-
-        # 9. Format json in run_doctor and tmp.json in heal_and_update_relay_config
+        # 8. Format json in run_doctor and tmp.json in heal_and_update_relay_config
         self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
         self.assertIn("suffix='.tmp.json'", relay_sh)
 
     def test_setup_xray_api_proxy_injects_v1_into_all_nginx_server_blocks(self):
-        """Verify setup_xray_api_proxy iterates over all server blocks and injects /v1/ into each."""
+        """Verify setup_xray_api_proxy does not use Amnezia Nginx injection, but test standalone injection logic."""
         relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("parts = re.split(r'(\\bserver\\s*\\{)', content)", relay_sh)
-        self.assertIn("missing = any(i % 2 == 0 and i > 0 and 'location / {' in p and 'location /v1/' not in p for i, p in enumerate(parts))", relay_sh)
+        self.assertNotIn("just1k-amnezia.conf", relay_sh)
 
         # Test the injection logic directly on a simulated multi-server config
         simulated_nginx = """# 0. Catch-All
@@ -3868,15 +3858,15 @@ with open(path, 'w', encoding='utf-8') as f:
         self.assertIn("ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']", origin_sh)
         self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", relays_manage_sh)
 
-    def test_modular_awg_node_status_and_doctor_skips_xray(self):
-        """On modular nodes where only AmneziaWG is installed, Xray status and config check must be skipped."""
+    def test_modular_node_status_and_doctor_skips_xray(self):
+        """On modular nodes where Xray is not active, Xray status and config check must be skipped."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
         # 1. show_node_status must not check Xray Core just because role == "node"
         expected_status_cond = 'if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then'
         self.assertIn(expected_status_cond, just1knode_sh)
 
-        # 2. run_doctor step 3 must not fail Xray config check on AWG-only nodes
+        # 2. run_doctor step 3 must not fail Xray config check on nodes without active Xray
         self.assertIn(f'{expected_status_cond}\n        log "3. Проверка конфигурации Xray..."', just1knode_sh)
 
     def test_xray_api_source_bootstrap_caching_and_deployment(self):
@@ -3896,7 +3886,7 @@ with open(path, 'w', encoding='utf-8') as f:
         """Verify run_doctor iterates over all unique configured domains to validate each certificate."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
-        self.assertIn('for key in "domain" "vless_domain" "awg_domain" "sni"; do', just1knode_sh)
+        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
         self.assertIn('for domain in "${check_domains[@]}"; do', just1knode_sh)
         self.assertIn('cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"', just1knode_sh)
         self.assertIn('local d_cand d_cand_lower already existing key domain', just1knode_sh)

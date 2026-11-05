@@ -471,8 +471,7 @@ update_node_post() {
     local role
     role="$(get_state_val "role")"
 
-    local cur_a cur_r cur_v
-    cur_a="$(get_state_val "has_awg" "0")"
+    local cur_r cur_v
     cur_r="$(get_state_val "has_relay" "0")"
     cur_v="$(get_state_val "has_vless" "0")"
 
@@ -482,12 +481,8 @@ update_node_post() {
         if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
             heal_and_update_relay_config
         fi
-    elif [[ "$role" == "relay" ]]; then
+    elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
         heal_and_update_relay_config
-    elif [[ "$role" == "vless" ]]; then
-        heal_and_update_relay_config
-    elif [[ "$role" == "awg" ]]; then
-        warn "Протокол AmneziaWG выведен из эксплуатации. Рекомендуется мигрировать узел на VLESS: just1knode install vless"
     else
         warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
     fi
