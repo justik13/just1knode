@@ -577,24 +577,26 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. Origin API (роль origin)
+    # 3. Очистка устаревшего порта 8443 (Amnezia) во всех ролях при условии, что на нем не слушает SSH
+    if ! is_ssh_port "8443"; then
+        if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
+            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8443 >/dev/null 2>&1 || true
+            warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
+        fi
+    fi
+
+    # 4. Origin API (роль origin)
     if [[ "$role" == "origin" ]]; then
         local origin_bot_ip
         origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
-        # Zero-Lockout: не удаляем 8444 или 8443, если на них слушает SSH
+        # Zero-Lockout: не удаляем 8444, если на нем слушает SSH
         if ! is_ssh_port "8444"; then
             if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
                 ufw delete allow 8444 >/dev/null 2>&1 || true
                 warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
-            fi
-        fi
-        if ! is_ssh_port "8443"; then
-            if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
-                ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8443 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
             fi
         fi
 

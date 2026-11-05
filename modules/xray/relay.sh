@@ -1085,6 +1085,7 @@ EOF
 
     set_state_val "has_relay" "1"
     set_state_val "role" "node"
+    apply_antiabuse_protection
     if [[ "$cur_has_vless" == "1" ]]; then
         log "Компоненты узла актуализированы (Relay активен)."
         setup_xray_api_proxy "$dest_server"
@@ -2245,6 +2246,7 @@ with open(out_f, 'w', encoding='utf-8') as f:
     fi
 
     log "✔ VLESS TLS узел успешно настроен и запущен на порту 443!"
+    apply_antiabuse_protection
     echo ""
     show_vless_bot_credentials
 }

@@ -1366,6 +1366,10 @@ uninstall_node() {
             ufw delete allow 8444/tcp >/dev/null 2>&1 || true
             ufw delete allow 8444 >/dev/null 2>&1 || true
         fi
+        if ! is_ssh_port "443"; then
+            ufw delete allow 443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 443 >/dev/null 2>&1 || true
+        fi
     fi
 
     info "10/11. Удаление состояния, бэкапов и блокировок..."

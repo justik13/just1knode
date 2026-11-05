@@ -6,8 +6,8 @@
 
 ## Инварианты
 - Управление: CLI `just1knode.sh` (`doctor`, `heal`, `update`, `limit`).
-- Сеть: изоляция служб `xray-api:8444` и `amnezia-api:8443` через systemd и фаервол UFW с доступом только для IP бота.
-- Протоколы: AmneziaWG и Xray VLESS over XHTTP с каскадом Origin/Relay и ротацией эпох.
+- Сеть: изоляция службы `xray-api:8444` через systemd и фаервол UFW с доступом только для IP бота.
+- Протоколы: Xray VLESS (Direct TLS) и VLESS over XHTTP с каскадом Origin/Relay и ротацией эпох. Полная очистка от легаси AmneziaWG.
 
 ## Команды
 
