@@ -846,6 +846,12 @@ print('[]')
         "type": "field",
         "port": "6881-6889",
         "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "port": "443",
+        "network": "udp",
+        "outboundTag": "block"
       }
     ]
   },
@@ -1671,6 +1677,14 @@ if not has_bt_ports:
         'port': '6881-6889',
         'outboundTag': 'block'
     })
+has_quic_block = any(r.get('type') == 'field' and str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'block' for r in rules)
+if not has_quic_block:
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'port': '443',
+        'network': 'udp',
+        'outboundTag': 'block'
+    })
 
 for ib in cfg.get('inbounds', []):
     if not isinstance(ib, dict):
@@ -1954,7 +1968,8 @@ if not cfg:
                 {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'},
                 {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
                 {'type': 'field', 'port': '25', 'outboundTag': 'block'},
-                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'}
+                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'},
+                {'type': 'field', 'port': '443', 'network': 'udp', 'outboundTag': 'block'}
             ]
         },
         'dns': {'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'], 'queryStrategy': 'UseIPv4'}
@@ -1976,6 +1991,8 @@ if not any(r.get('type') == 'field' and (r.get('port') == '25' or r.get('port') 
     rules.insert(insert_pos, {'type': 'field', 'port': '25', 'outboundTag': 'block'})
 if not any(r.get('type') == 'field' and r.get('port') == '6881-6889' and r.get('outboundTag') == 'block' for r in rules):
     rules.insert(insert_pos, {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '443', 'network': 'udp', 'outboundTag': 'block'})
 
 inbounds = cfg.setdefault('inbounds', [])
 if not any(ib.get('tag') == 'just1k-wl-api-grpc' for ib in inbounds):
