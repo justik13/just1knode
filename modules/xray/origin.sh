@@ -1246,7 +1246,7 @@ for r in relays:
                     'tlsSettings': {
                         'serverName': r_sni or r_ip,
                         'fingerprint': 'firefox',
-                        'alpn': ['h2', 'http/1.1'],
+                        'alpn': ['http/1.1'],
                         'allowInsecure': False
                     }
                 }
@@ -1256,7 +1256,7 @@ for r in relays:
         if st.get('security') == 'tls':
             tls = st.setdefault('tlsSettings', {})
             tls['fingerprint'] = 'firefox'
-            tls['alpn'] = ['h2', 'http/1.1']
+            tls['alpn'] = ['http/1.1']
 
 # 2. INBOUNDS: гарантия наличия базовых инбаундов и правильный sniffing
 inbounds = cfg.setdefault('inbounds', [])

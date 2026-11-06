@@ -681,7 +681,7 @@ if cands:
     \"network\": \"tcp\",
     \"security\": \"tls\",
     \"tlsSettings\": {
-      \"alpn\": [\"h2\", \"http/1.1\"],
+      \"alpn\": [\"http/1.1\"],
       \"certificates\": [
         {
           \"certificateFile\": \"/usr/local/etc/xray/tls/fullchain.pem\",
@@ -1306,7 +1306,7 @@ ib['streamSettings'] = {
     'network': 'tcp',
     'security': 'tls',
     'tlsSettings': {
-        'alpn': ['h2', 'http/1.1'],
+        'alpn': ['http/1.1'],
         'certificates': [
             {
                 'certificateFile': '/usr/local/etc/xray/tls/fullchain.pem',
@@ -1482,7 +1482,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'network': 'tcp',
                 'security': 'tls',
                 'tlsSettings': {
-                    'alpn': ['h2', 'http/1.1'],
+                    'alpn': ['http/1.1'],
                     'certificates': [{'certificateFile': tls_cert_file, 'keyFile': tls_key_file}]
                 }
             },
@@ -1510,7 +1510,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
         st['security'] = 'tls'
         st.pop('realitySettings', None)
         st['tlsSettings'] = {
-            'alpn': ['h2', 'http/1.1'],
+            'alpn': ['http/1.1'],
             'certificates': [
                 {
                     'certificateFile': tls_cert_file,

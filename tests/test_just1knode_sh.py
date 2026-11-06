@@ -3619,6 +3619,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'alpn': ['http/1.1']", relay_sh)
         self.assertIn("'alpn': ['http/1.1']", relays_manage_sh)
         self.assertNotIn("'alpn': ['h2', 'http/1.1']", relays_manage_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relay_sh)
+        self.assertNotIn('\\"alpn\\": [\\"h2\\", \\"http/1.1\\"]', relay_sh)
         self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
         self.assertIn("server_tokens off;", relay_sh)
         self.assertNotIn("Edge Gateway Infrastructure", relay_sh)
@@ -3643,6 +3645,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
+        self.assertIn("'alpn': ['http/1.1']", origin_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", origin_sh)
 
         # 6. Freedom outbound sockopt domainStrategy invariants (Xray PR #6058)
         self.assertIn("['domainStrategy'] = 'UseIPv4'", origin_sh)
