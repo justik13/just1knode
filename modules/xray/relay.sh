@@ -249,6 +249,7 @@ except Exception:
     # Обнаружение Docker-контейнера на порту 80 (например, Caddy бота)
     local port80_container=""
     local stopped_container=""
+    trap 'if [[ -n "'"$stopped_container"'" ]]; then docker start "'"$stopped_container"'" >/dev/null 2>&1 || true; fi; rm -f /run/just1knode_ufw_opened_80 2>/dev/null || true' EXIT INT TERM
     port80_container="$(detect_host_port80_container || true)"
 
     if [[ -n "$port80_container" ]]; then
@@ -270,7 +271,7 @@ except Exception:
             if docker stop "$port80_container" >/dev/null 2>&1; then
                 stopped_container="$port80_container"
                 # Транзакционный trap для гарантированного запуска контейнера при сбое/прерывании
-                trap 'if [[ -n "'"$stopped_container"'" ]]; then docker start "'"$stopped_container"'" >/dev/null 2>&1 || true; fi' EXIT INT TERM
+                trap 'if [[ -n "'"$stopped_container"'" ]]; then docker start "'"$stopped_container"'" >/dev/null 2>&1 || true; fi; rm -f /run/just1knode_ufw_opened_80 2>/dev/null || true' EXIT INT TERM
             else
                 warn "Не удалось остановить контейнер '${port80_container}'. Standalone выпуск может завершиться ошибкой."
             fi
@@ -301,7 +302,7 @@ except Exception:
         if ! docker start "$stopped_container" >/dev/null 2>&1; then
             error "КРИТИЧЕСКИЙ СБОЙ: Не удалось запустить Docker-контейнер '${stopped_container}'. Запустите его вручную: docker start ${stopped_container}"
         fi
-        trap - EXIT INT TERM
+        stopped_container=""
     fi
 
     if [[ -f /run/just1knode_ufw_opened_80 ]]; then
@@ -312,6 +313,7 @@ except Exception:
             ufw delete allow 80 >/dev/null 2>&1 || true
         fi
     fi
+    trap - EXIT INT TERM
 
     if [[ $cert_rc -ne 0 || ! -f "${le_dir}/live/${domain}/fullchain.pem" ]]; then
         error "Сбой выпуска SSL-сертификата Let's Encrypt для $domain. Убедитесь, что порт 80 свободен и DNS указывает на этот сервер."
@@ -344,12 +346,16 @@ deploy_vless_fallback_nginx() {
     fi
     local fb_conf="/etc/nginx/sites-available/just1k-fallback80.conf"
     mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-    rm -f /var/www/html/index.html 2>/dev/null || true
+    local www_index="${WWW_HTML_DIR:-/var/www/html}/index.html"
+    if [[ -f "$www_index" ]] && (grep -q "Cloud Ingress Network Node" "$www_index" 2>/dev/null || grep -q "SimpleCalc" "$www_index" 2>/dev/null || grep -q "Edge Gateway" "$www_index" 2>/dev/null); then
+        rm -f "$www_index" 2>/dev/null || true
+    fi
     cat > "$fb_conf" <<'EOF'
 server {
     listen 127.0.0.1:80 default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
@@ -741,7 +747,7 @@ print('[]')
         \"decryption\": \"none\",
         \"fallbacks\": [
           {
-            \"dest\": 80
+            \"dest\": \"127.0.0.1:80\"
           }
         ]
       },
@@ -1546,7 +1552,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'settings': {
                     'clients': [],
                     'decryption': 'none',
-                    'fallbacks': [{'dest': 80}]
+                    'fallbacks': [{'dest': '127.0.0.1:80'}]
                 },
                 'streamSettings': {
                     'network': 'tcp',
@@ -1573,7 +1579,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
             settings = direct_ib.setdefault('settings', {})
             settings.setdefault('clients', [])
             settings['decryption'] = 'none'
-            settings['fallbacks'] = [{'dest': 80}]
+            settings['fallbacks'] = [{'dest': '127.0.0.1:80'}]
             if 'fallbacks' in direct_ib:
                 del direct_ib['fallbacks']
             st = direct_ib.setdefault('streamSettings', {})
@@ -1709,6 +1715,10 @@ for ib in cfg.get('inbounds', []):
     elif 'sniffing' in ib and isinstance(ib['sniffing'], dict):
         ib['sniffing'].setdefault('enabled', True)
 
+cfg['log'] = {
+    'access': 'none',
+    'loglevel': 'warning'
+}
 cfg['dns'] = {
     'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'],
     'queryStrategy': 'UseIPv4'
@@ -2023,7 +2033,7 @@ if not direct_ib:
         'settings': {
             'clients': [],
             'decryption': 'none',
-            'fallbacks': [{'dest': 80}]
+            'fallbacks': [{'dest': '127.0.0.1:80'}]
         },
         'streamSettings': stream_settings,
         'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'metadataOnly': False}
@@ -2031,7 +2041,7 @@ if not direct_ib:
 else:
     direct_ib['streamSettings'] = stream_settings
     st = direct_ib.setdefault('settings', {})
-    st.setdefault('fallbacks', [{'dest': 80}])
+    st.setdefault('fallbacks', [{'dest': '127.0.0.1:80'}])
     direct_ib.pop('fallbacks', None)
 
 with open(out_f, 'w', encoding='utf-8') as f:

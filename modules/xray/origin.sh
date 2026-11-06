@@ -92,6 +92,7 @@ deploy_subscription_proxy_conf() {
     create_backup "${NGINX_RELAYS_DIR}/sub-wl.conf"
     cat > "${NGINX_RELAYS_DIR}/sub-wl.conf" <<EOF
     location ^~ ${sub_prefix} {
+        access_log off;
         resolver ${resolved_servers} valid=30s ipv6=off;
         resolver_timeout 3s;
         set \$bot_upstream "https://${target_host}";
@@ -319,8 +320,8 @@ install_xray_origin_node() {
     cat > "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" <<EOF
 server {
     listen 80;
-    listen [::]:80;
     server_name ${domain};
+    access_log off;
     location ^~ /.well-known/acme-challenge/ {
         root ${CERTBOT_DIR};
         default_type "text/plain";
@@ -524,6 +525,10 @@ rules.append({
 })
 
 final_config = dict(existing)
+final_config['log'] = {
+    'access': 'none',
+    'loglevel': 'warning'
+}
 api_conf = dict(existing.get('api', {}))
 api_conf['tag'] = 'just1k-wl-api'
 api_conf['services'] = list(set(api_conf.get('services', []) + ['HandlerService', 'StatsService']))
@@ -615,10 +620,12 @@ EOF
     create_backup "${NGINX_RELAYS_DIR}/default.conf"
     cat > "${NGINX_RELAYS_DIR}/default.conf" <<EOF
     location = ${secret_path} {
+        access_log off;
         return 404;
     }
 
     location ^~ ${secret_path}/default {
+        access_log off;
         proxy_pass http://xray_xhttp_default;
         proxy_method \$xhttp_proxy_method;
         proxy_http_version 1.1;
@@ -702,9 +709,9 @@ except Exception:
     if [[ -n "$ssl_reject_directive" ]]; then
         catchall_ssl_block="server {
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_reject_handshake on;
 }"
     else
@@ -722,9 +729,9 @@ except Exception:
         fi
         catchall_ssl_block="server {
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_certificate ${dummy_dir}/dummy.crt;
     ssl_certificate_key ${dummy_dir}/dummy.key;
     return 444;
@@ -735,9 +742,9 @@ except Exception:
 # 0. Catch-All Default Server: сброс прямых сканирований по IP и неизвестным SNI
 server {
     listen 80 default_server;
-    listen [::]:80 default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     return 444;
 }
 
@@ -745,9 +752,9 @@ ${catchall_ssl_block}
 
 server {
     listen 80;
-    listen [::]:80;
     server_name ${server_name_str};
     server_tokens off;
+    access_log off;
 
     location ^~ /.well-known/acme-challenge/ {
         root ${CERTBOT_DIR};
@@ -761,9 +768,9 @@ server {
 # 1. CDN Ingress (Порт 443 — Входящий трафик от клиентов через CDN)
 server {
     listen 443 ssl http2;
-    listen [::]:443 ssl http2;
     server_name ${server_name_str};
     server_tokens off;
+    access_log off;
 
     # Доверенный периметр CDN: заголовок X-Real-IP принимается только от проверенных адресов Yandex Cloud CDN
     # Официальный реестр префиксов Cloud CDN (https://tech.cdn.yandex.net/prefixes/yc.json)
@@ -920,9 +927,9 @@ ${keepalive_time_directive:+$keepalive_time_directive
 # 2. Management API (Порт 8444 — Управление нодой для бота)
 server {
     listen 8444 ssl http2;
-    listen [::]:8444 ssl http2;
     server_name ${domain};
     server_tokens off;
+    access_log off;
 
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
@@ -1172,7 +1179,11 @@ if os.path.exists(state_file):
         secret_base = '/stream'
         s_data = {}
 
-# 0. API, STATS, POLICY: Гарантия наличия gRPC HandlerService и StatsService
+# 0. API, STATS, POLICY, LOG: Гарантия наличия gRPC HandlerService и StatsService, подавление логов доступа
+cfg['log'] = {
+    'access': 'none',
+    'loglevel': 'warning'
+}
 api_conf = cfg.setdefault('api', {})
 api_conf['tag'] = 'just1k-wl-api'
 api_conf['services'] = list(dict.fromkeys(api_conf.get('services', []) + ['HandlerService', 'StatsService']))
@@ -1622,10 +1633,12 @@ try:
             cf_base = path.rstrip('/')
             desired_conf = f'''# Relay location for {code}
 location = {cf_base} {{
+    access_log off;
     return 404;
 }}
 
 location ^~ {path} {{
+    access_log off;
     proxy_pass http://xray_xhttp_relay_{code_lower};
     proxy_method \$xhttp_proxy_method;
     proxy_http_version 1.1;
@@ -1798,17 +1811,17 @@ try:
     if ssl_rej:
         catchall_ssl = '''server {
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_reject_handshake on;
 }'''
     elif dummy_dir and os.path.isfile(f'{dummy_dir}/dummy.crt'):
         catchall_ssl = f'''server {{
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_certificate {dummy_dir}/dummy.crt;
     ssl_certificate_key {dummy_dir}/dummy.key;
     return 444;
@@ -1820,9 +1833,9 @@ try:
         catchall = f'''# 0. Catch-All Default Server: сброс прямых сканирований по IP и неизвестным SNI
 server {{
     listen 80 default_server;
-    listen [::]:80 default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     return 444;
 }}
 
@@ -1836,17 +1849,17 @@ server {{
             if ssl_rej:
                 return '''server {
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_reject_handshake on;
 }'''
             elif dummy_dir and os.path.isfile(f'{dummy_dir}/dummy.crt'):
                 return f'''server {{
     listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
     server_name _;
     server_tokens off;
+    access_log off;
     ssl_certificate {dummy_dir}/dummy.crt;
     ssl_certificate_key {dummy_dir}/dummy.key;
     return 444;
