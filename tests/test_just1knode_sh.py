@@ -1983,6 +1983,13 @@ esac
         # 1. Zero-Signature: legacy camouflage index.html must be purged
         self.assertFalse(index_file.exists())
 
+        # 1b. Zero-Signature: Edge Gateway camouflage index.html must also be purged
+        edge_index = self.www_html_dir / "index.html"
+        edge_index.write_text("<h1>Edge Gateway Infrastructure</h1>", encoding="utf-8")
+        res_edge = self._run_shell_snippet("deploy_camouflage_site")
+        self.assertEqual(res_edge.returncode, 0)
+        self.assertFalse(edge_index.exists())
+
         # 2. Zero-Collateral: custom user index.html must NOT be purged
         custom_index = self.www_html_dir / "index.html"
         custom_index.write_text("<h1>Custom User Site</h1>", encoding="utf-8")
@@ -3607,11 +3614,17 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
 
         # 3. Fallback and anti-probing invariants
+        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
         self.assertIn("deploy_vless_fallback_nginx", relay_sh)
         self.assertIn("'alpn': ['http/1.1']", relay_sh)
+        self.assertIn("'alpn': ['http/1.1']", relays_manage_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relays_manage_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relay_sh)
+        self.assertNotIn('\\"alpn\\": [\\"h2\\", \\"http/1.1\\"]', relay_sh)
         self.assertIn("'fallbacks': [{'dest': 80}]", relay_sh)
         self.assertIn("server_tokens off;", relay_sh)
-        self.assertIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertNotIn("Edge Gateway Infrastructure", relay_sh)
+        self.assertIn('return 404 "Not Found\\n";', relay_sh)
         self.assertIn("'minVersion': '1.2'", relay_sh)
         self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', relay_sh)
         self.assertIn('add_header X-Content-Type-Options "nosniff" always;', relay_sh)
@@ -3620,6 +3633,7 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
         self.assertIn("just1k-vless-api.conf", common_sh)
         self.assertNotIn("just1k-amnezia.conf", common_sh)
+        self.assertIn('ufw delete allow 80/tcp', common_sh)
         self.assertIn("timeout=5.0", just1knode_sh)
         self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
 
@@ -3631,6 +3645,8 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
         self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
+        self.assertIn("'alpn': ['http/1.1']", origin_sh)
+        self.assertNotIn("'alpn': ['h2', 'http/1.1']", origin_sh)
 
         # 6. Freedom outbound sockopt domainStrategy invariants (Xray PR #6058)
         self.assertIn("['domainStrategy'] = 'UseIPv4'", origin_sh)

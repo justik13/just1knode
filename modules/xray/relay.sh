@@ -343,163 +343,8 @@ deploy_vless_fallback_nginx() {
         return 0
     fi
     local fb_conf="/etc/nginx/sites-available/just1k-fallback80.conf"
-    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html
-    if [[ ! -f /var/www/html/index.html ]] || grep -qi "welcome to nginx" /var/www/html/index.html 2>/dev/null; then
-        cat > /var/www/html/index.html <<'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Network Operations & System Status</title>
-    <style>
-        :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --border-color: #334155;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --accent: #38bdf8;
-            --success: #34d399;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px 16px;
-        }
-        .container {
-            width: 100%;
-            max-width: 680px;
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 36px 32px;
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4);
-        }
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 24px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid var(--border-color);
-        }
-        .title-block h1 {
-            font-size: 20px;
-            font-weight: 600;
-            color: var(--text-main);
-            letter-spacing: -0.01em;
-        }
-        .title-block p {
-            font-size: 13px;
-            color: var(--text-muted);
-            margin-top: 4px;
-        }
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            background: rgba(52, 211, 153, 0.1);
-            border: 1px solid rgba(52, 211, 153, 0.25);
-            color: var(--success);
-            padding: 6px 14px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-        }
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            background-color: var(--success);
-            border-radius: 50%;
-            box-shadow: 0 0 8px var(--success);
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 16px;
-            margin-bottom: 28px;
-        }
-        .card {
-            background-color: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 16px;
-        }
-        .card-label {
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--text-muted);
-            margin-bottom: 8px;
-        }
-        .card-value {
-            font-size: 16px;
-            font-weight: 600;
-            color: var(--accent);
-        }
-        .info-section {
-            font-size: 13px;
-            color: var(--text-muted);
-            line-height: 1.6;
-        }
-        .footer {
-            margin-top: 28px;
-            padding-top: 16px;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 12px;
-            color: var(--text-muted);
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <div class="title-block">
-                <h1>Edge Gateway Infrastructure</h1>
-                <p>Distributed Cluster Node & Service Telemetry</p>
-            </div>
-            <div class="status-badge">
-                <span class="status-dot"></span>
-                <span>Operational</span>
-            </div>
-        </div>
-        <div class="grid">
-            <div class="card">
-                <div class="card-label">Network Edge</div>
-                <div class="card-value">Active Core</div>
-            </div>
-            <div class="card">
-                <div class="card-label">HTTP Engine</div>
-                <div class="card-value">Reverse Proxy</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Service Health</div>
-                <div class="card-value">Optimal</div>
-            </div>
-        </div>
-        <div class="info-section">
-            This node serves dedicated application traffic, automated load balancing, and network edge termination. Direct unmapped endpoint requests are logged in accordance with system telemetry policies.
-        </div>
-        <div class="footer">
-            <span>Platform Telemetry Engine</span>
-            <span>All Systems Normal</span>
-        </div>
-    </div>
-</body>
-</html>
-EOF
-    fi
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+    rm -f /var/www/html/index.html 2>/dev/null || true
     cat > "$fb_conf" <<'EOF'
 server {
     listen 127.0.0.1:80 default_server;
@@ -508,10 +353,9 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
-    root /var/www/html;
-    index index.html index.nginx-debian.html;
     location / {
-        try_files $uri $uri/ =404;
+        default_type text/plain;
+        return 404 "Not Found\n";
     }
 }
 EOF
@@ -837,7 +681,7 @@ if cands:
     \"network\": \"tcp\",
     \"security\": \"tls\",
     \"tlsSettings\": {
-      \"alpn\": [\"h2\", \"http/1.1\"],
+      \"alpn\": [\"http/1.1\"],
       \"certificates\": [
         {
           \"certificateFile\": \"/usr/local/etc/xray/tls/fullchain.pem\",
@@ -1001,6 +845,12 @@ print('[]')
       {
         "type": "field",
         "port": "6881-6889",
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "port": "443",
+        "network": "udp",
         "outboundTag": "block"
       }
     ]
@@ -1462,7 +1312,7 @@ ib['streamSettings'] = {
     'network': 'tcp',
     'security': 'tls',
     'tlsSettings': {
-        'alpn': ['h2', 'http/1.1'],
+        'alpn': ['http/1.1'],
         'certificates': [
             {
                 'certificateFile': '/usr/local/etc/xray/tls/fullchain.pem',
@@ -1638,7 +1488,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
                 'network': 'tcp',
                 'security': 'tls',
                 'tlsSettings': {
-                    'alpn': ['h2', 'http/1.1'],
+                    'alpn': ['http/1.1'],
                     'certificates': [{'certificateFile': tls_cert_file, 'keyFile': tls_key_file}]
                 }
             },
@@ -1666,7 +1516,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
         st['security'] = 'tls'
         st.pop('realitySettings', None)
         st['tlsSettings'] = {
-            'alpn': ['h2', 'http/1.1'],
+            'alpn': ['http/1.1'],
             'certificates': [
                 {
                     'certificateFile': tls_cert_file,
@@ -1825,6 +1675,14 @@ if not has_bt_ports:
     rules.insert(insert_pos, {
         'type': 'field',
         'port': '6881-6889',
+        'outboundTag': 'block'
+    })
+has_quic_block = any(r.get('type') == 'field' and str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'block' for r in rules)
+if not has_quic_block:
+    rules.insert(insert_pos, {
+        'type': 'field',
+        'port': '443',
+        'network': 'udp',
         'outboundTag': 'block'
     })
 
@@ -2110,7 +1968,8 @@ if not cfg:
                 {'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'block'},
                 {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'block'},
                 {'type': 'field', 'port': '25', 'outboundTag': 'block'},
-                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'}
+                {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'},
+                {'type': 'field', 'port': '443', 'network': 'udp', 'outboundTag': 'block'}
             ]
         },
         'dns': {'servers': ['1.1.1.1', '1.0.0.1', '8.8.8.8', 'localhost'], 'queryStrategy': 'UseIPv4'}
@@ -2132,6 +1991,8 @@ if not any(r.get('type') == 'field' and (r.get('port') == '25' or r.get('port') 
     rules.insert(insert_pos, {'type': 'field', 'port': '25', 'outboundTag': 'block'})
 if not any(r.get('type') == 'field' and r.get('port') == '6881-6889' and r.get('outboundTag') == 'block' for r in rules):
     rules.insert(insert_pos, {'type': 'field', 'port': '6881-6889', 'outboundTag': 'block'})
+if not any(r.get('type') == 'field' and str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'block' for r in rules):
+    rules.insert(insert_pos, {'type': 'field', 'port': '443', 'network': 'udp', 'outboundTag': 'block'})
 
 inbounds = cfg.setdefault('inbounds', [])
 if not any(ib.get('tag') == 'just1k-wl-api-grpc' for ib in inbounds):

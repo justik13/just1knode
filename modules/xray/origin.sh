@@ -477,6 +477,12 @@ security_rules = [
         'type': 'field',
         'port': '6881-6889',
         'outboundTag': 'just1k-wl-block'
+    },
+    {
+        'type': 'field',
+        'port': '443',
+        'network': 'udp',
+        'outboundTag': 'just1k-wl-block'
     }
 ]
 for s_idx, s_rule in enumerate(security_rules):
@@ -1246,7 +1252,7 @@ for r in relays:
                     'tlsSettings': {
                         'serverName': r_sni or r_ip,
                         'fingerprint': 'firefox',
-                        'alpn': ['h2', 'http/1.1'],
+                        'alpn': ['http/1.1'],
                         'allowInsecure': False
                     }
                 }
@@ -1256,7 +1262,7 @@ for r in relays:
         if st.get('security') == 'tls':
             tls = st.setdefault('tlsSettings', {})
             tls['fingerprint'] = 'firefox'
-            tls['alpn'] = ['h2', 'http/1.1']
+            tls['alpn'] = ['http/1.1']
 
 # 2. INBOUNDS: гарантия наличия базовых инбаундов и правильный sniffing
 inbounds = cfg.setdefault('inbounds', [])
@@ -1406,6 +1412,15 @@ if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-
     rules.insert(1, {
         'type': 'field',
         'ip': ['geoip:private'],
+        'outboundTag': 'just1k-wl-block'
+    })
+
+# 4.1f. Блокировка QUIC / HTTP3 (UDP:443) для исключения задержек YouTube и глушилок ТСПУ
+if not any(str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
+    rules.insert(1, {
+        'type': 'field',
+        'port': '443',
+        'network': 'udp',
         'outboundTag': 'just1k-wl-block'
     })
 
