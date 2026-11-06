@@ -673,7 +673,14 @@ heal_node_firewall_and_stealth() {
     # На нодах без роли Origin и без локального контейнера (Caddy) порт 80 не должен быть открыт наружу.
     # Фолбэк Nginx слушает строго на 127.0.0.1:80 (локальный fallback ядра Xray).
     if [[ "$role" != "origin" ]]; then
-        if [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
+        local has_external_sites=0
+        if command -v nginx >/dev/null 2>&1; then
+            if [[ -n "$(detect_existing_nginx_sites 2>/dev/null || true)" ]]; then
+                has_external_sites=1
+            fi
+        fi
+        if [[ "$has_external_sites" == "0" ]] && \
+           [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
            [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
            ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
             if ! is_ssh_port "80"; then

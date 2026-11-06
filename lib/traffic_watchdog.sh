@@ -8,6 +8,13 @@ TRAFFIC_CUTOFF_FLAG="${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active"
 
 send_traffic_telegram_alert() {
     local message="$1"
+    local role
+    role="$(get_state_val "role" "")"
+    if [[ "$role" == "origin" ]]; then
+        # На Origin узле в РФ прямой доступ к api.telegram.org заблокирован РКН
+        return 0
+    fi
+
     local bot_token
     bot_token="$(get_state_val "traffic_telegram_token" "")"
     local chat_id
