@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import time
@@ -1738,4 +1739,154 @@ async def get_clients_inventory(
         "managed_inbounds": target_inbounds,
         "inventory": inventory,
         "count": len(inventory),
+    }
+
+
+class CertificateDeployRequest(BaseModel):
+    domain: str = Field(..., min_length=3, max_length=253)
+    fullchain_pem: str = Field(..., min_length=50)
+    privkey_pem: str = Field(..., min_length=50)
+
+    @model_validator(mode="after")
+    def validate_pems(self) -> "CertificateDeployRequest":
+        dom = self.domain.strip().lower()
+        if not re.match(
+            r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
+            dom,
+        ) and not (
+            dom.startswith("*.")
+            and re.match(
+                r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
+                dom[2:],
+            )
+        ):
+            raise ValueError("Invalid domain name format")
+
+        if "-----BEGIN CERTIFICATE-----" not in self.fullchain_pem:
+            raise ValueError("Invalid fullchain_pem: missing BEGIN CERTIFICATE marker")
+        if not any(
+            marker in self.privkey_pem
+            for marker in (
+                "-----BEGIN PRIVATE KEY-----",
+                "-----BEGIN RSA PRIVATE KEY-----",
+                "-----BEGIN EC PRIVATE KEY-----",
+            )
+        ):
+            raise ValueError("Invalid privkey_pem: missing BEGIN PRIVATE KEY marker")
+        return self
+
+
+def _sync_write_certificates(
+    clean_domain: str, fullchain_pem: str, privkey_pem: str
+) -> None:
+    cert_dir = Path("/etc/letsencrypt/live") / clean_domain
+    cert_dir.mkdir(parents=True, exist_ok=True)
+
+    fullchain_file = cert_dir / "fullchain.pem"
+    privkey_file = cert_dir / "privkey.pem"
+
+    tmp_fullchain = cert_dir / "fullchain.pem.tmp"
+    tmp_privkey = cert_dir / "privkey.pem.tmp"
+
+    try:
+        tmp_fullchain.write_text(fullchain_pem.strip() + "\n", encoding="utf-8")
+        tmp_privkey.write_text(privkey_pem.strip() + "\n", encoding="utf-8")
+        try:
+            tmp_fullchain.chmod(0o644)
+            tmp_privkey.chmod(0o600)
+        except Exception:
+            pass
+
+        tmp_fullchain.replace(fullchain_file)
+        tmp_privkey.replace(privkey_file)
+        try:
+            fullchain_file.chmod(0o644)
+            privkey_file.chmod(0o600)
+        except Exception:
+            pass
+    except Exception:
+        for f in (tmp_fullchain, tmp_privkey):
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+    xray_tls_dir = Path("/usr/local/etc/xray/tls")
+    if xray_tls_dir.exists():
+        try:
+            shutil.copy2(str(fullchain_file), str(xray_tls_dir / "fullchain.pem"))
+            shutil.copy2(str(privkey_file), str(xray_tls_dir / "privkey.pem"))
+            (xray_tls_dir / "fullchain.pem").chmod(0o644)
+            (xray_tls_dir / "privkey.pem").chmod(0o600)
+            if (xray_tls_dir / "vless_fullchain.pem").exists():
+                shutil.copy2(str(fullchain_file), str(xray_tls_dir / "vless_fullchain.pem"))
+                shutil.copy2(str(privkey_file), str(xray_tls_dir / "vless_privkey.pem"))
+                (xray_tls_dir / "vless_fullchain.pem").chmod(0o644)
+                (xray_tls_dir / "vless_privkey.pem").chmod(0o600)
+        except Exception as e:
+            logger.warning("Could not sync to %s: %s", xray_tls_dir, e)
+
+
+@app.post("/v1/system/certificate")
+async def deploy_certificate(
+    req: CertificateDeployRequest,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """Safely deploy or rotate TLS certificates (DNS-01 wildcard or SNI certs) from the centralized bot.
+
+    Writes certs atomically with 0600 permissions, reloads Nginx, and restarts Xray if needed.
+    """
+    clean_domain = req.domain.strip().lower().lstrip("*.")
+    try:
+        await asyncio.to_thread(
+            _sync_write_certificates,
+            clean_domain,
+            req.fullchain_pem,
+            req.privkey_pem,
+        )
+    except Exception as exc:
+        logger.error("Failed to write certificates for %s: %s", clean_domain, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to write certificate files: {exc}",
+        ) from exc
+
+    actions = []
+    if shutil.which("nginx"):
+        try:
+            res = await asyncio.create_subprocess_exec(
+                "systemctl",
+                "reload",
+                "nginx",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await res.communicate()
+            if res.returncode == 0:
+                actions.append("nginx_reloaded")
+        except Exception as e:
+            logger.warning("Nginx reload failed: %s", e)
+
+    if shutil.which("systemctl"):
+        try:
+            res = await asyncio.create_subprocess_exec(
+                "systemctl",
+                "restart",
+                "xray",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await res.communicate()
+            if res.returncode == 0:
+                actions.append("xray_restarted")
+        except Exception as e:
+            logger.warning("Xray restart failed: %s", e)
+
+    logger.info("TLS certificate updated for %s. Actions: %s", clean_domain, actions)
+    return {
+        "status": "ok",
+        "domain": clean_domain,
+        "actions": actions,
+        "message": f"Certificate for {clean_domain} successfully deployed",
     }
