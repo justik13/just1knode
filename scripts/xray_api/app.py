@@ -1812,6 +1812,22 @@ def _sync_write_certificates(
                 pass
         raise
 
+    # Также обновляем любые существующие субдомены в /etc/letsencrypt/live/
+    try:
+        live_dir = Path("/etc/letsencrypt/live")
+        if live_dir.exists():
+            for sub in live_dir.iterdir():
+                if sub.is_dir() and sub.name != clean_domain and (sub.name.endswith("." + clean_domain)):
+                    shutil.copy2(str(fullchain_file), str(sub / "fullchain.pem"))
+                    shutil.copy2(str(privkey_file), str(sub / "privkey.pem"))
+                    try:
+                        (sub / "fullchain.pem").chmod(0o644)
+                        (sub / "privkey.pem").chmod(0o600)
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.warning("Could not sync to subdomains in /etc/letsencrypt/live: %s", e)
+
     xray_tls_dir = Path("/usr/local/etc/xray/tls")
     if xray_tls_dir.exists():
         try:
