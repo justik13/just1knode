@@ -10,6 +10,50 @@ NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx}"
 obtain_ssl_certificate() {
     local domain="$1"
     local email="$2"
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+
+    # 1. Проверяем, существует ли УЖЕ действующий сертификат
+    if [[ -f "${le_dir}/live/${domain}/fullchain.pem" && -f "${le_dir}/live/${domain}/privkey.pem" ]] && \
+       openssl x509 -checkend 86400 -noout -in "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null && \
+       openssl x509 -checkhost "$domain" -noout -in "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null; then
+        log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
+        return 0
+    fi
+
+    for cand in "${le_dir}/live"/*/fullchain.pem; do
+        if [[ -f "$cand" ]]; then
+            local cand_dir cand_key
+            cand_dir="$(dirname "$cand")"
+            cand_key="${cand_dir}/privkey.pem"
+            if [[ -f "$cand_key" ]] && \
+               openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
+               openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null; then
+                mkdir -p "${le_dir}/live/${domain}"
+                cp -f "$cand" "${le_dir}/live/${domain}/fullchain.pem"
+                cp -f "$cand_key" "${le_dir}/live/${domain}/privkey.pem"
+                chmod 644 "${le_dir}/live/${domain}/fullchain.pem"
+                chmod 600 "${le_dir}/live/${domain}/privkey.pem"
+                log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '${domain}'!"
+                return 0
+            fi
+        fi
+    done
+
+    # 2. Режим Zero-Signature Bootstrap
+    local use_wildcard="${USE_WILDCARD_CERT:-1}"
+    if [[ "$use_wildcard" == "1" ]]; then
+        log "🔒 Режим Zero-Signature: порт 80 не открывается, выпуск certbot пропущен."
+        log "Генерация стартового bootstrap-сертификата для '${domain}' (ожидание боевого Wildcard от бота)..."
+        mkdir -p "${le_dir}/live/${domain}"
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout "${le_dir}/live/${domain}/privkey.pem" \
+            -out "${le_dir}/live/${domain}/fullchain.pem" \
+            -subj "/CN=${domain}" >/dev/null 2>&1
+        chmod 644 "${le_dir}/live/${domain}/fullchain.pem"
+        chmod 600 "${le_dir}/live/${domain}/privkey.pem"
+        log "✔ Стартовый bootstrap-сертификат создан для '${domain}'."
+        return 0
+    fi
 
     log "Получение SSL-сертификата Let's Encrypt для ${domain}..."
     mkdir -p "${CERTBOT_DIR}"
