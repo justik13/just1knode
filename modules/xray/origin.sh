@@ -140,6 +140,39 @@ install_xray_origin_node() {
     local bot_ip="${5:-${BOT_IP:-}}"
     local cdn_domain="${6:-}"
     local bot_domain="${7:-${BOT_DOMAIN:-}}"
+    local transports="${8:-${TRANSPORTS:-all}}"
+
+    if [[ -z "${8:-}" && -t 0 ]]; then
+        echo -e "\n${BOLD}=== ВЫБОР МОДУЛЕЙ И СЕТЕВЫХ ТРАНСПОРТОВ РУ ХАБА ===${NC}"
+        echo -e "Вы можете настроить любую комбинацию (или вообще без CDN):"
+        echo -e "  ${BOLD}[1]${NC} 🚀 Полный модульный режим: VLESS TLS + Yandex CDN + TurboFlare CDN [по умолчанию]"
+        echo -e "  ${BOLD}[2]${NC} 🛡️  Только Белый Интернет через Yandex Cloud CDN (порт 8003)"
+        echo -e "  ${BOLD}[3]${NC} ⚡ Только Белый Интернет через TurboFlare Anycast CDN (порт 8004)"
+        echo -e "  ${BOLD}[4]${NC} 🔄 Оба CDN: Yandex Cloud + TurboFlare Anycast (порты 8003 и 8004)"
+        echo -e "  ${BOLD}[5]${NC} 🔒 Прямой VLESS TLS (порт 443, работа вообще БЕЗ CDN при черных списках)"
+        read -rp "Выберите режим [1-5, Enter = 1]: " t_choice || true
+        case "${t_choice:-1}" in
+            2) transports="yandex";;
+            3) transports="turboflare";;
+            4) transports="yandex,turboflare";;
+            5) transports="direct";;
+            *) transports="all";;
+        esac
+    fi
+
+    local has_ya=0 has_tf=0 has_vd=0
+    if [[ "$transports" == "all" || "$transports" =~ (^|,)yandex(,|$) ]]; then
+        has_ya=1
+    fi
+    if [[ "$transports" == "all" || "$transports" =~ (^|,)turboflare(,|$) ]]; then
+        has_tf=1
+    fi
+    if [[ "$transports" == "all" || "$transports" =~ (^|,)direct(,|$) ]]; then
+        has_vd=1
+    fi
+    if [[ $has_ya -eq 0 && $has_tf -eq 0 && $has_vd -eq 0 ]]; then
+        has_ya=1
+    fi
 
     # Интерактивный опросник параметров
     if [[ -z "$domain" && -t 0 ]]; then
@@ -173,8 +206,8 @@ install_xray_origin_node() {
     if [[ -z "$domain" ]]; then error "Домен не может быть пустым."; fi
 
     if [[ -z "$cdn_domain" ]]; then
-        if [[ $# -eq 0 && -t 0 ]]; then
-            read -rp "Введите домен Yandex Cloud CDN (CNAME) [по умолчанию: ${domain}]: " input_cdn || true
+        if [[ $# -eq 0 && -t 0 && ($has_ya -eq 1 || $has_tf -eq 1) ]]; then
+            read -rp "Введите домен CDN (CNAME) [по умолчанию: ${domain}]: " input_cdn || true
             input_cdn="$(echo "$input_cdn" | tr -d '[:space:]' | sed -e 's|^https\?://||' -e 's|/.*$||')"
             cdn_domain="${input_cdn:-$domain}"
         else
@@ -301,7 +334,9 @@ install_xray_origin_node() {
     apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
     mkdir -p "${CERTBOT_DIR}" "${NGINX_CONF_DIR}/conf.d"
     chmod 755 "${CERTBOT_DIR}" 2>/dev/null || true
-    configure_safe_ufw "80/tcp"
+
+    local use_wildcard="${USE_WILDCARD_CERT:-1}"
+    local default_was_linked=0
 
     # Проверка наличия существующих сайтов до настройки Nginx
     local pre_existing_sites=()
@@ -316,8 +351,11 @@ install_xray_origin_node() {
         log "Настройка Origin выполняется без остановки Nginx и с сохранением всех существующих сайтов."
     fi
 
-    # Bootstrap HTTP block для ACME challenge в Nginx
-    cat > "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" <<EOF
+    if [[ "$use_wildcard" != "1" ]]; then
+        configure_safe_ufw "80/tcp"
+
+        # Bootstrap HTTP block для ACME challenge в Nginx
+        cat > "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" <<EOF
 server {
     listen 80;
     server_name ${domain};
@@ -328,28 +366,28 @@ server {
     }
 }
 EOF
-    local default_was_linked=0
-    if [[ -f "${NGINX_CONF_DIR}/sites-enabled/default" ]]; then
-        default_was_linked=1
-        if grep -Eq '(^|[[:space:]])server_name[[:space:]]+[^_;]' "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null; then
-            warn "Файл ${NGINX_CONF_DIR}/sites-enabled/default содержит пользовательские домены. Создаём резервную копию default.user.bak в sites-available."
-            cp -L "${NGINX_CONF_DIR}/sites-enabled/default" "${NGINX_CONF_DIR}/sites-available/default.user.bak"
-        fi
-        rm -f "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
-    fi
-    if ! nginx -t 2>/dev/null; then
-        warn "Ошибка синтаксиса Nginx (nginx -t) с bootstrap-конфигурацией. Откат изменений..."
-        rm -f "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
-        if [[ $default_was_linked -eq 1 ]]; then
-            if [[ -f "${NGINX_CONF_DIR}/sites-available/default.user.bak" ]]; then
-                cp -a "${NGINX_CONF_DIR}/sites-available/default.user.bak" "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
-            elif [[ -f "${NGINX_CONF_DIR}/sites-available/default" ]]; then
-                ln -sf "${NGINX_CONF_DIR}/sites-available/default" "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
+        if [[ -f "${NGINX_CONF_DIR}/sites-enabled/default" ]]; then
+            default_was_linked=1
+            if grep -Eq '(^|[[:space:]])server_name[[:space:]]+[^_;]' "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null; then
+                warn "Файл ${NGINX_CONF_DIR}/sites-enabled/default содержит пользовательские домены. Создаём резервную копию default.user.bak в sites-available."
+                cp -L "${NGINX_CONF_DIR}/sites-enabled/default" "${NGINX_CONF_DIR}/sites-available/default.user.bak"
             fi
+            rm -f "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
         fi
-        error "Ошибка синтаксиса Nginx (nginx -t) до применения сертификата. Установка Origin прервана."
+        if ! nginx -t 2>/dev/null; then
+            warn "Ошибка синтаксиса Nginx (nginx -t) с bootstrap-конфигурацией. Откат изменений..."
+            rm -f "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
+            if [[ $default_was_linked -eq 1 ]]; then
+                if [[ -f "${NGINX_CONF_DIR}/sites-available/default.user.bak" ]]; then
+                    cp -a "${NGINX_CONF_DIR}/sites-available/default.user.bak" "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
+                elif [[ -f "${NGINX_CONF_DIR}/sites-available/default" ]]; then
+                    ln -sf "${NGINX_CONF_DIR}/sites-available/default" "${NGINX_CONF_DIR}/sites-enabled/default" 2>/dev/null || true
+                fi
+            fi
+            error "Ошибка синтаксиса Nginx (nginx -t) до применения сертификата. Установка Origin прервана."
+        fi
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
     fi
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
 
     obtain_ssl_certificate "$domain" "$email"
     rm -f "${NGINX_CONF_DIR}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
@@ -363,6 +401,10 @@ import sys, json, os, tempfile
 
 config_file = sys.argv[1]
 secret_path = sys.argv[2]
+has_ya = sys.argv[3] == '1' if len(sys.argv) > 3 else True
+has_tf = sys.argv[4] == '1' if len(sys.argv) > 4 else False
+has_vd = sys.argv[5] == '1' if len(sys.argv) > 5 else False
+domain = sys.argv[6] if len(sys.argv) > 6 else ''
 
 existing = {}
 if os.path.exists(config_file):
@@ -374,18 +416,19 @@ if os.path.exists(config_file):
 
 inbounds = [
     ib for ib in existing.get('inbounds', [])
-    if ib.get('tag') not in ('just1k-wl-api-grpc', 'just1k-wl-default')
+    if ib.get('tag') not in ('just1k-wl-api-grpc', 'just1k-wl-default', 'just1k-wl-turboflare', 'just1k-wl-post', 'just1k-vless-direct')
 ]
 outbounds = [
     ob for ob in existing.get('outbounds', [])
-    if ob.get('tag') not in ('just1k-wl-direct', 'just1k-wl-block', 'just1k-wl-api')
+    if ob.get('tag') not in ('just1k-wl-direct', 'just1k-wl-block', 'just1k-wl-api', 'dns-out')
 ]
 existing_rules = existing.get('routing', {}).get('rules', [])
 rules = [
     r for r in existing_rules
     if not (
-        (isinstance(r.get('inboundTag'), list) and any(t in ('just1k-wl-api-grpc', 'just1k-wl-default') for t in r.get('inboundTag')))
-        or r.get('outboundTag') == 'just1k-wl-api'
+        (isinstance(r.get('inboundTag'), list) and any(t in ('just1k-wl-api-grpc', 'just1k-wl-default', 'just1k-wl-turboflare', 'just1k-wl-post', 'just1k-vless-direct') for t in r.get('inboundTag')))
+        or r.get('outboundTag') in ('just1k-wl-api', 'dns-out')
+        or r.get('port') == '53'
     )
 ]
 
@@ -397,36 +440,94 @@ inbounds.insert(0, {
     'settings': {'address': '127.0.0.1'}
 })
 
-inbounds.append({
-    'tag': 'just1k-wl-default',
-    'listen': '127.0.0.1',
-    'port': 8003,
-    'protocol': 'vless',
-    'settings': {'clients': [], 'decryption': 'none'},
-    'streamSettings': {
-        'network': 'xhttp',
-        'sockopt': {
-            'trustedXForwardedFor': ['X-Forwarded-For']
+# Модуль 1: Yandex Cloud CDN (8003)
+if has_ya:
+    inbounds.append({
+        'tag': 'just1k-wl-default',
+        'listen': '127.0.0.1',
+        'port': 8003,
+        'protocol': 'vless',
+        'settings': {'clients': [], 'decryption': 'none'},
+        'streamSettings': {
+            'network': 'xhttp',
+            'sockopt': {
+                'trustedXForwardedFor': ['X-Forwarded-For']
+            },
+            'xhttpSettings': {
+                'mode': 'packet-up',
+                'path': f'{secret_path}/default',
+                'uplinkHTTPMethod': 'GET',
+                'uplinkDataPlacement': 'header',
+                'uplinkDataKey': 'data',
+                'scMaxEachPostBytes': 1000000,
+                'scMaxConcurrentPosts': 1,
+                'scMinPostsIntervalMs': 30,
+                'serverMaxHeaderBytes': 65536,
+                'xPaddingObfsMode': True,
+                'xPaddingKey': 'dc',
+                'xPaddingHeader': 'X-Cache',
+                'xPaddingMethod': 'tokenish',
+                'xPaddingPlacement': 'header'
+            }
         },
-        'xhttpSettings': {
-            'mode': 'packet-up',
-            'path': f'{secret_path}/default',
-            'uplinkHTTPMethod': 'GET',
-            'uplinkDataPlacement': 'header',
-            'uplinkDataKey': 'data',
-            'scMaxEachPostBytes': 1000000,
-            'scMaxConcurrentPosts': 1,
-            'scMinPostsIntervalMs': 30,
-            'serverMaxHeaderBytes': 65536,
-            'xPaddingObfsMode': True,
-            'xPaddingKey': 'dc',
-            'xPaddingHeader': 'X-Cache',
-            'xPaddingMethod': 'tokenish',
-            'xPaddingPlacement': 'queryInHeader'
-        }
-    },
-    'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'routeOnly': False}
-})
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'routeOnly': False}
+    })
+
+# Модуль 2: TurboFlare Anycast CDN (8004)
+if has_tf:
+    inbounds.append({
+        'tag': 'just1k-wl-turboflare',
+        'listen': '127.0.0.1',
+        'port': 8004,
+        'protocol': 'vless',
+        'settings': {'clients': [], 'decryption': 'none'},
+        'streamSettings': {
+            'network': 'xhttp',
+            'sockopt': {
+                'trustedXForwardedFor': ['X-Forwarded-For']
+            },
+            'xhttpSettings': {
+                'mode': 'packet-up',
+                'path': f'{secret_path}/turboflare',
+                'uplinkHTTPMethod': 'POST',
+                'uplinkDataPlacement': 'body',
+                'scMaxEachPostBytes': 1000000,
+                'scMaxConcurrentPosts': 16,
+                'scMinPostsIntervalMs': 0,
+                'serverMaxHeaderBytes': 65536,
+                'xPaddingObfsMode': True,
+                'xPaddingKey': 'dc',
+                'xPaddingHeader': 'X-Cache',
+                'xPaddingMethod': 'tokenish',
+                'xPaddingPlacement': 'header'
+            }
+        },
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'routeOnly': False}
+    })
+
+# Модуль 3: Прямой VLESS TLS Direct (443)
+if has_vd:
+    inbounds.append({
+        'tag': 'just1k-vless-direct',
+        'port': 443,
+        'protocol': 'vless',
+        'settings': {
+            'clients': [],
+            'decryption': 'none',
+            'fallbacks': [{'dest': '127.0.0.1:80'}]
+        },
+        'streamSettings': {
+            'network': 'tcp',
+            'security': 'tls',
+            'tlsSettings': {
+                'certificates': [{
+                    'certificateFile': f'/etc/letsencrypt/live/{domain}/fullchain.pem',
+                    'keyFile': f'/etc/letsencrypt/live/{domain}/privkey.pem'
+                }]
+            }
+        },
+        'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'routeOnly': False}
+    })
 
 if not any(ob.get('tag') == 'just1k-wl-direct' for ob in outbounds):
     outbounds.append({
@@ -440,6 +541,12 @@ for ob in outbounds:
         ob.get('settings', {}).pop('domainStrategy', None)
         ob.setdefault('streamSettings', {}).setdefault('sockopt', {})['domainStrategy'] = 'UseIPv4'
 
+if not any(ob.get('tag') == 'dns-out' for ob in outbounds):
+    outbounds.append({
+        'tag': 'dns-out',
+        'protocol': 'dns'
+    })
+
 if not any(ob.get('tag') == 'just1k-wl-block' for ob in outbounds):
     outbounds.append({
         'tag': 'just1k-wl-block',
@@ -452,6 +559,13 @@ if not any(ob.get('tag') == 'just1k-wl-api' for ob in outbounds):
         'tag': 'just1k-wl-api',
         'protocol': 'blackhole'
     })
+
+# DNS Hijacking: порт 53 перехватывается и разрешается локально через Яндекс DNS
+rules.insert(0, {
+    'type': 'field',
+    'port': '53',
+    'outboundTag': 'dns-out'
+})
 
 security_rules = [
     {
@@ -486,14 +600,15 @@ security_rules = [
         'outboundTag': 'just1k-wl-block'
     }
 ]
-for s_idx, s_rule in enumerate(security_rules):
+for s_idx, s_rule in enumerate(security_rules, start=1):
     rules.insert(s_idx, s_rule)
 
 client_inbounds = [
     ib.get('tag') for ib in inbounds
-    if ib.get('tag') == 'just1k-wl-default' or str(ib.get('tag', '')).startswith('just1k-wl-inbound-')
+    if ib.get('tag') in ('just1k-wl-default', 'just1k-wl-turboflare', 'just1k-vless-direct')
+    or str(ib.get('tag', '')).startswith('just1k-wl-inbound-')
 ]
-if 'just1k-wl-default' not in client_inbounds:
+if not client_inbounds:
     client_inbounds.append('just1k-wl-default')
 
 # Split-Routing: прямой выход в Рунет с московского IP Origin-сервера
@@ -510,12 +625,21 @@ rules.append({
     ],
     'outboundTag': 'just1k-wl-direct'
 })
+# Прямой выход для российских IP (geoip:ru)
 rules.append({
     'type': 'field',
     'inboundTag': ['just1k-wl-default'],
     'ip': ['geoip:ru'],
     'outboundTag': 'just1k-wl-direct'
 })
+for c_ib in client_inbounds:
+    if c_ib != 'just1k-wl-default':
+        rules.append({
+            'type': 'field',
+            'inboundTag': [c_ib],
+            'ip': ['geoip:ru'],
+            'outboundTag': 'just1k-wl-direct'
+        })
 
 # Default inbound (Россия): прямой выход в интернет через московский IP Origin-сервера
 rules.append({
@@ -523,6 +647,13 @@ rules.append({
     'inboundTag': ['just1k-wl-default'],
     'outboundTag': 'just1k-wl-direct'
 })
+for c_ib in client_inbounds:
+    if c_ib != 'just1k-wl-default':
+        rules.append({
+            'type': 'field',
+            'inboundTag': [c_ib],
+            'outboundTag': 'just1k-wl-direct'
+        })
 
 final_config = dict(existing)
 final_config['log'] = {
@@ -561,8 +692,9 @@ dns_conf['servers'] = [
         ],
         'skipFallback': True
     },
-    '195.208.4.1',
-    '77.88.8.1'
+    '77.88.8.8',
+    '77.88.8.1',
+    '195.208.4.1'
 ]
 dns_conf['queryStrategy'] = 'UseIPv4'
 final_config['dns'] = dns_conf
@@ -581,7 +713,7 @@ with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
     f.flush()
     os.fsync(f.fileno())
 os.replace(t_path, config_file)
-" "$XRAY_CONFIG" "$secret_path"
+" "$XRAY_CONFIG" "$secret_path" "$has_ya" "$has_tf" "$has_vd" "$domain"
 
     chown root:xrayapi "$XRAY_CONFIG" 2>/dev/null || true
     chmod 640 "$XRAY_CONFIG" 2>/dev/null || true
@@ -618,18 +750,14 @@ EOF
     fi
 
     create_backup "${NGINX_RELAYS_DIR}/default.conf"
-    cat > "${NGINX_RELAYS_DIR}/default.conf" <<EOF
-    location = ${secret_path} {
-        access_log off;
-        return 404;
-    }
-
-    location ^~ ${secret_path}/default {
+    local ya_location_block=""
+    if [[ $has_ya -eq 1 ]]; then
+        ya_location_block="    location ^~ ${secret_path}/default {
         access_log off;
         proxy_pass http://xray_xhttp_default;
         proxy_method \$xhttp_proxy_method;
         proxy_http_version 1.1;
-        proxy_set_header Connection "";
+        proxy_set_header Connection \"\";
         proxy_pass_request_headers on;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -641,13 +769,102 @@ EOF
         proxy_max_temp_file_size 0;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
-        add_header Cache-Control "no-store, no-cache" always;
-        add_header CDN-Cache-Control "no-store" always;
-        add_header Pragma "no-cache" always;
-        add_header Expires "0" always;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
         add_header X-Accel-Buffering no always;
         add_header Accept-Ranges none always;
     }
+
+    location ^~ ${secret_path}/yandex {
+        access_log off;
+        proxy_pass http://xray_xhttp_default;
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
+        add_header X-Accel-Buffering no always;
+        add_header Accept-Ranges none always;
+    }"
+    fi
+
+    local tf_location_block=""
+    if [[ $has_tf -eq 1 ]]; then
+        tf_location_block="    location ^~ ${secret_path}/turboflare {
+        access_log off;
+        proxy_pass http://xray_xhttp_turboflare;
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
+        add_header X-Accel-Buffering no always;
+        add_header Accept-Ranges none always;
+    }
+
+    location ^~ ${secret_path}/post {
+        access_log off;
+        proxy_pass http://xray_xhttp_turboflare;
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
+        add_header X-Accel-Buffering no always;
+        add_header Accept-Ranges none always;
+    }"
+    fi
+
+    cat > "${NGINX_RELAYS_DIR}/default.conf" <<EOF
+    location = ${secret_path} {
+        access_log off;
+        return 404;
+    }
+
+${ya_location_block}
+
+${tf_location_block}
 EOF
 
     deploy_subscription_proxy_conf "$bot_domain"
@@ -705,29 +922,30 @@ except Exception:
         keepalive_time_directive="    keepalive_time 24h;"
     fi
 
-    local catchall_ssl_block
-    if [[ -n "$ssl_reject_directive" ]]; then
-        catchall_ssl_block="server {
+    local catchall_ssl_block=""
+    if [[ $has_vd -eq 0 ]]; then
+        if [[ -n "$ssl_reject_directive" ]]; then
+            catchall_ssl_block="server {
     listen 443 ssl default_server;
     server_name _;
     server_tokens off;
     access_log off;
     ssl_reject_handshake on;
 }"
-    else
-        local dummy_dir="${DUMMY_CERT_DIR:-${NGINX_CONF_DIR}/fallback_ssl}"
-        mkdir -p "$dummy_dir"
-        if [[ ! -f "${dummy_dir}/dummy.crt" ]]; then
-            # Fallback self-signed cert for the default_server stub only.
-            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-                -keyout "${dummy_dir}/dummy.key" -out "${dummy_dir}/dummy.crt" \
-                -subj "/CN=invalid" 2>/dev/null || true
-            chmod 600 "${dummy_dir}/dummy.key" 2>/dev/null || true
-        fi
-        if [[ -f "${dummy_dir}/dummy.key" ]]; then
-            chmod 600 "${dummy_dir}/dummy.key" 2>/dev/null || warn "Не удалось выставить права 0600 на ${dummy_dir}/dummy.key"
-        fi
-        catchall_ssl_block="server {
+        else
+            local dummy_dir="${DUMMY_CERT_DIR:-${NGINX_CONF_DIR}/fallback_ssl}"
+            mkdir -p "$dummy_dir"
+            if [[ ! -f "${dummy_dir}/dummy.crt" ]]; then
+                # Fallback self-signed cert for the default_server stub only.
+                openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                    -keyout "${dummy_dir}/dummy.key" -out "${dummy_dir}/dummy.crt" \
+                    -subj "/CN=invalid" 2>/dev/null || true
+                chmod 600 "${dummy_dir}/dummy.key" 2>/dev/null || true
+            fi
+            if [[ -f "${dummy_dir}/dummy.key" ]]; then
+                chmod 600 "${dummy_dir}/dummy.key" 2>/dev/null || warn "Не удалось выставить права 0600 на ${dummy_dir}/dummy.key"
+            fi
+            catchall_ssl_block="server {
     listen 443 ssl default_server;
     server_name _;
     server_tokens off;
@@ -736,6 +954,19 @@ except Exception:
     ssl_certificate_key ${dummy_dir}/dummy.key;
     return 444;
 }"
+        fi
+    fi
+
+    local cdn_listen_directives cdn_ssl_directives
+    if [[ $has_vd -eq 1 ]]; then
+        cdn_listen_directives="listen 127.0.0.1:8000;"
+        cdn_ssl_directives=""
+    else
+        cdn_listen_directives="listen 443 ssl http2;"
+        cdn_ssl_directives="ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;"
     fi
 
     cat > "${NGINX_CONF_DIR}/sites-available/just1k-origin.conf" <<EOF
@@ -765,9 +996,9 @@ server {
     }
 }
 
-# 1. CDN Ingress (Порт 443 — Входящий трафик от клиентов через CDN)
+# 1. CDN Ingress (Входящий трафик от клиентов через CDN)
 server {
-    listen 443 ssl http2;
+    ${cdn_listen_directives}
     server_name ${server_name_str};
     server_tokens off;
     access_log off;
@@ -891,13 +1122,25 @@ server {
     set_real_ip_from 2a0d:d6c7:15:1::/64;
     set_real_ip_from 2a0d:d6c7:15:2::/64;
     set_real_ip_from 2a0d:d6c7:15:3::/64;
+
+    # Доверенный периметр Anycast TurboFlare / CDNvideo (AS57363)
+    set_real_ip_from 151.236.64.0/18;
+    set_real_ip_from 62.152.61.0/24;
+    set_real_ip_from 185.31.112.0/22;
+    set_real_ip_from 185.141.225.0/24;
+    set_real_ip_from 91.231.232.0/21;
+    set_real_ip_from 91.238.108.0/22;
+    set_real_ip_from 91.240.168.0/22;
+    set_real_ip_from 78.159.248.0/21;
+    set_real_ip_from 81.222.126.0/23;
+    set_real_ip_from 46.42.184.0/21;
+    set_real_ip_from 128.75.231.0/24;
+    set_real_ip_from 195.211.0.0/16;
+    set_real_ip_from 2a02:aec0::/32;
     real_ip_header X-Real-IP;
     real_ip_recursive on;
 
-    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
+    ${cdn_ssl_directives}
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
@@ -960,6 +1203,10 @@ EOF
     systemctl reload nginx
 
     set_state_val "role" "origin"
+    set_state_val "transports" "$transports"
+    set_state_val "has_yandex" "$has_ya"
+    set_state_val "has_turboflare" "$has_tf"
+    set_state_val "has_vless_direct" "$has_vd"
     set_state_val "domain" "$domain"
     set_state_val "cdn_domain" "$cdn_domain"
     set_state_val "bot_ip" "$bot_ip"
@@ -969,13 +1216,18 @@ EOF
     set_state_val "api_key" "$api_key"
 
     # Фаервол и системный стелс: единый SSOT (Fail-Closed, Zero-Lockout SSH)
-    configure_safe_ufw "80/tcp" "443/tcp"
+    if [[ "$use_wildcard" == "1" ]]; then
+        configure_safe_ufw "443/tcp"
+    else
+        configure_safe_ufw "80/tcp" "443/tcp"
+    fi
     heal_node_firewall_and_stealth
 
-    title "УСТАНОВКА ORIGIN УЗЛА УСПЕШНО ЗАВЕРШЕНА!"
+    title "УСТАНОВКА РУ ХАБ / ORIGIN УСПЕШНО ЗАВЕРШЕНА!"
     echo -e "${BOLD}Данные для добавления Origin в Telegram-боте (/admin):${NC}"
     echo -e "  🌐 Origin Домен:      ${CYAN}${domain}${NC}"
     echo -e "  ☁️ CDN Домен:         ${CYAN}${cdn_domain}${NC}"
+    echo -e "  🚀 Транспорты:        ${GREEN}${transports}${NC}"
     echo -e "  🔗 API URL бота:      ${CYAN}https://${domain}:8444${NC}"
     echo -e "  🤖 BOT IP:            ${CYAN}${bot_ip}${NC}"
     echo -e "  🤖 BOT Домен:         ${CYAN}${bot_domain}${NC}"
@@ -1228,6 +1480,13 @@ if not any(ob.get('tag') == 'just1k-wl-api' for ob in outbounds):
         'protocol': 'blackhole'
     })
 
+# 1.4b. dns-out (DNS Hijacking)
+if not any(ob.get('tag') == 'dns-out' for ob in outbounds):
+    outbounds.append({
+        'tag': 'dns-out',
+        'protocol': 'dns'
+    })
+
 # 1.5. Реконструкция/актуализация outbounds релеев из реестра relays.json
 for r in relays:
     if not isinstance(r, dict):
@@ -1320,39 +1579,107 @@ if not def_ib:
                 'xPaddingKey': 'dc',
                 'xPaddingHeader': 'X-Cache',
                 'xPaddingMethod': 'tokenish',
-                'xPaddingPlacement': 'queryInHeader'
+                'xPaddingPlacement': 'header'
             }
         }
     }
     inbounds.append(def_ib)
 
-# 2.3. Sniffing ТОЛЬКО для клиентских инбаундов (default + релейные инбаунды)
+transports_val = s_data.get('transports', 'all')
+has_ya = s_data.get('has_yandex', 1 if ('yandex' in transports_val or transports_val == 'all') else 0)
+has_tf = s_data.get('has_turboflare', 1 if ('turboflare' in transports_val or transports_val == 'all') else 0)
+has_vd = s_data.get('has_vless_direct', 1 if ('direct' in transports_val or transports_val == 'all') else 0)
+
+# 2.2b. just1k-wl-turboflare (TurboFlare Anycast CDN инбаунд)
+if has_tf:
+    tf_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-wl-turboflare'), None)
+    if not tf_ib:
+        tf_ib = {
+            'tag': 'just1k-wl-turboflare',
+            'listen': '127.0.0.1',
+            'port': 8004,
+            'protocol': 'vless',
+            'settings': {'clients': [], 'decryption': 'none'},
+            'streamSettings': {
+                'network': 'xhttp',
+                'sockopt': {
+                    'trustedXForwardedFor': ['X-Forwarded-For']
+                },
+                'xhttpSettings': {
+                    'mode': 'packet-up',
+                    'path': secret_base + '/turboflare',
+                    'uplinkHTTPMethod': 'POST',
+                    'uplinkDataPlacement': 'body',
+                    'scMaxEachPostBytes': 1000000,
+                    'scMaxConcurrentPosts': 16,
+                    'scMinPostsIntervalMs': 0,
+                    'serverMaxHeaderBytes': 65536,
+                    'xPaddingObfsMode': True,
+                    'xPaddingKey': 'dc',
+                    'xPaddingHeader': 'X-Cache',
+                    'xPaddingMethod': 'tokenish',
+                    'xPaddingPlacement': 'header'
+                }
+            }
+        }
+        inbounds.append(tf_ib)
+
+# 2.2c. just1k-vless-direct (VLESS TLS Direct инбаунд)
+if has_vd:
+    vd_ib = next((ib for ib in inbounds if ib.get('tag') == 'just1k-vless-direct'), None)
+    if not vd_ib:
+        dom_val = s_data.get('domain', '')
+        fb_dest = 8000 if (has_ya or has_tf) else 80
+        vd_ib = {
+            'tag': 'just1k-vless-direct',
+            'port': 443,
+            'protocol': 'vless',
+            'settings': {
+                'clients': [],
+                'decryption': 'none',
+                'fallbacks': [{'dest': fb_dest}]
+            },
+            'streamSettings': {
+                'network': 'tcp',
+                'security': 'tls',
+                'tlsSettings': {
+                    'certificates': [{
+                        'certificateFile': f'/etc/letsencrypt/live/{dom_val}/fullchain.pem',
+                        'keyFile': f'/etc/letsencrypt/live/{dom_val}/privkey.pem'
+                    }]
+                }
+            }
+        }
+        inbounds.append(vd_ib)
+
+# 2.3. Sniffing ТОЛЬКО для клиентских инбаундов (default, turboflare, vless-direct + релейные инбаунды)
 for ib in inbounds:
     tag = ib.get('tag', '')
     if tag == 'just1k-wl-api-grpc':
         ib.pop('sniffing', None)
-    elif tag == 'just1k-wl-default' or tag.startswith('just1k-wl-inbound-'):
+    elif tag in ('just1k-wl-default', 'just1k-wl-turboflare', 'just1k-vless-direct') or tag.startswith('just1k-wl-inbound-'):
         ib['sniffing'] = {
             'enabled': True,
             'destOverride': ['tls', 'http', 'quic'],
             'routeOnly': False
         }
 
-# 2.4. Канонический uplink-профиль XHTTP: аплинк без тел (GET + данные в
-# заголовках data-{i}), иначе edge Yandex Cloud CDN отвечает 413 на тела.
+# 2.4. Канонический uplink-профиль XHTTP и xPaddingPlacement: header
 for ib in inbounds:
     tag = ib.get('tag', '')
-    if tag == 'just1k-wl-default' or tag.startswith('just1k-wl-inbound-'):
+    if tag in ('just1k-wl-default', 'just1k-wl-turboflare') or tag.startswith('just1k-wl-inbound-'):
         ss = ib.setdefault('streamSettings', {})
         ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']
         xs = ss.setdefault('xhttpSettings', {})
-        xs['uplinkHTTPMethod'] = 'GET'
-        xs['uplinkDataPlacement'] = 'header'
-        xs['uplinkDataKey'] = 'data'
-        xs['scMaxEachPostBytes'] = 1000000
-        xs['scMaxConcurrentPosts'] = 1
-        xs['scMinPostsIntervalMs'] = 30
-        xs['serverMaxHeaderBytes'] = 65536
+        xs['xPaddingPlacement'] = 'header'
+        if tag == 'just1k-wl-default' or tag.startswith('just1k-wl-inbound-'):
+            xs['uplinkHTTPMethod'] = 'GET'
+            xs['uplinkDataPlacement'] = 'header'
+            xs['uplinkDataKey'] = 'data'
+            xs['scMaxEachPostBytes'] = 1000000
+            xs['scMaxConcurrentPosts'] = 1
+            xs['scMinPostsIntervalMs'] = 30
+            xs['serverMaxHeaderBytes'] = 65536
 
 # 3. DNS: Split-DNS с UseIPv4 и skipFallback для доменов РФ (строго отечественные резолверы)
 cfg['dns'] = {
@@ -1370,8 +1697,9 @@ cfg['dns'] = {
             ],
             'skipFallback': True
         },
-        '195.208.4.1',
-        '77.88.8.1'
+        '77.88.8.8',
+        '77.88.8.1',
+        '195.208.4.1'
     ],
     'queryStrategy': 'UseIPv4'
 }
@@ -1383,12 +1711,27 @@ rules = cfg.setdefault('routing', {}).setdefault('rules', [])
 # Собираем актуальные теги всех входящих подключений клиентов
 known_client_inbounds = [
     ib.get('tag') for ib in inbounds
-    if ib.get('tag') == 'just1k-wl-default' or ib.get('tag', '').startswith('just1k-wl-inbound-')
+    if ib.get('tag') in ('just1k-wl-default', 'just1k-wl-turboflare', 'just1k-vless-direct')
+    or str(ib.get('tag', '')).startswith('just1k-wl-inbound-')
 ]
+direct_inbounds = [
+    t for t in ('just1k-wl-default', 'just1k-wl-turboflare', 'just1k-vless-direct')
+    if any(ib.get('tag') == t for ib in inbounds)
+]
+if not direct_inbounds:
+    direct_inbounds = ['just1k-wl-default']
+
+# DNS Hijacking: порт 53 перехватывается и направляется в dns-out
+if not any(r.get('outboundTag') == 'dns-out' for r in rules):
+    rules.insert(0, {
+        'type': 'field',
+        'port': '53',
+        'outboundTag': 'dns-out'
+    })
 
 # 4.1. Правило API
 if not any(r.get('outboundTag') == 'just1k-wl-api' for r in rules):
-    rules.insert(0, {
+    rules.insert(1, {
         'type': 'field',
         'inboundTag': ['just1k-wl-api-grpc'],
         'outboundTag': 'just1k-wl-api'
@@ -1396,7 +1739,7 @@ if not any(r.get('outboundTag') == 'just1k-wl-api' for r in rules):
 
 # 4.1b. Блокировка BitTorrent (P2P трафик)
 if not any(r.get('protocol') == ['bittorrent'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
-    rules.insert(1, {
+    rules.insert(2, {
         'type': 'field',
         'protocol': ['bittorrent'],
         'outboundTag': 'just1k-wl-block'
@@ -1404,7 +1747,7 @@ if not any(r.get('protocol') == ['bittorrent'] and r.get('outboundTag') == 'just
 
 # 4.1c. Блокировка исходящего SMTP (порт 25)
 if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
-    rules.insert(1, {
+    rules.insert(2, {
         'type': 'field',
         'port': '25',
         'outboundTag': 'just1k-wl-block'
@@ -1412,7 +1755,7 @@ if not any((r.get('port') == '25' or r.get('port') == 25) and r.get('outboundTag
 
 # 4.1d. Блокировка стандартных P2P/BitTorrent портов (6881-6889)
 if not any(r.get('port') == '6881-6889' and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
-    rules.insert(1, {
+    rules.insert(2, {
         'type': 'field',
         'port': '6881-6889',
         'outboundTag': 'just1k-wl-block'
@@ -1420,7 +1763,7 @@ if not any(r.get('port') == '6881-6889' and r.get('outboundTag') == 'just1k-wl-b
 
 # 4.1e. Блокировка приватных и локальных сетей (SSRF, gRPC сокет 10085, cloud metadata)
 if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
-    rules.insert(1, {
+    rules.insert(2, {
         'type': 'field',
         'ip': ['geoip:private'],
         'outboundTag': 'just1k-wl-block'
@@ -1428,7 +1771,7 @@ if not any(r.get('ip') == ['geoip:private'] and r.get('outboundTag') == 'just1k-
 
 # 4.1f. Блокировка QUIC / HTTP3 (UDP:443) для исключения задержек YouTube и глушилок ТСПУ
 if not any(str(r.get('port')) == '443' and r.get('network') == 'udp' and r.get('outboundTag') == 'just1k-wl-block' for r in rules):
-    rules.insert(1, {
+    rules.insert(2, {
         'type': 'field',
         'port': '443',
         'network': 'udp',
@@ -1453,7 +1796,7 @@ if not dom_rule:
         'domain': ru_domains,
         'outboundTag': 'just1k-wl-direct'
     }
-    rules.insert(2, dom_rule)
+    rules.insert(3, dom_rule)
 else:
     dom_rule['domain'] = list(dict.fromkeys(dom_rule.get('domain', []) + ru_domains))
     curr_ib = dom_rule.get('inboundTag', [])
@@ -1479,8 +1822,8 @@ for r in relays:
     })
     relay_offset += 1
 
-# 4.4. Правило Direct для IP РФ (geoip:ru) — строго для прямого трафика РФ (just1k-wl-default)
-ip_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'ip' in r), None)
+# 4.4. Правило Direct для IP РФ (geoip:ru) — строго для прямого трафика РФ
+ip_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'ip' in r and r.get('inboundTag') == ['just1k-wl-default']), None)
 if not ip_rule:
     ip_rule = {
         'type': 'field',
@@ -1492,15 +1835,10 @@ if not ip_rule:
 else:
     if 'geoip:ru' not in ip_rule.get('ip', []):
         ip_rule.setdefault('ip', []).append('geoip:ru')
-    # Исключаем relay inbounds из ip_rule во избежание DNS-резолвинга зарубежных доменов на Origin в РФ
-    curr_ib = ip_rule.get('inboundTag', [])
-    clean_ib = [t for t in (curr_ib if isinstance(curr_ib, list) else [curr_ib]) if not str(t).startswith('just1k-wl-inbound-')]
-    if 'just1k-wl-default' not in clean_ib:
-        clean_ib.append('just1k-wl-default')
-    ip_rule['inboundTag'] = clean_ib
+    ip_rule['inboundTag'] = ['just1k-wl-default']
 
 # 4.5. Дефолтное правило для just1k-wl-default (Россия — прямой выход с московского IP)
-def_rule = next((r for r in rules if r.get('inboundTag') == ['just1k-wl-default'] and 'domain' not in r and 'ip' not in r), None)
+def_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'domain' not in r and 'ip' not in r and r.get('inboundTag') == ['just1k-wl-default']), None)
 if not def_rule:
     rules.append({
         'type': 'field',
@@ -1508,7 +1846,17 @@ if not def_rule:
         'outboundTag': 'just1k-wl-direct'
     })
 else:
+    def_rule['inboundTag'] = ['just1k-wl-default']
     def_rule['outboundTag'] = 'just1k-wl-direct'
+
+for c_ib in direct_inbounds:
+    if c_ib != 'just1k-wl-default':
+        if not any(r.get('outboundTag') == 'just1k-wl-direct' and 'domain' not in r and 'ip' not in r and r.get('inboundTag') == [c_ib] for r in rules):
+            rules.append({
+                'type': 'field',
+                'inboundTag': [c_ib],
+                'outboundTag': 'just1k-wl-direct'
+            })
 
 cfg['routing']['rules'] = rules
 
@@ -1579,6 +1927,63 @@ try:
                 df_changed = True
             if 'proxy_read_timeout 3600s;' in df_cur or 'proxy_send_timeout 3600s;' in df_cur:
                 df_cur = df_cur.replace('proxy_read_timeout 3600s;', 'proxy_read_timeout 86400s;').replace('proxy_send_timeout 3600s;', 'proxy_send_timeout 86400s;')
+                df_changed = True
+            if ('just1k-wl-turboflare' in xray_inbound_ports or 'just1k-wl-post' in xray_inbound_ports) and 'xray_xhttp_turboflare' not in df_cur:
+                import re
+                m = re.search(r'location\s*=\s*([^\s{]+)', df_cur)
+                sec_path = m.group(1) if m else '/stream'
+                tf_block = f'''
+    location ^~ {sec_path}/turboflare {{
+        access_log off;
+        proxy_pass http://xray_xhttp_turboflare;
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
+        add_header X-Accel-Buffering no always;
+        add_header Accept-Ranges none always;
+    }}
+
+    location ^~ {sec_path}/post {{
+        access_log off;
+        proxy_pass http://xray_xhttp_turboflare;
+        proxy_method \$xhttp_proxy_method;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_pass_request_headers on;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        client_max_body_size 0;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        add_header Cache-Control \"no-store, no-cache\" always;
+        add_header CDN-Cache-Control \"no-store\" always;
+        add_header Pragma \"no-cache\" always;
+        add_header Expires \"0\" always;
+        add_header X-Accel-Buffering no always;
+        add_header Accept-Ranges none always;
+    }}
+'''
+                df_cur += tf_block
                 df_changed = True
             if df_changed:
                 with open(def_cf_path, 'w', encoding='utf-8') as df_f:

@@ -877,6 +877,12 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     except Exception as e:
         logger.debug("Failed to read disk usage: %s", e)
 
+    active_transports = {
+        "vless_direct": any(t in ("just1k-vless-direct", "inbound-tls") for t in target_inbounds),
+        "cdn_yandex": any(t in ("just1k-wl-default", "just1k-wl-yandex") for t in target_inbounds),
+        "cdn_turboflare": any(t in ("just1k-wl-turboflare", "just1k-wl-post") for t in target_inbounds),
+    }
+
     return {
         "status": "ok" if is_running else "error",
         "xray_running": is_running,
@@ -885,6 +891,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "inbounds": target_inbounds,
         "services": detected_services,
         "capabilities": capabilities,
+        "transports": active_transports,
         "vless_domain": vless_domain,
         "relays": relays if not relays_err else [],
         "relays_error": relays_err,
@@ -899,6 +906,29 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "last_synced_at": node_sync_state.get("last_synced_at"),
         "disk_usage": disk_usage_info,
     }
+
+
+@app.get("/v1/capabilities")
+def get_capabilities(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
+    """Returns detailed node capabilities, active transports, and role for bot and mini app."""
+    target_inbounds = get_all_managed_inbounds()
+    node_meta = get_node_state_metadata()
+    role = node_meta.get("role") or ("origin" if any(t.startswith("just1k-wl-") for t in target_inbounds) else "node")
+    active_transports = {
+        "vless_direct": any(t in ("just1k-vless-direct", "inbound-tls") for t in target_inbounds),
+        "cdn_yandex": any(t in ("just1k-wl-default", "just1k-wl-yandex") for t in target_inbounds),
+        "cdn_turboflare": any(t in ("just1k-wl-turboflare", "just1k-wl-post") for t in target_inbounds),
+    }
+    return {
+        "status": "ok",
+        "role": role,
+        "transports": active_transports,
+        "inbounds": target_inbounds,
+        "domain": node_meta.get("domain") or node_meta.get("vless_domain") or "",
+        "cdn_domain": get_cdn_domain(),
+        "sub_path_prefix": get_sub_path_prefix(),
+    }
+
 
 
 @app.get("/v1/relays")
