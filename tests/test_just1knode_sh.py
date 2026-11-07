@@ -64,6 +64,9 @@ class TestJust1kNodeScript(unittest.TestCase):
         self.sysctl_d = Path(self.temp_dir) / "etc" / "sysctl.d"
         self.sysctl_d.mkdir(parents=True, exist_ok=True)
         self.sysctl_conf = self.sysctl_d / "99-disable-ipv6.conf"
+        self.modules_load_d = Path(self.temp_dir) / "etc" / "modules-load.d"
+        self.modules_load_d.mkdir(parents=True, exist_ok=True)
+        self.modules_load_conf = self.modules_load_d / "just1knode.conf"
         self.bin_dir = Path(self.temp_dir) / "bin"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -201,6 +204,7 @@ export XRAY_TLS_DIR='{_bp(self.xray_config_dir / "tls")}'
 export WWW_HTML_DIR='{_bp(self.www_html_dir)}'
 export INSTALL_DIR='{_bp(self.install_dir)}'
 export JUST1KNODE_SYSCTL_IPV6_CONF='{_bp(self.sysctl_conf)}'
+export MODULES_LOAD_CONF='{_bp(self.modules_load_conf)}'
 
 source '{_bp(JUST1KNODE_SH)}'
 
@@ -2495,6 +2499,10 @@ ensure_xrayapi_user
         origin_conf.write_text("server { listen 80; }", encoding="utf-8")
         (nginx_sites_enabled / "just1k-origin.conf").symlink_to(origin_conf)
         (nginx_conf_d / "xhttp-map.conf").write_text("map $request_method $xhttp { }", encoding="utf-8")
+        (nginx_conf_d / "just1k-xhttp-upstreams.conf").write_text("upstream xhttp { }", encoding="utf-8")
+        fallback_ssl_dir = self.nginx_conf_dir / "fallback_ssl"
+        fallback_ssl_dir.mkdir(parents=True, exist_ok=True)
+        (fallback_ssl_dir / "dummy.crt").write_text("cert", encoding="utf-8")
 
         # Backup of user default site
         (nginx_sites_avail / "default.user.bak").write_text("server { server_name user.com; }", encoding="utf-8")
@@ -2532,8 +2540,9 @@ ensure_xrayapi_user
         self._create_mock_script("groupdel", "#!/bin/sh\nexit 0\n")
         self._create_mock_script("pkill", "#!/bin/sh\nexit 0\n")
 
-        # Fake sysctl conf
+        # Fake sysctl and modules-load conf
         self.sysctl_conf.write_text("net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv4.icmp_echo_ignore_all = 1\n", encoding="utf-8")
+        self.modules_load_conf.write_text("nf_conntrack\nxt_string\n", encoding="utf-8")
 
         extra_env = {
             "INSTALL_DIR": str(fake_install_dir),
@@ -2548,6 +2557,7 @@ ensure_xrayapi_user
 
         # Assertions
         self.assertFalse(self.sysctl_conf.exists(), "sysctl configuration must be removed on uninstall")
+        self.assertFalse(self.modules_load_conf.exists(), "modules-load configuration must be removed on uninstall")
         self.assertFalse((self.systemd_dir / "xray.service").exists(), "xray.service must be removed")
         self.assertFalse((self.systemd_dir / "xray-api.service").exists(), "xray-api.service must be removed")
         self.assertFalse(self.xray_config_dir.exists(), "xray config dir must be removed")
@@ -2558,6 +2568,8 @@ ensure_xrayapi_user
         self.assertFalse((nginx_sites_avail / "just1k-origin.conf").exists(), "origin nginx site must be removed")
         self.assertFalse((nginx_sites_enabled / "just1k-origin.conf").exists(), "origin nginx link must be removed")
         self.assertFalse((nginx_conf_d / "xhttp-map.conf").exists(), "xhttp-map.conf must be removed")
+        self.assertFalse((nginx_conf_d / "just1k-xhttp-upstreams.conf").exists(), "just1k-xhttp-upstreams.conf must be removed")
+        self.assertFalse(fallback_ssl_dir.exists(), "fallback_ssl directory must be removed on uninstall")
         self.assertTrue((nginx_sites_avail / "default").exists(), "default site must be restored from default.user.bak")
         self.assertFalse((nginx_sites_avail / "default.user.bak").exists(), "default.user.bak must be removed after restore")
         self.assertFalse((self.www_html_dir / "index.html").exists(), "camouflage index.html must be removed")

@@ -1086,7 +1086,7 @@ reset_node() {
     systemctl disable xray xray-api 2>/dev/null || true
     remove_traffic_watchdog_timer
     remove_antiabuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/xhttp-map.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1095,7 +1095,7 @@ reset_node() {
             fi
         done
     fi
-    rm -rf /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api 2>/dev/null || true
+    rm -rf /etc/nginx/fallback_ssl /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api 2>/dev/null || true
     if [[ ! -e /etc/nginx/sites-enabled/default ]]; then
         if [[ -f /etc/nginx/sites-available/default.user.bak ]]; then
             cp -a /etc/nginx/sites-available/default.user.bak /etc/nginx/sites-available/default 2>/dev/null || true
@@ -1212,6 +1212,15 @@ uninstall_node() {
             warn "Подтверждение не совпало (введено: '$c2'). Удаление отменено!"
             return 0
         fi
+
+        # Интерактивный запрос на удаление каталога бэкапов
+        if [[ "$purge_backups" != "true" ]]; then
+            local c_purge="n"
+            read -r -t 30 -p "Удалить архивные бэкапы предыдущих версий (/var/backups/just1knode)? [y/N]: " c_purge || true
+            if [[ "$c_purge" =~ ^[Yy]$ ]]; then
+                purge_backups=true
+            fi
+        fi
     fi
 
     local node_cleanup_errors=()
@@ -1276,7 +1285,9 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/sites-available/just1k-fallback80.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-origin.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
+    rm -rf "${nginx_conf_dir}/fallback_ssl" 2>/dev/null || true
     rm -rf "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" 2>/dev/null || true
     remove_antiabuse_protection 2>/dev/null || true
 
@@ -1331,6 +1342,10 @@ uninstall_node() {
         rm -f "$sysctl_ipv6_conf" 2>/dev/null || true
         sysctl_cleaned=1
     fi
+    local modules_load_conf="${MODULES_LOAD_CONF:-/etc/modules-load.d/just1knode.conf}"
+    if [[ -f "$modules_load_conf" ]]; then
+        rm -f "$modules_load_conf" 2>/dev/null || true
+    fi
     local ufw_conf="${JUST1KNODE_UFW_SYSCTL_CONF:-/etc/ufw/sysctl.conf}"
     if [[ -f "$ufw_conf" ]]; then
         sed -i -E '/^[#[:space:]]*net\/ipv4\/icmp_echo_ignore_all[[:space:]]*=/d' "$ufw_conf" 2>/dev/null || true
@@ -1352,6 +1367,16 @@ uninstall_node() {
         st_origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
         st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
+        if ufw status 2>/dev/null | grep -qi "Status: active"; then
+            local r_nums
+            r_nums="$(ufw status numbered 2>/dev/null | grep -E "\[\s*[0-9]+\]\s+(8444|8443|443|${st_relay_port:-10443})(/tcp)?\b|just1k" | awk -F'[][]' '{print $2}' | sort -rn)"
+            for r_n in $r_nums; do
+                if [[ -n "$r_n" ]]; then
+                    echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                fi
+            done
+        fi
+
         if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
             if [[ -n "$st_origin_ip" ]]; then
                 ufw delete allow from "$st_origin_ip" to any port "$st_relay_port" proto tcp >/dev/null 2>&1 || true
@@ -1365,6 +1390,13 @@ uninstall_node() {
             fi
             ufw delete allow 8444/tcp >/dev/null 2>&1 || true
             ufw delete allow 8444 >/dev/null 2>&1 || true
+        fi
+        if ! is_ssh_port "8443"; then
+            if [[ -n "$st_bot_ip" ]]; then
+                ufw delete allow from "$st_bot_ip" to any port 8443 proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8443 >/dev/null 2>&1 || true
         fi
         if ! is_ssh_port "443"; then
             ufw delete allow 443/tcp >/dev/null 2>&1 || true
@@ -1380,7 +1412,7 @@ uninstall_node() {
     else
         log "Каталог бэкапов сохранен: ${BACKUP_DIR:-/var/backups/just1knode} (используйте --purge-backups для удаления)."
     fi
-    rm -rf /run/lock/just1knode /tmp/just1knode* 2>/dev/null || true
+    rm -rf /run/lock/just1knode /run/just1knode* /tmp/just1knode* "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
 
     info "11/11. Удаление глобальной команды и каталога установки..."
     local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
@@ -1405,11 +1437,20 @@ uninstall_node() {
     if [[ -f "$sysctl_ipv6_conf" ]]; then
         node_cleanup_errors+=("Файл sysctl $sysctl_ipv6_conf все еще существует")
     fi
+    if [[ -f "$modules_load_conf" ]]; then
+        node_cleanup_errors+=("Конфигурация модулей ядра $modules_load_conf все еще существует")
+    fi
     if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" ]]; then
         node_cleanup_errors+=("Служба systemd xray.service все еще существует")
     fi
     if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
         node_cleanup_errors+=("Служба systemd xray-api.service все еще существует")
+    fi
+    if [[ -d "${nginx_conf_dir}/fallback_ssl" ]]; then
+        node_cleanup_errors+=("Каталог fallback_ssl в Nginx все еще существует")
+    fi
+    if [[ -f "${nginx_conf_dir}/conf.d/just1k-xhttp-upstreams.conf" ]]; then
+        node_cleanup_errors+=("Файл конфигурации upstreams все еще существует в Nginx")
     fi
 
     echo ""

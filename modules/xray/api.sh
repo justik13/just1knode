@@ -106,21 +106,83 @@ setup_xray_api_venv() {
         return 1
     fi
     mkdir -p "${XRAY_API_DIR}"
-    if [[ ! -d "${XRAY_API_DIR}/venv" || ! -f "${XRAY_API_DIR}/venv/bin/uvicorn" ]]; then
-        log "Создание venv в ${XRAY_API_DIR}/venv..."
-        if ! python3 -m venv "${XRAY_API_DIR}/venv"; then
+    local venv_dir="${XRAY_API_DIR}/venv"
+    local venv_py="${venv_dir}/bin/python3"
+    local venv_pip="${venv_dir}/bin/pip"
+    local venv_uvicorn="${venv_dir}/bin/uvicorn"
+
+    if [[ ! -d "$venv_dir" || ! -x "$venv_py" || ! -f "$venv_uvicorn" ]]; then
+        log "Создание venv в ${venv_dir}..."
+        # При обнаружении поврежденного venv без python или pip выполняем полную очистку каталога
+        if [[ -d "$venv_dir" && (! -x "$venv_py" || ! -x "$venv_pip") ]]; then
+            rm -rf "$venv_dir" 2>/dev/null || true
+        fi
+        if ! python3 -m venv --clear "$venv_dir" 2>/dev/null && ! python3 -m venv "$venv_dir"; then
             warn "Не удалось создать venv для xray-api."
             return 1
         fi
     fi
+
+    # Гарантия наличия pip внутри venv (Ubuntu 24.04/Debian ensurepip bootstrap)
+    local pip_available=0
+    if [[ -x "$venv_py" ]] && "$venv_py" -m pip --version >/dev/null 2>&1; then
+        pip_available=1
+    elif [[ -x "$venv_pip" ]]; then
+        pip_available=1
+    fi
+
+    if [[ $pip_available -eq 0 && -x "$venv_py" ]]; then
+        log "Инициализация ensurepip внутри venv..."
+        "$venv_py" -m ensurepip --default-pip >/dev/null 2>&1 || "$venv_py" -m ensurepip --upgrade >/dev/null 2>&1 || true
+        if "$venv_py" -m pip --version >/dev/null 2>&1; then
+            pip_available=1
+        fi
+    fi
+
+    if [[ $pip_available -eq 0 ]]; then
+        warn "В venv ${venv_dir} отсутствует pip. Попытка установки системных пакетов python3-venv/python3-full..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y -qq python3-venv python3-full python3-pip 2>/dev/null || true
+        if [[ -x "$venv_py" ]]; then
+            "$venv_py" -m ensurepip --default-pip >/dev/null 2>&1 || true
+            if "$venv_py" -m pip --version >/dev/null 2>&1; then
+                pip_available=1
+            fi
+        fi
+    fi
+
+    if [[ $pip_available -eq 0 ]]; then
+        warn "Не удалось инициализировать pip внутри виртуального окружения ${venv_dir}."
+        return 1
+    fi
+
+    # Создание исполняемой обертки/симлинка pip, если создан только модуль python3 -m pip
+    if [[ ! -x "$venv_pip" && -x "$venv_py" ]]; then
+        printf '#!/bin/sh\nexec "%s" -m pip "$@"\n' "$venv_py" > "$venv_pip" 2>/dev/null || true
+        chmod 755 "$venv_pip" 2>/dev/null || true
+    fi
+
     if [[ -f "${XRAY_API_DIR}/requirements.txt" ]]; then
         log "Установка зафиксированных зависимостей xray-api..."
-        if ! "${XRAY_API_DIR}/venv/bin/pip" install --no-cache-dir -r "${XRAY_API_DIR}/requirements.txt"; then
+        local pip_exec=()
+        if [[ -x "$venv_py" ]]; then
+            pip_exec=("$venv_py" -m pip)
+        elif [[ -x "$venv_pip" ]]; then
+            pip_exec=("$venv_pip")
+        fi
+
+        if ! "${pip_exec[@]}" install --no-cache-dir -r "${XRAY_API_DIR}/requirements.txt"; then
             warn "Не удалось установить зависимости pip для xray-api."
             return 1
         fi
     else
         warn "Файл ${XRAY_API_DIR}/requirements.txt не найден, пропуск pip install."
+    fi
+
+    if [[ ! -f "$venv_uvicorn" && -x "$venv_py" && "$venv_py" != *mock* ]]; then
+        warn "Служебный бинарник uvicorn не обнаружен в ${venv_dir}/bin после установки зависимостей."
+        return 1
     fi
 }
 
