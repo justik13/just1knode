@@ -109,12 +109,8 @@ update_xray_core() {
     log "Проверка текущей конфигурации новым бинарником..."
     if "${tmp_extract}/xray" run -test -config "$XRAY_CONFIG"; then
         log "Тест пройден успешно. Создание резервной копии старого бинарника..."
-        mkdir -p "$BACKUP_DIR"
-        local backup_bin
-        backup_bin="${BACKUP_DIR}/xray_$(date +%Y%m%d_%H%M%S).bak"
-        if [[ -f "$XRAY_BIN" ]]; then
-            cp "$XRAY_BIN" "$backup_bin"
-        fi
+        create_backup "$XRAY_BIN"
+        local backup_bin="${LAST_BACKUP_PATH:-}"
 
         log "Применение обновления..."
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
