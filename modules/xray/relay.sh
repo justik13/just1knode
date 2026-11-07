@@ -2073,12 +2073,14 @@ with open(out_f, 'w', encoding='utf-8') as f:
             ufw delete allow 443/tcp >/dev/null 2>&1 || true
         fi
 
-        # Откат правила UFW для 8444 (если 8444 не использовался ранее для VLESS или Origin)
-        if [[ "$orig_has_vless" != "1" && "$orig_role" != "origin" ]]; then
-            if [[ -n "$bot_ip" ]]; then
-                ufw delete allow from "$bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+        # Откат правила UFW для 8444 (если 8444 не использовался ранее для VLESS, Origin или Relay)
+        if [[ "$orig_has_vless" != "1" && "$orig_role" != "origin" && "$orig_role" != "relay" && "$(get_state_val "has_relay" "0")" != "1" ]]; then
+            if ! is_ssh_port "8444"; then
+                if [[ -n "$bot_ip" ]]; then
+                    ufw delete allow from "$bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+                fi
+                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
             fi
-            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
         fi
 
         # Откат fallback хоста Nginx (только если его не было до текущей установки)

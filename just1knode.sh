@@ -1095,7 +1095,7 @@ reset_node() {
             fi
         done
     fi
-    rm -rf /etc/nginx/fallback_ssl /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api 2>/dev/null || true
+    rm -rf /etc/nginx/fallback_ssl /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
     if [[ ! -e /etc/nginx/sites-enabled/default ]]; then
         if [[ -f /etc/nginx/sites-available/default.user.bak ]]; then
             cp -a /etc/nginx/sites-available/default.user.bak /etc/nginx/sites-available/default 2>/dev/null || true
@@ -1214,11 +1214,18 @@ uninstall_node() {
         fi
 
         # Интерактивный запрос на удаление каталога бэкапов
-        if [[ "$purge_backups" != "true" ]]; then
-            local c_purge="n"
-            read -r -t 30 -p "Удалить архивные бэкапы предыдущих версий (/var/backups/just1knode)? [y/N]: " c_purge || true
-            if [[ "$c_purge" =~ ^[Yy]$ ]]; then
-                purge_backups=true
+        local bak_dir="${BACKUP_DIR:-/var/backups/just1knode}"
+        if [[ "$purge_backups" != "true" && -d "$bak_dir" ]]; then
+            local bak_count
+            bak_count="$(find "$bak_dir" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+            if [[ "$bak_count" -gt 0 ]]; then
+                local bak_size
+                bak_size="$(du -sh "$bak_dir" 2>/dev/null | awk '{print $1}')"
+                local c_purge="n"
+                read -r -t 30 -p "Удалить архивные бэкапы предыдущих версий ($bak_dir, занято: ${bak_size:-0B})? [y/N]: " c_purge || true
+                if [[ "$c_purge" =~ ^[Yy]$ ]]; then
+                    purge_backups=true
+                fi
             fi
         fi
     fi
@@ -1368,13 +1375,51 @@ uninstall_node() {
         st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
         if ufw status 2>/dev/null | grep -qi "Status: active"; then
-            local r_nums
-            r_nums="$(ufw status numbered 2>/dev/null | grep -E "\[\s*[0-9]+\]\s+(8444|8443|443|${st_relay_port:-10443})(/tcp)?\b|just1k" | awk -F'[][]' '{print $2}' | sort -rn)"
-            for r_n in $r_nums; do
-                if [[ -n "$r_n" ]]; then
-                    echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+            local ufw_num_out
+            ufw_num_out="$(ufw status numbered 2>/dev/null || true)"
+            local r_nums=()
+            while IFS= read -r rule_line; do
+                [[ -z "$rule_line" ]] && continue
+                if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+                    local r_n="${BASH_REMATCH[1]}"
+                    local r_body="${BASH_REMATCH[2]}"
+
+                    # Zero-Lockout: категорически пропускаем любые SSH-правила
+                    if echo "$r_body" | grep -qiE '\bssh\b|ssh access'; then
+                        continue
+                    fi
+
+                    local t_port
+                    t_port="$(echo "$r_body" | awk '{print $1}' | sed -E 's|/(tcp|udp)$||' | tr -d '[:space:]')"
+                    if [[ -n "$t_port" ]] && is_ssh_port "$t_port"; then
+                        continue
+                    fi
+
+                    # Очистка строго собственных правил Just1kNode
+                    local is_node_rule=0
+                    if [[ "$t_port" == "8444" || "$t_port" == "8443" || "$t_port" == "443" ]]; then
+                        is_node_rule=1
+                    elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
+                        is_node_rule=1
+                    elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification))'; then
+                        is_node_rule=1
+                    fi
+
+                    if [[ $is_node_rule -eq 1 ]]; then
+                        r_nums+=("$r_n")
+                    fi
                 fi
-            done
+            done <<< "$ufw_num_out"
+
+            if [[ ${#r_nums[@]} -gt 0 ]]; then
+                local sorted_nums
+                sorted_nums="$(printf "%s\n" "${r_nums[@]}" | sort -rn -u)"
+                for r_n in $sorted_nums; do
+                    if [[ -n "$r_n" ]]; then
+                        echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                    fi
+                done
+            fi
         fi
 
         if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
@@ -1451,6 +1496,24 @@ uninstall_node() {
     fi
     if [[ -f "${nginx_conf_dir}/conf.d/just1k-xhttp-upstreams.conf" ]]; then
         node_cleanup_errors+=("Файл конфигурации upstreams все еще существует в Nginx")
+    fi
+    if [[ -d "${XRAY_API_DIR:-/opt/xray-api}" ]]; then
+        node_cleanup_errors+=("Каталог xray-api все еще существует: ${XRAY_API_DIR:-/opt/xray-api}")
+    fi
+    if [[ -d "${STATE_DIR:-/etc/just1knode}" ]]; then
+        node_cleanup_errors+=("Каталог состояния state все еще существует: ${STATE_DIR:-/etc/just1knode}")
+    fi
+    if [[ -d "${XRAY_CONFIG_DIR:-/usr/local/etc/xray}" ]]; then
+        node_cleanup_errors+=("Каталог конфигурации xray все еще существует: ${XRAY_CONFIG_DIR:-/usr/local/etc/xray}")
+    fi
+    if [[ "$purge_backups" == "true" && -d "${BACKUP_DIR:-/var/backups/just1knode}" ]]; then
+        node_cleanup_errors+=("Каталог бэкапов все еще существует при флаге --purge-backups: ${BACKUP_DIR:-/var/backups/just1knode}")
+    fi
+    if [[ -f "${nginx_conf_dir}/sites-available/just1k-vless-api.conf" || -L "${nginx_conf_dir}/sites-enabled/just1k-vless-api.conf" ]]; then
+        node_cleanup_errors+=("Конфигурация just1k-vless-api.conf все еще существует в Nginx")
+    fi
+    if [[ -f "${nginx_conf_dir}/sites-available/just1k-origin.conf" || -L "${nginx_conf_dir}/sites-enabled/just1k-origin.conf" ]]; then
+        node_cleanup_errors+=("Конфигурация just1k-origin.conf все еще существует в Nginx")
     fi
 
     echo ""
