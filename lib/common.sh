@@ -93,7 +93,8 @@ install_base_deps() {
     log "Проверка и установка системных пакетов..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq curl wget unzip jq python3 python3-pip python3-venv ufw openssl ca-certificates
+    apt-get install -y -qq curl wget unzip jq python3 python3-pip python3-venv python3-full ufw openssl ca-certificates 2>/dev/null || \
+        apt-get install -y -qq curl wget unzip jq python3 python3-pip python3-venv ufw openssl ca-certificates
 }
 
 install_nginx_if_missing() {
