@@ -249,14 +249,16 @@ show_status() {
     echo -e "  Роль узла:            ${BOLD}${GREEN}${role}${NC}"
 
     if [[ "$role" == "origin" ]]; then
-        local domain cdn_domain api_url secret_path
+        local domain cdn_domain api_url secret_path transports
         domain="$(get_state_val "domain" "-")"
         cdn_domain="$(get_state_val "cdn_domain" "-")"
         api_url="$(get_state_val "api_url" "-")"
         secret_path="$(get_state_val "secret_base_path" "-")"
+        transports="$(get_state_val "transports" "all")"
 
         echo -e "  Origin Домен:         ${CYAN}${domain}${NC}"
         echo -e "  CDN Домен:            ${CYAN}${cdn_domain}${NC}"
+        echo -e "  Транспорты:           ${GREEN}${transports}${NC}"
         echo -e "  API URL:              ${CYAN}${api_url}${NC}"
         echo -e "  Секретный префикс:    ${MAGENTA}${secret_path}${NC}"
 
@@ -318,7 +320,7 @@ show_bot_credentials() {
         return
     fi
 
-    local domain cdn_domain api_url api_key secret_path bot_ip bot_domain
+    local domain cdn_domain api_url api_key secret_path bot_ip bot_domain transports
     domain="$(get_state_val "domain" "-")"
     cdn_domain="$(get_state_val "cdn_domain" "-")"
     api_url="$(get_state_val "api_url" "-")"
@@ -326,9 +328,11 @@ show_bot_credentials() {
     secret_path="$(get_state_val "secret_base_path" "-")"
     bot_ip="$(get_state_val "bot_ip" "-")"
     bot_domain="$(get_state_val "bot_domain" "-")"
+    transports="$(get_state_val "transports" "all")"
 
     echo -e "  🌐 Origin Домен:      ${CYAN}${domain}${NC}"
     echo -e "  ☁️ CDN Домен:         ${CYAN}${cdn_domain}${NC}"
+    echo -e "  🚀 Транспорты:        ${GREEN}${transports}${NC}"
     echo -e "  🔗 API URL бота:      ${CYAN}${api_url}${NC}"
     echo -e "  🤖 BOT IP:            ${CYAN}${bot_ip}${NC}"
     echo -e "  🤖 BOT Домен:         ${CYAN}${bot_domain}${NC}"
@@ -1552,7 +1556,7 @@ main_menu() {
 
         if [[ "$status" == "unconfigured" ]]; then
             echo -e "  Статус текущего сервера: ${BOLD}${YELLOW}⚪ НЕ НАСТРОЕН${NC}\n"
-            echo -e "  ${BOLD}[1]${NC} 🌐 Установить Origin узел (Белый Интернет — Входной шлюз в РФ)"
+            echo -e "  ${BOLD}[1]${NC} 🇷🇺 Установить РУ ХАБ / Origin (Белый Интернет CDN / Прямой VLESS)"
             echo -e "  ${BOLD}[2]${NC} 🛡️  Установить Relay узел (Белый Интернет — Зарубежный выход)"
             echo -e "  ${BOLD}[3]${NC} 🚀 Настроить VLESS TLS узел (Зарубежный выход для Sub-ссылки)"
             echo -e "  ${BOLD}[4]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
@@ -1570,13 +1574,14 @@ main_menu() {
             esac
 
         elif [[ "$status" == "origin" ]]; then
-            local domain cdn_domain bot_dom
+            local domain cdn_domain bot_dom transports
             domain="$(get_state_val "domain" "-")"
             cdn_domain="$(get_state_val "cdn_domain" "-")"
             bot_dom="$(get_state_val "bot_domain" "-")"
+            transports="$(get_state_val "transports" "all")"
 
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🇷🇺 ORIGIN (Шлюз РФ)${NC}"
-            echo -e "  Origin: ${CYAN}${domain}${NC}  |  CDN: ${CYAN}${cdn_domain}${NC}  |  Bot: ${CYAN}${bot_dom}${NC}\n"
+            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🇷🇺 РУ ХАБ / ORIGIN${NC}"
+            echo -e "  Origin: ${CYAN}${domain}${NC}  |  CDN: ${CYAN}${cdn_domain}${NC}  |  Транспорты: ${GREEN}${transports}${NC}\n"
 
             echo -e "  ${BOLD}[1]${NC} 🔄 Управление Relay-узлами на Origin (Добавить / Удалить / Список)"
             echo -e "  ${BOLD}[2]${NC} 📊 Статус узла и подключенные клиенты"

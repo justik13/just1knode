@@ -750,6 +750,16 @@ lines = [
     ''
 ]
 
+tf_port = xray_inbound_ports.get('just1k-wl-turboflare') or xray_inbound_ports.get('just1k-wl-post')
+if tf_port:
+    lines.append('upstream xray_xhttp_turboflare {')
+    lines.append(f'    server 127.0.0.1:{tf_port};')
+    lines.append('    keepalive 128;')
+    lines.append('    keepalive_requests 100000;')
+    lines.append('    keepalive_timeout 300s;')
+    lines.append('}')
+    lines.append('')
+
 seen_codes = set()
 for r in relays:
     if not isinstance(r, dict):
