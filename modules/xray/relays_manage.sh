@@ -399,7 +399,7 @@ new_ib = {
             'xPaddingKey': 'dc',
             'xPaddingHeader': 'X-Cache',
             'xPaddingMethod': 'tokenish',
-            'xPaddingPlacement': 'queryInHeader'
+            'xPaddingPlacement': 'header'
         }
     },
     'sniffing': {'enabled': True, 'destOverride': ['tls', 'http', 'quic'], 'routeOnly': False}

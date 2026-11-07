@@ -1830,7 +1830,7 @@ esac
         default_ib = next(ib for ib in xray_conf["inbounds"] if ib["tag"] == "just1k-wl-default")
         self.assertEqual(default_ib["streamSettings"]["network"], "xhttp")
         self.assertEqual(
-            default_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "queryInHeader"
+            default_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "header"
         )
         self.assertEqual(
             default_ib["streamSettings"]["xhttpSettings"]["path"], f"{secret_path}/default"
@@ -1917,7 +1917,7 @@ esac
         self.assertIn("just1k-wl-inbound-de", inbound_tags)
         de_ib = next(ib for ib in xray_conf["inbounds"] if ib["tag"] == "just1k-wl-inbound-de")
         self.assertEqual(
-            de_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "queryInHeader"
+            de_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "header"
         )
         self.assertEqual(de_ib["streamSettings"]["xhttpSettings"]["path"], "/stream/de")
         self.assertEqual(
