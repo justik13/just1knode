@@ -625,19 +625,35 @@ rules.append({
     ],
     'outboundTag': 'just1k-wl-direct'
 })
+# Прямой выход для российских IP (geoip:ru)
 rules.append({
     'type': 'field',
-    'inboundTag': client_inbounds,
+    'inboundTag': ['just1k-wl-default'],
     'ip': ['geoip:ru'],
     'outboundTag': 'just1k-wl-direct'
 })
+for c_ib in client_inbounds:
+    if c_ib != 'just1k-wl-default':
+        rules.append({
+            'type': 'field',
+            'inboundTag': [c_ib],
+            'ip': ['geoip:ru'],
+            'outboundTag': 'just1k-wl-direct'
+        })
 
 # Default inbound (Россия): прямой выход в интернет через московский IP Origin-сервера
 rules.append({
     'type': 'field',
-    'inboundTag': client_inbounds,
+    'inboundTag': ['just1k-wl-default'],
     'outboundTag': 'just1k-wl-direct'
 })
+for c_ib in client_inbounds:
+    if c_ib != 'just1k-wl-default':
+        rules.append({
+            'type': 'field',
+            'inboundTag': [c_ib],
+            'outboundTag': 'just1k-wl-direct'
+        })
 
 final_config = dict(existing)
 final_config['log'] = {
@@ -1807,11 +1823,11 @@ for r in relays:
     relay_offset += 1
 
 # 4.4. Правило Direct для IP РФ (geoip:ru) — строго для прямого трафика РФ
-ip_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'ip' in r), None)
+ip_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'ip' in r and r.get('inboundTag') == ['just1k-wl-default']), None)
 if not ip_rule:
     ip_rule = {
         'type': 'field',
-        'inboundTag': direct_inbounds,
+        'inboundTag': ['just1k-wl-default'],
         'ip': ['geoip:ru'],
         'outboundTag': 'just1k-wl-direct'
     }
@@ -1819,19 +1835,28 @@ if not ip_rule:
 else:
     if 'geoip:ru' not in ip_rule.get('ip', []):
         ip_rule.setdefault('ip', []).append('geoip:ru')
-    ip_rule['inboundTag'] = direct_inbounds
+    ip_rule['inboundTag'] = ['just1k-wl-default']
 
-# 4.5. Дефолтное правило для прямого выхода с московского IP
-def_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'domain' not in r and 'ip' not in r and 'inboundTag' in r), None)
+# 4.5. Дефолтное правило для just1k-wl-default (Россия — прямой выход с московского IP)
+def_rule = next((r for r in rules if r.get('outboundTag') == 'just1k-wl-direct' and 'domain' not in r and 'ip' not in r and r.get('inboundTag') == ['just1k-wl-default']), None)
 if not def_rule:
     rules.append({
         'type': 'field',
-        'inboundTag': direct_inbounds,
+        'inboundTag': ['just1k-wl-default'],
         'outboundTag': 'just1k-wl-direct'
     })
 else:
-    def_rule['inboundTag'] = direct_inbounds
+    def_rule['inboundTag'] = ['just1k-wl-default']
     def_rule['outboundTag'] = 'just1k-wl-direct'
+
+for c_ib in direct_inbounds:
+    if c_ib != 'just1k-wl-default':
+        if not any(r.get('outboundTag') == 'just1k-wl-direct' and 'domain' not in r and 'ip' not in r and r.get('inboundTag') == [c_ib] for r in rules):
+            rules.append({
+                'type': 'field',
+                'inboundTag': [c_ib],
+                'outboundTag': 'just1k-wl-direct'
+            })
 
 cfg['routing']['rules'] = rules
 
