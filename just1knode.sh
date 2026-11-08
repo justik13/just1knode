@@ -1096,7 +1096,7 @@ cleanup_node_ufw_firewall_rules() {
             sorted_nums="$(printf "%s\n" "${r_nums[@]}" | sort -rn -u)"
             for r_n in $sorted_nums; do
                 if [[ -n "$r_n" ]]; then
-                    echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                    echo "y" | ufw --force delete "$r_n" >/dev/null 2>&1 || echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
                 fi
             done
         fi
@@ -1445,30 +1445,42 @@ uninstall_node() {
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/restart-xray-nginx.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/05-just1knode-nginx.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/05-just1knode-nginx.sh" 2>/dev/null || true
+    local cert_del_list=()
     if [[ -d "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal" ]]; then
         for rconf in "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal"/*.conf; do
             [[ -f "$rconf" ]] || continue
             if grep -Eq "(/run/just1knode|20-just1knode)" "$rconf" 2>/dev/null; then
+                local r_base
+                r_base="$(basename "$rconf" .conf)"
+                if [[ -n "$r_base" && ! " ${cert_del_list[*]:-} " =~ [[:space:]]${r_base}[[:space:]] ]]; then
+                    cert_del_list+=("$r_base")
+                fi
                 sed -i -E '/^[[:space:]]*(pre_hook|post_hook)[[:space:]]*=.*(\/run\/just1knode|20-just1knode).*/d' "$rconf" 2>/dev/null || true
             fi
         done
     fi
-    if [[ "$purge_certs" == "true" ]] && command -v certbot >/dev/null 2>&1; then
-        local cert_del_list=()
-        for d_key in "vless_domain" "sni" "domain"; do
-            local d_val
-            d_val="$(get_state_val "$d_key" 2>/dev/null || true)"
-            if [[ -n "$d_val" && "$d_val" != "-" && "$d_val" != "none" && "$d_val" != "null" ]]; then
-                if [[ ! " ${cert_del_list[*]:-} " =~ [[:space:]]${d_val}[[:space:]] ]]; then
-                    cert_del_list+=("$d_val")
+
+    for d_key in "vless_domain" "sni" "domain" "cdn_domain"; do
+        local d_val
+        d_val="$(get_state_val "$d_key" 2>/dev/null || true)"
+        if [[ -n "$d_val" && "$d_val" != "-" && "$d_val" != "none" && "$d_val" != "null" ]]; then
+            if [[ ! " ${cert_del_list[*]:-} " =~ [[:space:]]${d_val}[[:space:]] ]]; then
+                cert_del_list+=("$d_val")
+            fi
+        fi
+    done
+
+    if [[ "$purge_certs" == "true" ]]; then
+        for c_dom in "${cert_del_list[@]}"; do
+            if command -v certbot >/dev/null 2>&1; then
+                if certbot certificates 2>/dev/null | grep -q "Certificate Name: ${c_dom}\b"; then
+                    certbot delete --cert-name "$c_dom" --non-interactive >/dev/null 2>&1 || true
                 fi
             fi
-        done
-        for c_dom in "${cert_del_list[@]}"; do
-            if certbot certificates 2>/dev/null | grep -q "Certificate Name: ${c_dom}\b"; then
-                certbot delete --cert-name "$c_dom" --non-interactive >/dev/null 2>&1 || true
-                log "SSL-сертификат Let's Encrypt для ${c_dom} удален (--purge-certs)."
-            fi
+            rm -rf "${LETSENCRYPT_DIR:-/etc/letsencrypt}/live/${c_dom}" \
+                   "${LETSENCRYPT_DIR:-/etc/letsencrypt}/archive/${c_dom}" \
+                   "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal/${c_dom}.conf" 2>/dev/null || true
+            log "SSL-сертификат Let's Encrypt для ${c_dom} удален (--purge-certs)."
         done
     fi
 
