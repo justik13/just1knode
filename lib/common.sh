@@ -1399,6 +1399,9 @@ remove_antiabuse_protection() {
     # Удаление xt_string из автозагрузки при удалении
     if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
         sed -i '/^xt_string$/d' /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+        if [[ ! -s /etc/modules-load.d/just1knode.conf ]] || ! grep -q '[^[:space:]]' /etc/modules-load.d/just1knode.conf 2>/dev/null; then
+            rm -f /etc/modules-load.d/just1knode.conf 2>/dev/null || true
+        fi
     fi
 
     set_state_val "abuse_protection" "disabled"

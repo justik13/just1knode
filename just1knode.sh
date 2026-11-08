@@ -1389,16 +1389,22 @@ uninstall_node() {
                         continue
                     fi
 
-                    local t_port
-                    t_port="$(echo "$r_body" | awk '{print $1}' | sed -E 's|/(tcp|udp)$||' | tr -d '[:space:]')"
-                    if [[ -n "$t_port" ]] && is_ssh_port "$t_port"; then
+                    local first_tok t_port
+                    first_tok="$(echo "$r_body" | awk '{print $1}')"
+                    t_port="${first_tok%/*}"
+                    [[ "$t_port" =~ ^[0-9]+$ ]] || continue
+                    if is_ssh_port "$t_port"; then
                         continue
                     fi
 
                     # Очистка строго собственных правил Just1kNode
                     local is_node_rule=0
                     if [[ "$t_port" == "8444" || "$t_port" == "8443" || "$t_port" == "443" ]]; then
-                        is_node_rule=1
+                        if [[ "$t_port" == "443" ]] && echo "$r_body" | grep -qiE '\b(https web service|caddy)\b'; then
+                            is_node_rule=0
+                        else
+                            is_node_rule=1
+                        fi
                     elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
                         is_node_rule=1
                     elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification))'; then
@@ -1444,8 +1450,10 @@ uninstall_node() {
             ufw delete allow 8443 >/dev/null 2>&1 || true
         fi
         if ! is_ssh_port "443"; then
-            ufw delete allow 443/tcp >/dev/null 2>&1 || true
-            ufw delete allow 443 >/dev/null 2>&1 || true
+            if ! (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^just1kbot_caddy\b"); then
+                ufw delete allow 443/tcp >/dev/null 2>&1 || true
+                ufw delete allow 443 >/dev/null 2>&1 || true
+            fi
         fi
     fi
 
