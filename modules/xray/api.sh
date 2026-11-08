@@ -74,7 +74,7 @@ deploy_xray_api_sources() {
         fi
         local download_ok=0
         for archive_url in "${archive_urls[@]}"; do
-            if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
+            if curl -4 -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
                 download_ok=1
                 break
             fi

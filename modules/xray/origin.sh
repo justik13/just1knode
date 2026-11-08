@@ -263,7 +263,7 @@ install_xray_origin_node() {
     if [[ -n "$bot_domain" ]]; then
         info "Проверка связи с ботом по HTTPS (https://${bot_domain}/sub/wl/ping)..."
         local health_code
-        health_code="$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "https://${bot_domain}/sub/wl/ping" 2>/dev/null || echo "000")"
+        health_code="$(curl -4 -s --max-time 5 -o /dev/null -w "%{http_code}" "https://${bot_domain}/sub/wl/ping" 2>/dev/null || echo "000")"
         if [[ "$health_code" == "200" ]]; then
             log "Эндпоинт бота https://${bot_domain}/sub/wl/ping доступен (HTTP 200, backend и TLS валидны)."
         elif [[ "$health_code" == "404" ]]; then

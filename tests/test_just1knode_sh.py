@@ -4003,6 +4003,47 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
             self.assertEqual(relay_ib2["settings"]["clients"][0]["id"], "uuid-empty-branch")
             self.assertEqual(relay_ib2["settings"]["clients"][0]["flow"], "xtls-rprx-vision")
 
+    def test_cleanup_ufw_firewall_rules_safe_parsing(self):
+        """Invariant: UFW rule cleanup must not use faulty sed syntax and must be called by uninstall and reset."""
+        just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn("cleanup_node_ufw_firewall_rules() {", just1knode_sh)
+        self.assertNotIn("sed -E 's|/(tcp|udp)$||'", just1knode_sh)
+        self.assertIn("cleanup_node_ufw_firewall_rules", just1knode_sh)
+
+        # reset_node must invoke cleanup_node_ufw_firewall_rules
+        reset_def = just1knode_sh[just1knode_sh.find("reset_node() {"):just1knode_sh.find("uninstall_node() {")]
+        self.assertIn("cleanup_node_ufw_firewall_rules", reset_def)
+
+        # uninstall_node must invoke cleanup_node_ufw_firewall_rules
+        uninstall_def = just1knode_sh[just1knode_sh.find("uninstall_node() {"):]
+        self.assertIn("cleanup_node_ufw_firewall_rules", uninstall_def)
+
+    def test_uninstall_node_purge_certs_support(self):
+        """Invariant: uninstall_node supports --purge-certs and removes Let's Encrypt certificates."""
+        just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        self.assertIn("--purge-certs", just1knode_sh)
+        self.assertIn("certbot delete --cert-name", just1knode_sh)
+
+    def test_ipv4_enforcement_in_network_fetching(self):
+        """Invariant: Network fetch operations in just1knode use IPv4 (-4) to prevent hangs on IPv6-disabled hosts."""
+        just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
+        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
+
+        self.assertIn("curl -4 -fsSL", just1knode_sh)
+        self.assertIn("wget -4 -q", just1knode_sh)
+        self.assertIn("curl -4 -fsSL", core_sh)
+        self.assertIn("wget -4 -q", core_sh)
+        self.assertIn("curl -4 -fsSL", api_sh)
+
+    def test_relay_and_vless_service_isolation(self):
+        """Invariant: VLESS uninstaller stops xray-api and properly cleans UFW without checking relay status."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        uninstall_vless_block = relay_sh[relay_sh.find("uninstall_vless_component() {"):relay_sh.find("list_active_clients_node() {")]
+        self.assertNotIn('if [[ "$cur_has_r_init" != "1" ]]; then\n        systemctl stop xray-api', uninstall_vless_block)
+        self.assertIn("systemctl stop xray-api", uninstall_vless_block)
+        self.assertIn('ufw delete allow from "$v_bot_ip" to any port 8444 proto tcp', uninstall_vless_block)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,7 +24,7 @@ download_and_verify_xray() {
     fi
 
     log "Скачивание Xray-core v${XRAY_VERSION_PINNED} (${arch})..."
-    if ! curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$target_zip"; then
+    if ! curl -4 -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$target_zip"; then
         error "Не удалось скачать Xray-core по адресу: $url"
     fi
 
@@ -164,7 +164,7 @@ update_node() {
         return
     fi
 
-    log "Загрузка и обновление модулей just1knode из репозитория GitHub..."
+    info "1/4. Загрузка исходных модулей из репозитория GitHub..."
     local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
     local ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
     local tmp_tar
@@ -185,13 +185,14 @@ update_node() {
 
     local download_ok=0
     for archive_url in "${archive_urls[@]}"; do
-        if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null || wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
+        if curl -4 -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null || wget -4 -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
             download_ok=1
             break
         fi
     done
 
     if [[ $download_ok -eq 1 ]]; then
+        info "2/4. Распаковка и проверка целостности архива..."
         if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 --no-same-owner 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_dir"
             error "Ошибка целостности архива: распаковка не удалась. Обновление прервано."
@@ -222,6 +223,7 @@ update_node() {
 
         # Обновление модулей утилиты и/или API
         if [[ -n "$node_src_dir" || -d "${tmp_dir}/scripts/xray_api" ]]; then
+            info "3/4. Синхронизация модулей и сервисов узла..."
             # Подготовка безопасного каталога для резервных копий
             local backup_root=""
             local node_backup=""
@@ -460,6 +462,7 @@ update_node_post() {
     acquire_just1knode_lock
     trap release_just1knode_lock RETURN EXIT
 
+    info "4/4. Самодиагностика, авто-конфигурация и проверка сетевых политик..."
     migrate_legacy_state
     heal_node_firewall_and_stealth
 

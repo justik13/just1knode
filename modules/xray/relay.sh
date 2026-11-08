@@ -918,7 +918,7 @@ EOF
     fi
     configure_safe_ufw "${extra_ufw_ports[@]}"
     heal_node_firewall_and_stealth
-    if ufw allow from "$origin_ip" to any port "$relay_port" proto tcp >/dev/null 2>&1; then
+    if ufw allow from "$origin_ip" to any port "$relay_port" proto tcp comment "just1knode relay tunnel" >/dev/null 2>&1; then
         log "Порт туннеля ${relay_port}/tcp открыт строго для ${origin_ip}."
     else
         if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
@@ -2073,13 +2073,14 @@ with open(out_f, 'w', encoding='utf-8') as f:
             ufw delete allow 443/tcp >/dev/null 2>&1 || true
         fi
 
-        # Откат правила UFW для 8444 (если 8444 не использовался ранее для VLESS, Origin или Relay)
-        if [[ "$orig_has_vless" != "1" && "$orig_role" != "origin" && "$orig_role" != "relay" && "$(get_state_val "has_relay" "0")" != "1" ]]; then
+        # Откат правила UFW для 8444 (если 8444 не использовался ранее для VLESS или Origin)
+        if [[ "$orig_has_vless" != "1" && "$orig_role" != "origin" ]]; then
             if ! is_ssh_port "8444"; then
                 if [[ -n "$bot_ip" ]]; then
                     ufw delete allow from "$bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
                 fi
                 ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+                ufw delete allow 8444 >/dev/null 2>&1 || true
             fi
         fi
 
@@ -2279,15 +2280,11 @@ uninstall_vless_component() {
         return 0
     fi
 
-    local cur_has_r_init
-    cur_has_r_init="$(get_state_val "has_relay" "0")"
-
-    if [[ "$cur_has_r_init" != "1" ]]; then
-        systemctl stop xray-api 2>/dev/null || true
-        systemctl disable xray-api 2>/dev/null || true
-        rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-    fi
+    # Остановка и удаление службы xray-api (Relay узлы не используют API)
+    systemctl stop xray-api 2>/dev/null || true
+    systemctl disable xray-api 2>/dev/null || true
+    rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
 
     rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
     if [[ -f "/etc/nginx/sites-available/default.user.bak" && ! -e "/etc/nginx/sites-enabled/default" ]]; then
@@ -2336,8 +2333,14 @@ if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', []))
     fi
 
     ufw delete allow 443/tcp >/dev/null 2>&1 || true
-    if [[ "$cur_has_r_init" != "1" ]]; then
+    local v_bot_ip
+    v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    if ! is_ssh_port "8444"; then
+        if [[ -n "$v_bot_ip" ]]; then
+            ufw delete allow from "$v_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+        fi
         ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+        ufw delete allow 8444 >/dev/null 2>&1 || true
     fi
 
     set_state_val "has_vless" "0"
