@@ -62,12 +62,12 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         download_ok=0
         for archive_url in "${local_archive_urls[@]}"; do
             if command -v curl >/dev/null 2>&1; then
-                if curl -4 -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
+                if curl -fsSL --connect-timeout 15 --max-time 120 "$archive_url" -o "$tmp_tar" 2>/dev/null; then
                     download_ok=1
                     break
                 fi
             elif command -v wget >/dev/null 2>&1; then
-                if wget -4 -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
+                if wget -q --timeout=120 --tries=2 -O "$tmp_tar" "$archive_url" 2>/dev/null; then
                     download_ok=1
                     break
                 fi
@@ -195,7 +195,7 @@ check_node_update_on_entry() {
     # Fallback на проверку VERSION через curl (для чистых установок без файла COMMIT и без git)
     command -v curl >/dev/null 2>&1 || return 0
     local remote_ver newest
-    remote_ver="$(curl -4 -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
     [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     newest="$(printf '%s\n%s\n' "$JUST1KNODE_VERSION" "$remote_ver" | sort -V | tail -n 1)"
@@ -1043,92 +1043,6 @@ if os.path.exists(rf):
     fi
 }
 
-cleanup_node_ufw_firewall_rules() {
-    if ! command -v ufw >/dev/null 2>&1; then
-        return 0
-    fi
-    local st_relay_port st_origin_ip st_bot_ip
-    st_relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
-    st_origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
-    st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-
-    if ufw status 2>/dev/null | grep -qi "Status: active"; then
-        local ufw_num_out
-        ufw_num_out="$(ufw status numbered 2>/dev/null || true)"
-        local r_nums=()
-        while IFS= read -r rule_line; do
-            [[ -z "$rule_line" ]] && continue
-            if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
-                local r_n="${BASH_REMATCH[1]}"
-                local r_body="${BASH_REMATCH[2]}"
-
-                # Zero-Lockout: категорически пропускаем любые SSH-правила
-                if echo "$r_body" | grep -qiE '\bssh\b|ssh access'; then
-                    continue
-                fi
-
-                local first_tok t_port
-                first_tok="$(echo "$r_body" | awk '{print $1}')"
-                t_port="${first_tok%/*}"
-                t_port="${t_port//[^0-9]/}"
-                if [[ -n "$t_port" ]] && is_ssh_port "$t_port"; then
-                    continue
-                fi
-
-                # Очистка строго собственных правил Just1kNode
-                local is_node_rule=0
-                if [[ "$t_port" == "8444" || "$t_port" == "8443" || "$t_port" == "443" ]]; then
-                    is_node_rule=1
-                elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
-                    is_node_rule=1
-                elif echo "$r_body" | grep -qiE '\bjust1k(node)?\b'; then
-                    is_node_rule=1
-                fi
-
-                if [[ $is_node_rule -eq 1 ]]; then
-                    r_nums+=("$r_n")
-                fi
-            fi
-        done <<< "$ufw_num_out"
-
-        if [[ ${#r_nums[@]} -gt 0 ]]; then
-            local sorted_nums
-            sorted_nums="$(printf "%s\n" "${r_nums[@]}" | sort -rn -u)"
-            for r_n in $sorted_nums; do
-                if [[ -n "$r_n" ]]; then
-                    echo "y" | ufw --force delete "$r_n" >/dev/null 2>&1 || echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
-                fi
-            done
-        fi
-    fi
-
-    if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
-        if [[ -n "$st_origin_ip" ]]; then
-            ufw delete allow from "$st_origin_ip" to any port "$st_relay_port" proto tcp >/dev/null 2>&1 || true
-        fi
-        ufw delete allow "$st_relay_port"/tcp >/dev/null 2>&1 || true
-        ufw delete allow "$st_relay_port" >/dev/null 2>&1 || true
-    fi
-    if ! is_ssh_port "8444"; then
-        if [[ -n "$st_bot_ip" ]]; then
-            ufw delete allow from "$st_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
-        fi
-        ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-        ufw delete allow 8444 >/dev/null 2>&1 || true
-    fi
-    if ! is_ssh_port "8443"; then
-        if [[ -n "$st_bot_ip" ]]; then
-            ufw delete allow from "$st_bot_ip" to any port 8443 proto tcp >/dev/null 2>&1 || true
-        fi
-        ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-        ufw delete allow 8443 >/dev/null 2>&1 || true
-    fi
-    if ! is_ssh_port "443"; then
-        ufw delete allow 443/tcp >/dev/null 2>&1 || true
-        ufw delete allow 443 >/dev/null 2>&1 || true
-    fi
-}
-
 reset_node() {
     title "СБРОС И ПЕРЕУСТАНОВКА УЗЛА"
     check_root
@@ -1142,10 +1056,9 @@ reset_node() {
     echo -e "${BOLD}Что произойдет:${NC}"
     echo -e "  1. ${BOLD}Защитный бэкап:${NC} автоматическое сохранение текущего состояния в /var/backups/just1knode/"
     echo -e "  2. ${BOLD}Системные службы:${NC} остановка и отключение xray, xray-api"
-    echo -e "  3. ${BOLD}Фаервол UFW:${NC} безопасная зачистка открытых сетевых портов сбрасываемой роли"
-    echo -e "  4. ${BOLD}Конфигурация узла:${NC} очистка /etc/just1knode (роль, релеи, state.json)"
-    echo -e "  5. ${BOLD}Веб-сервер Nginx:${NC} удаление хостов just1knode, восстановление дефолтного сайта"
-    echo -e "  6. ${BOLD}Сохранение системы:${NC} утилита just1knode, ядро Xray и системные пакеты НЕ удаляются"
+    echo -e "  3. ${BOLD}Конфигурация узла:${NC} очистка /etc/just1knode (роль, релеи, state.json)"
+    echo -e "  4. ${BOLD}Веб-сервер Nginx:${NC} удаление хостов just1knode, восстановление дефолтного сайта"
+    echo -e "  5. ${BOLD}Сохранение системы:${NC} утилита just1knode, ядро Xray и системные пакеты НЕ удаляются"
     echo ""
     echo -e "${BOLD}${YELLOW}⚠️  СЕРВЕР ПЕРЕСТАНЕТ ПРИНИМАТЬ ТРАФИК ДО ПОВТОРНОЙ НАСТРОЙКИ РОЛИ!${NC}"
     echo -e "${YELLOW}════════════════════════════════════════════════════════════════════════════════${NC}"
@@ -1173,7 +1086,6 @@ reset_node() {
     systemctl disable xray xray-api 2>/dev/null || true
     remove_traffic_watchdog_timer
     remove_antiabuse_protection 2>/dev/null || true
-    cleanup_node_ufw_firewall_rules
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
@@ -1206,7 +1118,6 @@ uninstall_node() {
     local force=false
     local confirm_code=""
     local purge_backups=false
-    local purge_certs=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1228,10 +1139,6 @@ uninstall_node() {
                 ;;
             --purge-backups)
                 purge_backups=true
-                shift
-                ;;
-            --purge-certs)
-                purge_certs=true
                 shift
                 ;;
             --uninstall)
@@ -1319,25 +1226,6 @@ uninstall_node() {
                 if [[ "$c_purge" =~ ^[Yy]$ ]]; then
                     purge_backups=true
                 fi
-            fi
-        fi
-
-        # Интерактивный запрос на удаление связанных SSL-сертификатов Let's Encrypt
-        local cert_domains=()
-        for d_key in "vless_domain" "sni" "domain"; do
-            local d_val
-            d_val="$(get_state_val "$d_key" 2>/dev/null || true)"
-            if [[ -n "$d_val" && "$d_val" != "-" && "$d_val" != "none" && "$d_val" != "null" ]]; then
-                if [[ ! " ${cert_domains[*]:-} " =~ [[:space:]]${d_val}[[:space:]] ]]; then
-                    cert_domains+=("$d_val")
-                fi
-            fi
-        done
-        if [[ "$purge_certs" != "true" && ${#cert_domains[@]} -gt 0 ]] && command -v certbot >/dev/null 2>&1; then
-            local c_certs="n"
-            read -r -t 30 -p "Удалить SSL-сертификаты Let's Encrypt (${cert_domains[*]})? [y/N]: " c_certs || true
-            if [[ "$c_certs" =~ ^[Yy]$ ]]; then
-                purge_certs=true
             fi
         fi
     fi
@@ -1445,42 +1333,12 @@ uninstall_node() {
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/deploy/restart-xray-nginx.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/pre/05-just1knode-nginx.sh" \
           "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal-hooks/post/05-just1knode-nginx.sh" 2>/dev/null || true
-    local cert_del_list=()
     if [[ -d "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal" ]]; then
         for rconf in "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal"/*.conf; do
             [[ -f "$rconf" ]] || continue
             if grep -Eq "(/run/just1knode|20-just1knode)" "$rconf" 2>/dev/null; then
-                local r_base
-                r_base="$(basename "$rconf" .conf)"
-                if [[ -n "$r_base" && ! " ${cert_del_list[*]:-} " =~ [[:space:]]${r_base}[[:space:]] ]]; then
-                    cert_del_list+=("$r_base")
-                fi
                 sed -i -E '/^[[:space:]]*(pre_hook|post_hook)[[:space:]]*=.*(\/run\/just1knode|20-just1knode).*/d' "$rconf" 2>/dev/null || true
             fi
-        done
-    fi
-
-    for d_key in "vless_domain" "sni" "domain" "cdn_domain"; do
-        local d_val
-        d_val="$(get_state_val "$d_key" 2>/dev/null || true)"
-        if [[ -n "$d_val" && "$d_val" != "-" && "$d_val" != "none" && "$d_val" != "null" ]]; then
-            if [[ ! " ${cert_del_list[*]:-} " =~ [[:space:]]${d_val}[[:space:]] ]]; then
-                cert_del_list+=("$d_val")
-            fi
-        fi
-    done
-
-    if [[ "$purge_certs" == "true" ]]; then
-        for c_dom in "${cert_del_list[@]}"; do
-            if command -v certbot >/dev/null 2>&1; then
-                if certbot certificates 2>/dev/null | grep -q "Certificate Name: ${c_dom}\b"; then
-                    certbot delete --cert-name "$c_dom" --non-interactive >/dev/null 2>&1 || true
-                fi
-            fi
-            rm -rf "${LETSENCRYPT_DIR:-/etc/letsencrypt}/live/${c_dom}" \
-                   "${LETSENCRYPT_DIR:-/etc/letsencrypt}/archive/${c_dom}" \
-                   "${LETSENCRYPT_DIR:-/etc/letsencrypt}/renewal/${c_dom}.conf" 2>/dev/null || true
-            log "SSL-сертификат Let's Encrypt для ${c_dom} удален (--purge-certs)."
         done
     fi
 
@@ -1510,7 +1368,94 @@ uninstall_node() {
     fi
 
     info "9/11. Очистка правил фаервола (UFW)..."
-    cleanup_node_ufw_firewall_rules
+    if command -v ufw >/dev/null 2>&1; then
+        local st_relay_port st_origin_ip st_bot_ip
+        st_relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
+        st_origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
+        st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+
+        if ufw status 2>/dev/null | grep -qi "Status: active"; then
+            local ufw_num_out
+            ufw_num_out="$(ufw status numbered 2>/dev/null || true)"
+            local r_nums=()
+            while IFS= read -r rule_line; do
+                [[ -z "$rule_line" ]] && continue
+                if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+                    local r_n="${BASH_REMATCH[1]}"
+                    local r_body="${BASH_REMATCH[2]}"
+
+                    # Zero-Lockout: категорически пропускаем любые SSH-правила
+                    if echo "$r_body" | grep -qiE '\bssh\b|ssh access'; then
+                        continue
+                    fi
+
+                    local first_tok t_port
+                    first_tok="$(echo "$r_body" | awk '{print $1}')"
+                    t_port="${first_tok%/*}"
+                    [[ "$t_port" =~ ^[0-9]+$ ]] || continue
+                    if is_ssh_port "$t_port"; then
+                        continue
+                    fi
+
+                    # Очистка строго собственных правил Just1kNode
+                    local is_node_rule=0
+                    if [[ "$t_port" == "8444" || "$t_port" == "8443" || "$t_port" == "443" ]]; then
+                        if [[ "$t_port" == "443" ]] && echo "$r_body" | grep -qiE '\b(https web service|caddy)\b'; then
+                            is_node_rule=0
+                        else
+                            is_node_rule=1
+                        fi
+                    elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
+                        is_node_rule=1
+                    elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification))'; then
+                        is_node_rule=1
+                    fi
+
+                    if [[ $is_node_rule -eq 1 ]]; then
+                        r_nums+=("$r_n")
+                    fi
+                fi
+            done <<< "$ufw_num_out"
+
+            if [[ ${#r_nums[@]} -gt 0 ]]; then
+                local sorted_nums
+                sorted_nums="$(printf "%s\n" "${r_nums[@]}" | sort -rn -u)"
+                for r_n in $sorted_nums; do
+                    if [[ -n "$r_n" ]]; then
+                        echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                    fi
+                done
+            fi
+        fi
+
+        if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
+            if [[ -n "$st_origin_ip" ]]; then
+                ufw delete allow from "$st_origin_ip" to any port "$st_relay_port" proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow "$st_relay_port"/tcp >/dev/null 2>&1 || true
+            ufw delete allow "$st_relay_port" >/dev/null 2>&1 || true
+        fi
+        if ! is_ssh_port "8444"; then
+            if [[ -n "$st_bot_ip" ]]; then
+                ufw delete allow from "$st_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8444 >/dev/null 2>&1 || true
+        fi
+        if ! is_ssh_port "8443"; then
+            if [[ -n "$st_bot_ip" ]]; then
+                ufw delete allow from "$st_bot_ip" to any port 8443 proto tcp >/dev/null 2>&1 || true
+            fi
+            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8443 >/dev/null 2>&1 || true
+        fi
+        if ! is_ssh_port "443"; then
+            if ! (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^just1kbot_caddy\b"); then
+                ufw delete allow 443/tcp >/dev/null 2>&1 || true
+                ufw delete allow 443 >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
 
     info "10/11. Удаление состояния, бэкапов и блокировок..."
     rm -rf "${STATE_DIR:-/etc/just1knode}" 2>/dev/null || true

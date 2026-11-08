@@ -2106,6 +2106,8 @@ with open(out_f, 'w', encoding='utf-8') as f:
         if [[ "$orig_has_vless" != "1" && "$(get_state_val "has_relay" "0")" != "1" ]]; then
             systemctl stop xray-api 2>/dev/null || true
             systemctl disable xray-api 2>/dev/null || true
+            rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
+            systemctl daemon-reload 2>/dev/null || true
             if [[ -d "${XRAY_API_DIR}/venv" && ! -f "${XRAY_API_DIR}/venv/bin/uvicorn" ]]; then
                 rm -rf "${XRAY_API_DIR}/venv" 2>/dev/null || true
             fi
@@ -2283,7 +2285,7 @@ uninstall_vless_component() {
     # Остановка и удаление службы xray-api (Relay узлы не используют API)
     systemctl stop xray-api 2>/dev/null || true
     systemctl disable xray-api 2>/dev/null || true
-    rm -f /etc/systemd/system/xray-api.service 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
     rm -f /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf 2>/dev/null || true
