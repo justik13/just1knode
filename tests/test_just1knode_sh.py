@@ -4002,6 +4002,21 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
             self.assertEqual(len(relay_ib2["settings"]["clients"]), 1)
             self.assertEqual(relay_ib2["settings"]["clients"][0]["id"], "uuid-empty-branch")
             self.assertEqual(relay_ib2["settings"]["clients"][0]["flow"], "xtls-rprx-vision")
+            self.assertEqual(relay_ib2["settings"]["fallbacks"], [{"dest": "127.0.0.1:80"}])
+
+    def test_relay_port_flexibility_and_fallback_invariants(self):
+        """Verify relay port flexibility on dedicated nodes and anti-probing fallbacks."""
+        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
+        # 1. Flexible default port selection based on has_vless presence
+        self.assertIn('default_relay_port="443"', relay_sh)
+        self.assertIn('default_relay_port="8443"', relay_sh)
+        self.assertIn('if [[ "$relay_port" == "443" && "$cur_has_vless" == "1" ]]', relay_sh)
+
+        # 2. Guard in install_vless_direct_node preventing port collision when relay is on 443
+        self.assertIn('if [[ "$cur_has_relay" == "1" && "$cur_relay_port" == "443" ]]', relay_sh)
+
+        # 3. Fallbacks in initial relay installation inbound
+        self.assertIn('"dest": "127.0.0.1:80"', relay_sh)
 
 
 if __name__ == "__main__":

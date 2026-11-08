@@ -507,11 +507,20 @@ install_xray_relay_node() {
     local dest_server="${3:-}"
     local sec_mode="tls"
 
+    local cur_has_vless
+    cur_has_vless="$(get_state_val "has_vless" "0")"
+    local default_relay_port="10443"
+    if [[ "$cur_has_vless" == "0" ]]; then
+        default_relay_port="443"
+    else
+        default_relay_port="8443"
+    fi
+
     # Интерактивный опросник, если аргументы не переданы
     if [[ -z "$relay_port" ]]; then
         if [[ -t 0 ]]; then
             while true; do
-                if ! read -rp "Порт туннеля Relay [по умолчанию: 10443, 0 для отмены]: " relay_port_in; then
+                if ! read -rp "Порт туннеля Relay [по умолчанию: ${default_relay_port}, 0 для отмены]: " relay_port_in; then
                     warn "Ввод прерван."
                     return 0
                 fi
@@ -520,13 +529,13 @@ install_xray_relay_node() {
                     warn "Настройка Relay отменена."
                     return 0
                 fi
-                relay_port="${relay_port_in:-10443}"
+                relay_port="${relay_port_in:-$default_relay_port}"
                 if ! [[ "$relay_port" =~ ^[0-9]+$ ]] || (( relay_port < 1 || relay_port > 65535 )); then
                     warn "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}'). Попробуйте еще раз."
                     continue
                 fi
-                if [[ "$relay_port" == "443" ]]; then
-                    warn "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
+                if [[ "$relay_port" == "443" && "$cur_has_vless" == "1" ]]; then
+                    warn "Порт 443 занят клиентским входом VLESS Direct на этом узле. Порт туннеля Relay должен отличаться (рекомендуется: 8443, 2053, 2083 или 10443)."
                     continue
                 fi
                 if is_ssh_port "$relay_port"; then
@@ -536,7 +545,7 @@ install_xray_relay_node() {
                 break
             done
         else
-            relay_port="10443"
+            relay_port="$default_relay_port"
         fi
     fi
 
@@ -545,8 +554,8 @@ install_xray_relay_node() {
         error "Порт туннеля Relay должен быть целым числом в диапазоне 1..65535 (задано: '${relay_port}')."
         return 1
     fi
-    if [[ "$relay_port" == "443" ]]; then
-        error "Порт 443 зарезервирован для клиентского входа VLESS Direct. Порт туннеля Relay должен отличаться (например: 10443)."
+    if [[ "$relay_port" == "443" && "$cur_has_vless" == "1" ]]; then
+        error "Порт 443 занят клиентским входом VLESS Direct на этом узле. Порт туннеля Relay должен отличаться (рекомендуется: 8443, 2053, 2083 или 10443)."
         return 1
     fi
     if is_ssh_port "$relay_port"; then
@@ -800,7 +809,12 @@ print('[]')
             "flow": "xtls-rprx-vision"
           }
         ],
-        "decryption": "none"
+        "decryption": "none",
+        "fallbacks": [
+          {
+            "dest": "127.0.0.1:80"
+          }
+        ]
       },
       "streamSettings": ${stream_settings_json},
       "sniffing": {
@@ -1488,7 +1502,8 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
             'protocol': 'vless',
             'settings': {
                 'clients': [{'id': tunnel_uuid, 'flow': 'xtls-rprx-vision'}],
-                'decryption': 'none'
+                'decryption': 'none',
+                'fallbacks': [{'dest': '127.0.0.1:80'}]
             },
             'streamSettings': {
                 'network': 'tcp',
@@ -1507,6 +1522,7 @@ if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_ke
         inbounds.insert(0, relay_ib)
     elif relay_ib:
         relay_ib['tag'] = 'inbound-tls'
+        relay_ib.setdefault('settings', {})['fallbacks'] = [{'dest': '127.0.0.1:80'}]
         clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])
         if not isinstance(clients, list):
             clients = []
@@ -1798,6 +1814,15 @@ install_vless_direct_node() {
     prev_role="$(get_node_status)"
     if [[ "$prev_role" == "origin" ]]; then
         warn "Узел уже настроен как Origin. Установка VLESS на Origin запрещена (Origin строго изолирован под Белый Интернет)."
+        return 1
+    fi
+
+    local cur_has_relay
+    cur_has_relay="$(get_state_val "has_relay" "0")"
+    local cur_relay_port
+    cur_relay_port="$(get_state_val "relay_port" "")"
+    if [[ "$cur_has_relay" == "1" && "$cur_relay_port" == "443" ]]; then
+        error "Компонент Relay на этом узле занимает порт 443. VLESS Direct требует порт 443 для клиентских подключений. Перенастройте Relay на альтернативный порт (например: 8443, 2053 или 10443) перед установкой VLESS Direct."
         return 1
     fi
 

@@ -1,6 +1,6 @@
 [project]
 name = "just1knode"
-version = "2.5.0"
+version = "2.5.1"
 description = "Modular server node utility and microservices for Xray (VLESS over XHTTP and VLESS TLS)"
 requires-python = ">=3.12"
 
