@@ -4011,10 +4011,17 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("manage_traffic_limit_menu", traffic_limit_sh)
         self.assertNotIn("ConditionPathExists", traffic_limit_sh)
 
+        # Chronological latest month extraction resilience
+        self.assertIn("max(months", traffic_limit_sh)
+
+        # Reset day preservation from state/config
+        self.assertIn('get_state_val "traffic_reset_day"', traffic_limit_sh)
+
         # CLI and menu in just1knode.sh
         self.assertIn('source "${SCRIPT_DIR}/lib/traffic_limit.sh"', just1knode_sh)
         self.assertIn("manage_traffic_limit_menu", just1knode_sh)
         self.assertIn("limit|traffic)", just1knode_sh)
+        self.assertIn('set) set_traffic_limit "${3:-}" "${4:-}"', just1knode_sh)
         self.assertIn("just1knode limit [set <GB> [day] | off | status]", just1knode_sh)
 
 

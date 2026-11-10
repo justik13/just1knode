@@ -1813,7 +1813,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             limit|traffic)
                 case "${2:-}" in
-                    set) set_traffic_limit "${3:-}" "${4:-1}" ;;
+                    set) set_traffic_limit "${3:-}" "${4:-}" ;;
                     reset-day|day) set_traffic_reset_day "${3:-1}" ;;
                     disable|off) disable_traffic_limit ;;
                     check) check_traffic_limit ;;

@@ -104,7 +104,8 @@ try:
                 continue
             months = iface.get('traffic', {}).get('month', [])
             if months:
-                m = months[0]
+                # Chronologically latest month entry
+                m = max(months, key=lambda x: (x.get('date', {}).get('year', 0), x.get('date', {}).get('month', 0), x.get('id', 0)))
                 total += int(m.get('rx', 0)) + int(m.get('tx', 0))
 except Exception:
     pass
@@ -226,10 +227,15 @@ check_traffic_limit() {
 
 set_traffic_limit() {
     local limit_gb="${1:-}"
-    local reset_day="${2:-1}"
+    local reset_day="${2:-}"
 
     if [[ -z "$limit_gb" || ! "$limit_gb" =~ ^[1-9][0-9]*$ ]]; then
         error "Укажите корректный лимит трафика в ГБ (целое положительное число, например: 3000)."
+    fi
+
+    if [[ -z "$reset_day" ]]; then
+        reset_day="$(get_traffic_limit_val "reset_day" "")"
+        reset_day="${reset_day:-$(get_state_val "traffic_reset_day" "1")}"
     fi
 
     if [[ ! "$reset_day" =~ ^[1-9][0-9]*$ ]] || (( reset_day < 1 || reset_day > 31 )); then
@@ -258,6 +264,8 @@ set_traffic_reset_day() {
         error "Некорректный день сброса (укажите число от 1 до 31)."
     fi
 
+    ensure_vnstat >/dev/null 2>&1 || true
+
     local limit_gb
     limit_gb="$(get_traffic_limit_val "limit_gb" "")"
     if [[ -z "$limit_gb" || "$limit_gb" -le 0 ]]; then
@@ -281,13 +289,19 @@ disable_traffic_limit() {
 
     remove_traffic_limit_timer
 
-    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || -f "$TRAFFIC_LEGACY_CUTOFF_FLAG" ]]; then
-        rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
-        set_state_val "traffic_cutoff_triggered" "false" 2>/dev/null || true
-        if command -v systemctl >/dev/null 2>&1; then
+    local need_start=0
+    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || -f "$TRAFFIC_LEGACY_CUTOFF_FLAG" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true" ]]; then
+        need_start=1
+    fi
+
+    rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
+    set_state_val "traffic_cutoff_triggered" "false" 2>/dev/null || true
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if [[ "$need_start" -eq 1 ]] || ! systemctl is-active --quiet xray 2>/dev/null; then
             systemctl start xray 2>/dev/null || true
+            log "Служба Xray автоматически запущена после снятия лимита."
         fi
-        log "Служба Xray автоматически запущена после снятия лимита."
     fi
 
     log "Лимит трафика отключен. Сервер переведен в безлимитный режим."
@@ -311,12 +325,12 @@ show_traffic_limit_status() {
     if [[ "$is_configured" -eq 1 ]]; then
         local calc_info
         calc_info="$(python3 -c "
-total = int('$total_bytes')
+total = int('${total_bytes:-0}')
 lim = int('$limit_gb') * (1024 ** 3)
 acc_gb = float(total) / (1024 ** 3)
 pct = (float(total) / float(lim) * 100) if lim > 0 else 0.0
 print(f'{acc_gb:.1f}|{pct:.1f}')
-")"
+" 2>/dev/null || echo "0.0|0.0")"
         IFS='|' read -r acc_gb pct <<< "$calc_info"
 
         local status_str="${GREEN}🟢 Включен${NC}"
@@ -334,9 +348,10 @@ print(f'{acc_gb:.1f}|{pct:.1f}')
         echo -e "  Фоновый таймер:        ${timer_status}"
     else
         local acc_gb
-        acc_gb="$(python3 -c "print(f'{float($total_bytes) / (1024 ** 3):.1f}')")"
+        acc_gb="$(python3 -c "print(f'{(float(\"${total_bytes:-0}\") / (1024 ** 3)):.1f}')" 2>/dev/null || echo "0.0")"
         local r_day
-        r_day="$(get_state_val "traffic_reset_day" "1")"
+        r_day="$(get_traffic_limit_val "reset_day" "")"
+        r_day="${r_day:-$(get_state_val "traffic_reset_day" "1")}"
         echo -e "  Статус:                ${BOLD}${YELLOW}⚪ Отключен (Безлимитный режим)${NC}"
         echo -e "  Расход за месяц:       ${BOLD}${acc_gb} ГБ (безлимитно)${NC}"
         echo -e "  День сброса биллинга:  ${BOLD}${r_day}-е число${NC}"
@@ -358,13 +373,12 @@ manage_traffic_limit_menu() {
         1)
             local cur_lim cur_day
             cur_lim="$(get_traffic_limit_val "limit_gb" "")"
-            cur_day="$(get_traffic_limit_val "reset_day" "1")"
-            local prompt_lim="Введите лимит трафика в ГБ (например: 3000)"
-            if [[ -n "$cur_lim" ]]; then
-                prompt_lim="${prompt_lim} [${cur_lim}]"
-            fi
-            read -rp "${prompt_lim}: " lim_in || true
-            lim_in="${lim_in:-$cur_lim}"
+            cur_lim="${cur_lim:-$(get_state_val "traffic_limit_gb" "")}"
+            cur_day="$(get_traffic_limit_val "reset_day" "")"
+            cur_day="${cur_day:-$(get_state_val "traffic_reset_day" "1")}"
+            local def_lim="${cur_lim:-3000}"
+            read -rp "Введите лимит трафика в ГБ (например: 3000) [по умолчанию: ${def_lim}]: " lim_in || true
+            lim_in="${lim_in:-$def_lim}"
             lim_in="$(echo "$lim_in" | tr -d '[:space:]')"
             if [[ -z "$lim_in" || ! "$lim_in" =~ ^[1-9][0-9]*$ ]]; then
                 warn "Некорректный лимит трафика."
@@ -377,7 +391,8 @@ manage_traffic_limit_menu() {
             ;;
         2)
             local cur_day
-            cur_day="$(get_traffic_limit_val "reset_day" "1")"
+            cur_day="$(get_traffic_limit_val "reset_day" "")"
+            cur_day="${cur_day:-$(get_state_val "traffic_reset_day" "1")}"
             read -rp "День месяца сброса биллинга (1-31) [текущий: ${cur_day}]: " day_in || true
             day_in="${day_in:-$cur_day}"
             day_in="$(echo "$day_in" | tr -d '[:space:]')"
