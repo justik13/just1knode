@@ -170,27 +170,57 @@ EOF
     local pre_hook_cmd="sh -c 'if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then touch /run/just1knode_nginx_was_active && systemctl stop nginx 2>/dev/null || true; fi; if command -v docker >/dev/null 2>&1; then if docker ps --format \"{{.Names}}\t{{.Ports}}\" 2>/dev/null | grep -E \"(^|[[:space:],])([0-9\.:]+|\[::\]|:::):80->[0-9]+/tcp\" | grep -q \"^just1kbot_caddy\b\"; then if docker stop just1kbot_caddy >/dev/null 2>&1; then echo \"just1kbot_caddy\" > /run/just1knode_caddy_was_paused; fi; fi; fi; if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi \"Status: active\"; then if ! ufw status 2>/dev/null | grep -E \"(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW\" -q; then touch /run/just1knode_ufw_opened_80 && ufw allow 80/tcp comment \"just1knode certbot verification\" >/dev/null 2>&1 || true; fi; fi'"
     local post_hook_cmd="sh -c 'if [ -f /run/just1knode_nginx_was_active ]; then rm -f /run/just1knode_nginx_was_active; command -v systemctl >/dev/null 2>&1 && systemctl start nginx 2>/dev/null || true; fi; if [ -f /run/just1knode_caddy_was_paused ]; then c80=\$(cat /run/just1knode_caddy_was_paused 2>/dev/null || true); if [ -n \"\$c80\" ] && command -v docker >/dev/null 2>&1; then docker start \"\$c80\" >/dev/null 2>&1 && rm -f /run/just1knode_caddy_was_paused; else rm -f /run/just1knode_caddy_was_paused; fi; fi; if [ -f /run/just1knode_ufw_opened_80 ]; then rm -f /run/just1knode_ufw_opened_80; if ! (command -v docker >/dev/null 2>&1 && docker ps --format \"{{.Ports}} {{.Names}}\" 2>/dev/null | grep -qE \"(:80->|just1kbot_caddy)\"); then ufw delete allow 80/tcp >/dev/null 2>&1 || true; ufw delete allow 80 >/dev/null 2>&1 || true; fi; fi'"
 
-    # 2. Если действующий сертификат для этого домена УЖЕ существует на хосте — используем его!
-    if [[ -f "${le_dir}/live/${domain}/fullchain.pem" && -f "${le_dir}/live/${domain}/privkey.pem" ]]; then
-        if openssl x509 -checkend 86400 -noout -in "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null; then
-            log "✔ Обнаружен действующий сертификат Let's Encrypt для '$domain'!"
-            if [[ -n "$target_prefix" ]]; then
-                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
-                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem"
-                chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+    # 2. Проверяем, существует ли УЖЕ сертификат (индивидуальный или Wildcard), покрывающий $domain
+    local found_cert=""
+    local found_key=""
+
+    if [[ -f "${xray_tls_dir}/fullchain.pem" && -f "${xray_tls_dir}/privkey.pem" ]] && \
+       openssl x509 -checkend 86400 -noout -in "${xray_tls_dir}/fullchain.pem" 2>/dev/null && \
+       openssl x509 -checkhost "$domain" -noout -in "${xray_tls_dir}/fullchain.pem" 2>/dev/null; then
+        found_cert="${xray_tls_dir}/fullchain.pem"
+        found_key="${xray_tls_dir}/privkey.pem"
+        log "✔ Обнаружен действующий TLS-сертификат в ${xray_tls_dir}, покрывающий '$domain'!"
+    elif [[ -f "${le_dir}/live/${domain}/fullchain.pem" && -f "${le_dir}/live/${domain}/privkey.pem" ]] && \
+         openssl x509 -checkend 86400 -noout -in "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null; then
+        found_cert="${le_dir}/live/${domain}/fullchain.pem"
+        found_key="${le_dir}/live/${domain}/privkey.pem"
+        log "✔ Обнаружен действующий сертификат Let's Encrypt для '$domain'!"
+    else
+        # Проверяем все подпапки в ${le_dir}/live/ на наличие сертификата, покрывающего $domain
+        for cand in "${le_dir}/live"/*/fullchain.pem; do
+            if [[ -f "$cand" ]]; then
+                cand_dir="$(dirname "$cand")"
+                cand_key="${cand_dir}/privkey.pem"
+                if [[ -f "$cand_key" ]] && \
+                   openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
+                   openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null; then
+                    found_cert="$cand"
+                    found_key="$cand_key"
+                    log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '$domain'!"
+                    break
+                fi
             fi
-            if [[ "$target_prefix" != "vless" ]]; then
-                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
-                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
-                chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
-            elif [[ ! -f "${xray_tls_dir}/fullchain.pem" ]]; then
-                install -m 640 "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/fullchain.pem" "${xray_tls_dir}/fullchain.pem"
-                install -m 640 "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "${le_dir}/live/${domain}/privkey.pem" "${xray_tls_dir}/privkey.pem"
-                chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
-            fi
-            local ren_conf="${le_dir}/renewal/${domain}.conf"
-            if [[ -f "$ren_conf" ]]; then
-                python3 -c "
+        done
+    fi
+
+    if [[ -n "$found_cert" && -n "$found_key" ]]; then
+        if [[ -n "$target_prefix" ]]; then
+            install -m 640 "$found_cert" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || cp -f "$found_cert" "${xray_tls_dir}/${target_prefix}_fullchain.pem"
+            install -m 640 "$found_key" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || cp -f "$found_key" "${xray_tls_dir}/${target_prefix}_privkey.pem"
+            chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+        fi
+        if [[ "$target_prefix" != "vless" ]]; then
+            install -m 640 "$found_cert" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "$found_cert" "${xray_tls_dir}/fullchain.pem"
+            install -m 640 "$found_key" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "$found_key" "${xray_tls_dir}/privkey.pem"
+            chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+        elif [[ ! -f "${xray_tls_dir}/fullchain.pem" ]]; then
+            install -m 640 "$found_cert" "${xray_tls_dir}/fullchain.pem" 2>/dev/null || cp -f "$found_cert" "${xray_tls_dir}/fullchain.pem"
+            install -m 640 "$found_key" "${xray_tls_dir}/privkey.pem" 2>/dev/null || cp -f "$found_key" "${xray_tls_dir}/privkey.pem"
+            chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+        fi
+        local ren_conf="${le_dir}/renewal/${domain}.conf"
+        if [[ -f "$ren_conf" ]]; then
+            python3 -c "
 import sys
 cf, pre_c, post_c = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -217,12 +247,41 @@ try:
 except Exception:
     pass
 " "$ren_conf" "$pre_hook_cmd" "$post_hook_cmd"
-            fi
-            log "✔ Сертификат успешно привязан к Xray (без повторного обращения к Certbot)."
-            return 0
-        else
-            warn "Сертификат для '$domain' истек или истекает в течение 24 часов. Выполняется перевыпуск..."
         fi
+        log "✔ Сертификат успешно привязан к Xray (без обращения к Certbot)."
+        return 0
+    fi
+
+    # 3. Режим Zero-Signature Bootstrap: генерация стартового сертификата для немедленного старта Nginx и Xray-API
+    local use_wildcard="${USE_WILDCARD_CERT:-1}"
+    if [[ "$use_wildcard" == "1" || "$target_prefix" == "wildcard" || "${3:-}" == "--wildcard" ]]; then
+        log "🔒 Режим Zero-Signature: порт 80 не открывается, вызов Certbot исключен."
+        log "Генерация стартового bootstrap-сертификата для '$domain' (ожидание боевого Wildcard от бота)..."
+        install -d -m 750 -o root -g nogroup "$xray_tls_dir"
+        install -d -m 750 -o root -g root "${le_dir}/live/${domain}"
+
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout "${xray_tls_dir}/privkey.pem" \
+            -out "${xray_tls_dir}/fullchain.pem" \
+            -subj "/CN=${domain}" >/dev/null 2>&1
+
+        chmod 644 "${xray_tls_dir}/fullchain.pem"
+        chmod 600 "${xray_tls_dir}/privkey.pem"
+        chown root:nogroup "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/privkey.pem" 2>/dev/null || true
+
+        if [[ -n "$target_prefix" ]]; then
+            cp -f "${xray_tls_dir}/fullchain.pem" "${xray_tls_dir}/${target_prefix}_fullchain.pem" 2>/dev/null || true
+            cp -f "${xray_tls_dir}/privkey.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+            chmod 644 "${xray_tls_dir}/${target_prefix}_fullchain.pem"
+            chmod 600 "${xray_tls_dir}/${target_prefix}_privkey.pem"
+            chown root:nogroup "${xray_tls_dir}/${target_prefix}_fullchain.pem" "${xray_tls_dir}/${target_prefix}_privkey.pem" 2>/dev/null || true
+        fi
+
+        cp -f "${xray_tls_dir}/fullchain.pem" "${le_dir}/live/${domain}/fullchain.pem" 2>/dev/null || true
+        cp -f "${xray_tls_dir}/privkey.pem" "${le_dir}/live/${domain}/privkey.pem" 2>/dev/null || true
+
+        log "✔ Стартовый bootstrap-сертификат создан. Сервисы Nginx и Xray запускаются в ожидании Wildcard от бота."
+        return 0
     fi
 
     log "Проверка наличия Certbot для выпуска SSL Let's Encrypt..."

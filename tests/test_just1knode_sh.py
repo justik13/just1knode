@@ -2972,6 +2972,10 @@ remove_traffic_watchdog_timer
         self.assertIn(r'(:80->|just1kbot_caddy)', relay_sh)
         # Ensure deploy hook checks RENEWED_LINEAGE against RELAY_SNI
         self.assertIn('[ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]', relay_sh)
+        # Verify wildcard detection and zero-signature bootstrap
+        self.assertIn('openssl x509 -checkhost "$domain"', relay_sh)
+        self.assertIn('USE_WILDCARD_CERT', relay_sh)
+        self.assertIn('CN=${domain}', relay_sh)
 
     def test_add_relay_node_enforces_tls_mode(self):
         """Verify add_relay_node strictly enforces TLS mode."""
