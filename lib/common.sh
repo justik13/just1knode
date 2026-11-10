@@ -1421,12 +1421,13 @@ cleanup_legacy_traffic_watchdog_residue() {
     rm -f "${systemd_dir}/just1knode-traffic.service" "${systemd_dir}/just1knode-traffic.timer" 2>/dev/null || true
     rm -f "${systemd_dir}/xray.service.d/traffic-cutoff.conf" 2>/dev/null || true
     rm -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" /etc/just1knode/traffic_cutoff.active 2>/dev/null || true
+    rm -f /run/just1knode_traffic_cutoff "${RUN_DIR:-/run}/just1knode_traffic_cutoff" 2>/dev/null || true
     if [[ -d "${systemd_dir}/xray.service.d" ]] && [[ -z "$(ls -A "${systemd_dir}/xray.service.d" 2>/dev/null)" ]]; then
         rmdir "${systemd_dir}/xray.service.d" 2>/dev/null || true
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload 2>/dev/null || true
-        systemctl reset-failed just1knode-traffic 2>/dev/null || true
+        systemctl reset-failed just1knode-traffic.service just1knode-traffic.timer 2>/dev/null || true
     fi
 }
 

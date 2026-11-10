@@ -1238,7 +1238,7 @@ uninstall_node() {
     systemctl disable xray xray-api 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl reset-failed xray xray-api just1knode-traffic 2>/dev/null || true
+    systemctl reset-failed xray xray-api just1knode-traffic.service just1knode-traffic.timer 2>/dev/null || true
 
     info "2/11. Завершение активных процессов ядра и API..."
     local xray_proc_name
@@ -1690,6 +1690,7 @@ main_menu() {
 }
 
 heal_node_config() {
+    cleanup_legacy_traffic_watchdog_residue
     local role
     role="$(get_state_val "role")"
     if [[ "$role" == "origin" ]]; then

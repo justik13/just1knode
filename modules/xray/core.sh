@@ -150,6 +150,7 @@ update_node() {
     title "КОМПЛЕКСНОЕ ОБНОВЛЕНИЕ УТИЛИТЫ И КОНФИГУРАЦИИ УЗЛА"
     check_root
     init_state_dir
+    cleanup_legacy_traffic_watchdog_residue
     acquire_just1knode_lock
     trap release_just1knode_lock RETURN EXIT
 

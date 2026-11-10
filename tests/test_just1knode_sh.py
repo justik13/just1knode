@@ -2732,33 +2732,40 @@ exit 0
         self.assertNotEqual(res_hostile_prefix.returncode, 0)
 
     def test_cleanup_legacy_traffic_watchdog_residue_invariants(self):
-        """cleanup_legacy_traffic_watchdog_residue removes systemd timer, service, drop-in, and cutoff active flag."""
+        """cleanup_legacy_traffic_watchdog_residue removes systemd timer, service, drop-in, and all cutoff flags."""
         self._prepare_base_env()
         systemd_dir = self.systemd_dir
         systemd_dir.mkdir(parents=True, exist_ok=True)
         dropin_dir = systemd_dir / "xray.service.d"
         dropin_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(self.temp_dir) / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         svc_file = systemd_dir / "just1knode-traffic.service"
         timer_file = systemd_dir / "just1knode-traffic.timer"
         dropin_file = dropin_dir / "traffic-cutoff.conf"
         cutoff_flag = self.state_dir / "traffic_cutoff.active"
+        run_cutoff_flag = run_dir / "just1knode_traffic_cutoff"
 
         svc_file.write_text("[Unit]\nDescription=Dummy\n", encoding="utf-8")
         timer_file.write_text("[Unit]\nDescription=Dummy\n", encoding="utf-8")
         dropin_file.write_text("[Unit]\nConditionPathExists=!/etc/just1knode/traffic_cutoff.active\n", encoding="utf-8")
         cutoff_flag.write_text("1", encoding="utf-8")
+        run_cutoff_flag.write_text("1", encoding="utf-8")
 
         self.assertTrue(svc_file.exists())
         self.assertTrue(timer_file.exists())
         self.assertTrue(dropin_file.exists())
         self.assertTrue(cutoff_flag.exists())
+        self.assertTrue(run_cutoff_flag.exists())
 
         systemd_dir_posix = self._bp(systemd_dir)
         state_dir_posix = self._bp(self.state_dir)
+        run_dir_posix = self._bp(run_dir)
         snippet = f"""
 export SYSTEMD_SYSTEM_DIR="{systemd_dir_posix}"
 export STATE_DIR="{state_dir_posix}"
+export RUN_DIR="{run_dir_posix}"
 cleanup_legacy_traffic_watchdog_residue
 """
         res = self._run_shell_snippet(snippet)
@@ -2767,7 +2774,21 @@ cleanup_legacy_traffic_watchdog_residue
         self.assertFalse(svc_file.exists(), "Traffic service unit must be removed")
         self.assertFalse(timer_file.exists(), "Traffic timer unit must be removed")
         self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be removed")
+        self.assertFalse(dropin_dir.exists(), "Empty xray.service.d directory must be removed")
         self.assertFalse(cutoff_flag.exists(), "traffic_cutoff.active flag must be removed")
+        self.assertFalse(run_cutoff_flag.exists(), "run cutoff flag must be removed")
+
+        # Scenario 2: Non-empty dropin directory preservation
+        dropin_dir.mkdir(parents=True, exist_ok=True)
+        custom_file = dropin_dir / "10-custom.conf"
+        custom_file.write_text("[Service]\nLimitNOFILE=65536\n", encoding="utf-8")
+        dropin_file.write_text("[Unit]\nDummy\n", encoding="utf-8")
+
+        res2 = self._run_shell_snippet(snippet)
+        self.assertEqual(res2.returncode, 0)
+        self.assertFalse(dropin_file.exists())
+        self.assertTrue(custom_file.exists(), "Custom drop-in file must be preserved")
+        self.assertTrue(dropin_dir.exists(), "Non-empty xray.service.d must be preserved")
 
     def test_detect_host_port80_container_filtering_behaviour(self):
         """Verify detect_host_port80_container correctly matches host TCP :80 bindings and ignores container-only :80 or UDP :80."""
