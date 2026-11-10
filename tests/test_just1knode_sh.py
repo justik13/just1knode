@@ -2732,7 +2732,7 @@ exit 0
         self.assertNotEqual(res_hostile_prefix.returncode, 0)
 
     def test_deploy_and_remove_traffic_watchdog_timer_and_cutoff_invariants(self):
-        """deploy_traffic_watchdog_timer installs systemd timer and xray cutoff drop-in, remove cleans up."""
+        """deploy_traffic_limit_timer installs systemd timer and does NOT create xray cutoff drop-in, remove cleans up."""
         self._prepare_base_env()
         systemd_dir = self.systemd_dir
         systemd_dir.mkdir(parents=True, exist_ok=True)
@@ -2740,33 +2740,29 @@ exit 0
         systemd_dir_posix = self._bp(systemd_dir)
         snippet = f"""
 export SYSTEMD_SYSTEM_DIR="{systemd_dir_posix}"
-deploy_traffic_watchdog_timer
+deploy_traffic_limit_timer
 """
         res = self._run_shell_snippet(snippet)
-        self.assertEqual(res.returncode, 0, f"deploy_traffic_watchdog_timer failed: {res.stderr}\n{res.stdout}")
+        self.assertEqual(res.returncode, 0, f"deploy_traffic_limit_timer failed: {res.stderr}\n{res.stdout}")
 
-        svc_file = systemd_dir / "just1knode-traffic.service"
-        timer_file = systemd_dir / "just1knode-traffic.timer"
+        svc_file = systemd_dir / "just1knode-traffic-limit.service"
+        timer_file = systemd_dir / "just1knode-traffic-limit.timer"
         dropin_file = systemd_dir / "xray.service.d" / "traffic-cutoff.conf"
 
-        self.assertTrue(svc_file.exists(), "Traffic service unit must be created")
-        self.assertTrue(timer_file.exists(), "Traffic timer unit must be created")
-        self.assertTrue(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be created")
-
-        dropin_content = dropin_file.read_text(encoding="utf-8")
-        self.assertIn("ConditionPathExists=!", dropin_content)
-        self.assertIn("traffic_cutoff.active", dropin_content)
+        self.assertTrue(svc_file.exists(), "Traffic limit service unit must be created")
+        self.assertTrue(timer_file.exists(), "Traffic limit timer unit must be created")
+        self.assertFalse(dropin_file.exists(), "CRITICAL: ConditionPathExists in xray.service.d must NOT be created")
 
         # Removal
         remove_snippet = f"""
 export SYSTEMD_SYSTEM_DIR="{systemd_dir_posix}"
-remove_traffic_watchdog_timer
+remove_traffic_limit_timer
 """
         res_rm = self._run_shell_snippet(remove_snippet)
         self.assertEqual(res_rm.returncode, 0)
-        self.assertFalse(svc_file.exists(), "Traffic service unit must be removed")
-        self.assertFalse(timer_file.exists(), "Traffic timer unit must be removed")
-        self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be removed")
+        self.assertFalse(svc_file.exists(), "Traffic limit service unit must be removed")
+        self.assertFalse(timer_file.exists(), "Traffic limit timer unit must be removed")
+        self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must not exist")
 
     def test_detect_host_port80_container_filtering_behaviour(self):
         """Verify detect_host_port80_container correctly matches host TCP :80 bindings and ignores container-only :80 or UDP :80."""
@@ -4002,6 +3998,24 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
             self.assertEqual(len(relay_ib2["settings"]["clients"]), 1)
             self.assertEqual(relay_ib2["settings"]["clients"][0]["id"], "uuid-empty-branch")
             self.assertEqual(relay_ib2["settings"]["clients"][0]["flow"], "xtls-rprx-vision")
+
+    def test_traffic_limit_invariants(self):
+        """Invariant: traffic_limit.sh uses vnstat, JSON config, no ConditionPathExists in xray dropin, and CLI/menu registration."""
+        traffic_limit_sh = (NODE_ROOT / "lib" / "traffic_limit.sh").read_text(encoding="utf-8")
+        just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
+
+        self.assertIn("vnstat --json m 1", traffic_limit_sh)
+        self.assertIn("traffic_limit.json", traffic_limit_sh)
+        self.assertIn("traffic_limit_exceeded", traffic_limit_sh)
+        self.assertIn("just1knode-traffic-limit.timer", traffic_limit_sh)
+        self.assertIn("manage_traffic_limit_menu", traffic_limit_sh)
+        self.assertNotIn("ConditionPathExists", traffic_limit_sh)
+
+        # CLI and menu in just1knode.sh
+        self.assertIn('source "${SCRIPT_DIR}/lib/traffic_limit.sh"', just1knode_sh)
+        self.assertIn("manage_traffic_limit_menu", just1knode_sh)
+        self.assertIn("limit|traffic)", just1knode_sh)
+        self.assertIn("just1knode limit [set <GB> [day] | off | status]", just1knode_sh)
 
 
 if __name__ == "__main__":

@@ -218,13 +218,8 @@ deploy_traffic_watchdog_timer() {
         bin_path="${SCRIPT_DIR:-/opt/just1knode}/just1knode.sh"
     fi
 
-    # Drop-in для xray.service, блокирующий запуск при активном cutoff (reboot / certbot / hooks)
-    local xray_dropin_dir="${systemd_dir}/xray.service.d"
-    mkdir -p "$xray_dropin_dir"
-    cat > "${xray_dropin_dir}/traffic-cutoff.conf" <<EOF
-[Unit]
-ConditionPathExists=!${TRAFFIC_CUTOFF_FLAG}
-EOF
+    # CRITICAL: DO NOT create any ConditionPathExists in xray.service.d!
+    rm -f "${systemd_dir}/xray.service.d/traffic-cutoff.conf" 2>/dev/null || true
 
     cat > "${systemd_dir}/just1knode-traffic.service" <<EOF
 [Unit]

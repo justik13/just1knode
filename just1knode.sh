@@ -216,6 +216,8 @@ source "${SCRIPT_DIR}/lib/state.sh"
 source "${SCRIPT_DIR}/lib/ssl.sh"
 # shellcheck source=lib/traffic_watchdog.sh
 source "${SCRIPT_DIR}/lib/traffic_watchdog.sh"
+# shellcheck source=lib/traffic_limit.sh
+source "${SCRIPT_DIR}/lib/traffic_limit.sh"
 
 # Подключение модулей
 # shellcheck source=modules/xray/core.sh
@@ -1538,59 +1540,6 @@ uninstall_node() {
     exit 0
 }
 
-manage_traffic_limit_menu() {
-    title "УПРАВЛЕНИЕ ЛИМИТОМ ТРАФИКА"
-    check_root
-    show_traffic_limit_status
-    echo ""
-    echo -e "  ${BOLD}[1]${NC} ⚙️  Включить / настроить лимит"
-    echo -e "  ${BOLD}[2]${NC} ⚪ Отключить лимит (Безлимитный режим)"
-    echo -e "  ${BOLD}[3]${NC} 🔄 Проверить текущий трафик"
-    echo -e "  ${BOLD}[0]${NC} ⬅️  Назад"
-    echo ""
-    read -rp "Выберите действие [0-3]: " t_act
-    case "$t_act" in
-        1)
-            local lim_in=""
-            if [[ -t 0 ]]; then
-                while true; do
-                    if ! read -rp "Введите лимит трафика в ГБ (например: 8000 для 8 ТБ, 0 для отмены): " lim_in; then
-                        warn "Ввод прерван."
-                        return
-                    fi
-                    lim_in="$(echo "$lim_in" | tr -d '[:space:]')"
-                    if [[ "$lim_in" == "0" || "$lim_in" == "q" || "$lim_in" == "Q" ]]; then
-                        warn "Настройка лимита трафика отменена."
-                        return
-                    fi
-                    if [[ -z "$lim_in" || ! "$lim_in" =~ ^[1-9][0-9]*$ ]]; then
-                        warn "Укажите корректный лимит трафика в ГБ (целое положительное число, например: 8000). Попробуйте еще раз."
-                        continue
-                    fi
-                    break
-                done
-            fi
-            read -rp "День месяца сброса биллинга у провайдера [по умолчанию: 1]: " day_in || true
-            day_in="${day_in:-1}"
-            read -rp "Telegram Bot Token для уведомлений (опционально, Enter для пропуска): " tok_in || true
-            local chat_in=""
-            if [[ -n "$tok_in" ]]; then
-                read -rp "Telegram Chat ID администратора: " chat_in || true
-            fi
-            set_traffic_limit "$lim_in" "$day_in" "$tok_in" "$chat_in"
-            ;;
-        2)
-            disable_traffic_limit
-            ;;
-        3)
-            check_traffic_limit
-            show_traffic_limit_status
-            ;;
-        *)
-            return
-            ;;
-    esac
-}
 
 # =============================================================================
 # ДИНАМИЧЕСКОЕ КОНТЕКСТНОЕ МЕНЮ
@@ -1651,10 +1600,10 @@ main_menu() {
 
             echo -e "  ${BOLD}[1]${NC} 🔄 Управление Relay-узлами на Origin (Добавить / Удалить / Список)"
             echo -e "  ${BOLD}[2]${NC} 📊 Статус узла и подключенные клиенты"
-            echo -e "  ${BOLD}[3]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[4]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[5]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
-            echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[4]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[5]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
+            echo -e "  ${BOLD}[6]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
             echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
             echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
             echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
@@ -1665,10 +1614,10 @@ main_menu() {
             case "$choice" in
                 1) manage_relays_menu || true; read -rp "Нажмите Enter для продолжения...";;
                 2) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                3) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                4) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                5) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                6) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                4) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                5) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                6) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
                 7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
                 8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
                 9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
@@ -1703,11 +1652,11 @@ main_menu() {
 
             echo -e "  ${BOLD}[1]${NC} 🚀 VLESS TLS    $([[ "$cur_has_v" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
             echo -e "  ${BOLD}[2]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
-            echo -e "  ${BOLD}[3]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[4]${NC} 📊 Статус всех служб и активные клиенты"
-            echo -e "  ${BOLD}[5]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[7]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
+            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
+            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
             echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
             echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
@@ -1751,11 +1700,11 @@ main_menu() {
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
-                3) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                4) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                5) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                7) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                4) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                5) show_status || true; read -rp "Нажмите Enter для продолжения...";;
+                6) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
                 8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
                 9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
@@ -1864,11 +1813,13 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             limit|traffic)
                 case "${2:-}" in
-                    set) set_traffic_limit "${3:-}" "${4:-1}" "${5:-}" "${6:-}" ;;
+                    set) set_traffic_limit "${3:-}" "${4:-1}" ;;
+                    reset-day|day) set_traffic_reset_day "${3:-1}" ;;
                     disable|off) disable_traffic_limit ;;
                     check) check_traffic_limit ;;
-                    status|show|"") show_traffic_limit_status ;;
-                    *) error "Использование: just1knode limit [status|set <GB> [reset_day] [tg_token] [tg_chat]|disable|check]" ;;
+                    status|show) show_traffic_limit_status ;;
+                    "") manage_traffic_limit_menu ;;
+                    *) error "Использование: just1knode limit [set <GB> [day] | off | status]" ;;
                 esac
                 ;;
             status) show_status ;;
