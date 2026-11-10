@@ -214,8 +214,6 @@ source "${SCRIPT_DIR}/lib/backup.sh"
 source "${SCRIPT_DIR}/lib/state.sh"
 # shellcheck source=lib/ssl.sh
 source "${SCRIPT_DIR}/lib/ssl.sh"
-# shellcheck source=lib/traffic_watchdog.sh
-source "${SCRIPT_DIR}/lib/traffic_watchdog.sh"
 
 # Подключение модулей
 # shellcheck source=modules/xray/core.sh
@@ -295,17 +293,6 @@ show_status() {
         if [[ "$cur_has_v" == "1" || "$role" == "vless" || "$role" == "origin" || "$role" == "relay" ]]; then
             systemctl is-active --quiet nginx && echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444):         ${RED}○ Не работает${NC}"
         fi
-    fi
-
-    local t_status
-    t_status="$(get_state_val "traffic_limit_status" "disabled")"
-    if [[ "$t_status" == "enabled" ]]; then
-        echo -e "\n  Контроль трафика:"
-        local lim_gb
-        lim_gb="$(get_state_val "traffic_limit_gb" "-")"
-        local r_day
-        r_day="$(get_state_val "traffic_reset_day" "1")"
-        echo -e "    Лимит хостинга: ${CYAN}${lim_gb} ГБ${NC} (сброс: ${r_day}-е число)"
     fi
 }
 
@@ -472,17 +459,12 @@ run_doctor() {
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Служба $srv активна"
+        elif systemctl is-failed --quiet "$srv" 2>/dev/null; then
+            echo -e "  ${RED}✗${NC} Служба $srv в состоянии FAILED (ошибка запуска или start-limit-hit)"
+            failed=$((failed + 1))
         else
-            if [[ "$srv" == "xray" && (-f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" || -f "/run/just1knode_traffic_cutoff" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true") ]]; then
-                echo -e "  ${YELLOW}!${NC} Служба $srv остановлена системным вотчдогом по исчерпанию лимита трафика хостинга"
-                warnings=$((warnings + 1))
-            elif systemctl is-failed --quiet "$srv" 2>/dev/null; then
-                echo -e "  ${RED}✗${NC} Служба $srv в состоянии FAILED (ошибка запуска или start-limit-hit)"
-                failed=$((failed + 1))
-            else
-                echo -e "  ${RED}✗${NC} Служба $srv не активна"
-                failed=$((failed + 1))
-            fi
+            echo -e "  ${RED}✗${NC} Служба $srv не активна"
+            failed=$((failed + 1))
         fi
     done
 
@@ -1084,7 +1066,7 @@ reset_node() {
 
     systemctl stop xray xray-api 2>/dev/null || true
     systemctl disable xray xray-api 2>/dev/null || true
-    remove_traffic_watchdog_timer
+    cleanup_legacy_traffic_watchdog_residue
     remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
@@ -1251,7 +1233,7 @@ uninstall_node() {
     done
 
     info "1/11. Остановка и отключение системных служб systemd..."
-    remove_traffic_watchdog_timer
+    cleanup_legacy_traffic_watchdog_residue
     systemctl stop xray xray-api 2>/dev/null || true
     systemctl disable xray xray-api 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
@@ -1538,60 +1520,6 @@ uninstall_node() {
     exit 0
 }
 
-manage_traffic_limit_menu() {
-    title "УПРАВЛЕНИЕ ЛИМИТОМ ТРАФИКА"
-    check_root
-    show_traffic_limit_status
-    echo ""
-    echo -e "  ${BOLD}[1]${NC} ⚙️  Включить / настроить лимит"
-    echo -e "  ${BOLD}[2]${NC} ⚪ Отключить лимит (Безлимитный режим)"
-    echo -e "  ${BOLD}[3]${NC} 🔄 Проверить текущий трафик"
-    echo -e "  ${BOLD}[0]${NC} ⬅️  Назад"
-    echo ""
-    read -rp "Выберите действие [0-3]: " t_act
-    case "$t_act" in
-        1)
-            local lim_in=""
-            if [[ -t 0 ]]; then
-                while true; do
-                    if ! read -rp "Введите лимит трафика в ГБ (например: 8000 для 8 ТБ, 0 для отмены): " lim_in; then
-                        warn "Ввод прерван."
-                        return
-                    fi
-                    lim_in="$(echo "$lim_in" | tr -d '[:space:]')"
-                    if [[ "$lim_in" == "0" || "$lim_in" == "q" || "$lim_in" == "Q" ]]; then
-                        warn "Настройка лимита трафика отменена."
-                        return
-                    fi
-                    if [[ -z "$lim_in" || ! "$lim_in" =~ ^[1-9][0-9]*$ ]]; then
-                        warn "Укажите корректный лимит трафика в ГБ (целое положительное число, например: 8000). Попробуйте еще раз."
-                        continue
-                    fi
-                    break
-                done
-            fi
-            read -rp "День месяца сброса биллинга у провайдера [по умолчанию: 1]: " day_in || true
-            day_in="${day_in:-1}"
-            read -rp "Telegram Bot Token для уведомлений (опционально, Enter для пропуска): " tok_in || true
-            local chat_in=""
-            if [[ -n "$tok_in" ]]; then
-                read -rp "Telegram Chat ID администратора: " chat_in || true
-            fi
-            set_traffic_limit "$lim_in" "$day_in" "$tok_in" "$chat_in"
-            ;;
-        2)
-            disable_traffic_limit
-            ;;
-        3)
-            check_traffic_limit
-            show_traffic_limit_status
-            ;;
-        *)
-            return
-            ;;
-    esac
-}
-
 # =============================================================================
 # ДИНАМИЧЕСКОЕ КОНТЕКСТНОЕ МЕНЮ
 # =============================================================================
@@ -1654,13 +1582,12 @@ main_menu() {
             echo -e "  ${BOLD}[3]${NC} 🩺 Комплексная самодиагностика (Doctor)"
             echo -e "  ${BOLD}[4]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
             echo -e "  ${BOLD}[5]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
-            echo -e "  ${BOLD}[6]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[7]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[8]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-9]: " choice
+            read -rp "Выберите действие [0-8]: " choice
 
             case "$choice" in
                 1) manage_relays_menu || true; read -rp "Нажмите Enter для продолжения...";;
@@ -1668,10 +1595,9 @@ main_menu() {
                 3) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
                 4) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
                 5) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                6) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                7) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                8) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1707,12 +1633,11 @@ main_menu() {
             echo -e "  ${BOLD}[4]${NC} 📊 Статус всех служб и активные клиенты"
             echo -e "  ${BOLD}[5]${NC} 🩺 Комплексная самодиагностика (Doctor)"
             echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[7]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[7]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[8]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-9]: " choice
+            read -rp "Выберите действие [0-8]: " choice
 
             case "$choice" in
                 1)
@@ -1755,9 +1680,8 @@ main_menu() {
                 4) show_status || true; read -rp "Нажмите Enter для продолжения...";;
                 5) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
                 6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                7) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                7) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                8) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1861,15 +1785,6 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             restore)
                 restore_node "${2:-}"
-                ;;
-            limit|traffic)
-                case "${2:-}" in
-                    set) set_traffic_limit "${3:-}" "${4:-1}" "${5:-}" "${6:-}" ;;
-                    disable|off) disable_traffic_limit ;;
-                    check) check_traffic_limit ;;
-                    status|show|"") show_traffic_limit_status ;;
-                    *) error "Использование: just1knode limit [status|set <GB> [reset_day] [tg_token] [tg_chat]|disable|check]" ;;
-                esac
                 ;;
             status) show_status ;;
             doctor|test) run_doctor || exit 1 ;;

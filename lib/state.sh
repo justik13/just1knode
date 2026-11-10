@@ -224,7 +224,11 @@ try:
         data['xray_api_key'] = data['awg_api_key']
         changed = True
 
-    legacy_keys = ['has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port']
+    legacy_keys = [
+        'has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port',
+        'traffic_limit_status', 'traffic_limit_gb', 'traffic_reset_day', 'traffic_cutoff_triggered',
+        'traffic_tg_token', 'traffic_tg_chat',
+    ]
     for k in legacy_keys:
         if k in data:
             del data[k]
@@ -403,12 +407,8 @@ manifest_rollback() {
         systemctl reload nginx 2>/dev/null || true
     fi
     if [[ -n "${XRAY_CONFIG:-}" && -f "${XRAY_CONFIG:-}" && -n "${XRAY_BIN:-}" && -x "${XRAY_BIN:-}" ]]; then
-        if [[ ! -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" ]]; then
-            if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-                systemctl restart xray 2>/dev/null || true
-            fi
-        else
-            systemctl stop xray 2>/dev/null || true
+        if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
+            systemctl restart xray 2>/dev/null || true
         fi
     fi
 

@@ -1337,7 +1337,9 @@ apply_antiabuse_protection() {
     # 4. Итоговая проверка соблюдения инвариантов (Fail-Closed)
     if check_antiabuse_rules; then
         if [[ -f /etc/ufw/after.init ]]; then
-            sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+            if grep -Fq "# START JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null && grep -Fq "# END JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null; then
+                sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+            fi
         fi
         if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
             rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
@@ -1389,7 +1391,9 @@ remove_antiabuse_protection() {
 
     # Очистка legacy хуков и сервисов
     if [[ -f /etc/ufw/after.init ]]; then
-        sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+        if grep -Fq "# START JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null && grep -Fq "# END JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null; then
+            sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
+        fi
     fi
     if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
         rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
@@ -1407,4 +1411,23 @@ remove_antiabuse_protection() {
     set_state_val "abuse_protection" "disabled"
     log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
 }
+
+cleanup_legacy_traffic_watchdog_residue() {
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop just1knode-traffic.timer just1knode-traffic.service 2>/dev/null || true
+        systemctl disable just1knode-traffic.timer just1knode-traffic.service 2>/dev/null || true
+    fi
+    rm -f "${systemd_dir}/just1knode-traffic.service" "${systemd_dir}/just1knode-traffic.timer" 2>/dev/null || true
+    rm -f "${systemd_dir}/xray.service.d/traffic-cutoff.conf" 2>/dev/null || true
+    rm -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" /etc/just1knode/traffic_cutoff.active 2>/dev/null || true
+    if [[ -d "${systemd_dir}/xray.service.d" ]] && [[ -z "$(ls -A "${systemd_dir}/xray.service.d" 2>/dev/null)" ]]; then
+        rmdir "${systemd_dir}/xray.service.d" 2>/dev/null || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl reset-failed just1knode-traffic 2>/dev/null || true
+    fi
+}
+
 

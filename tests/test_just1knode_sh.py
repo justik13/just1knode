@@ -2731,42 +2731,43 @@ exit 0
         res_hostile_prefix = self._run_shell_snippet("deploy_subscription_proxy_conf 'bot.example.com' '/sub/../evil'")
         self.assertNotEqual(res_hostile_prefix.returncode, 0)
 
-    def test_deploy_and_remove_traffic_watchdog_timer_and_cutoff_invariants(self):
-        """deploy_traffic_watchdog_timer installs systemd timer and xray cutoff drop-in, remove cleans up."""
+    def test_cleanup_legacy_traffic_watchdog_residue_invariants(self):
+        """cleanup_legacy_traffic_watchdog_residue removes systemd timer, service, drop-in, and cutoff active flag."""
         self._prepare_base_env()
         systemd_dir = self.systemd_dir
         systemd_dir.mkdir(parents=True, exist_ok=True)
-
-        systemd_dir_posix = self._bp(systemd_dir)
-        snippet = f"""
-export SYSTEMD_SYSTEM_DIR="{systemd_dir_posix}"
-deploy_traffic_watchdog_timer
-"""
-        res = self._run_shell_snippet(snippet)
-        self.assertEqual(res.returncode, 0, f"deploy_traffic_watchdog_timer failed: {res.stderr}\n{res.stdout}")
+        dropin_dir = systemd_dir / "xray.service.d"
+        dropin_dir.mkdir(parents=True, exist_ok=True)
 
         svc_file = systemd_dir / "just1knode-traffic.service"
         timer_file = systemd_dir / "just1knode-traffic.timer"
-        dropin_file = systemd_dir / "xray.service.d" / "traffic-cutoff.conf"
+        dropin_file = dropin_dir / "traffic-cutoff.conf"
+        cutoff_flag = self.state_dir / "traffic_cutoff.active"
 
-        self.assertTrue(svc_file.exists(), "Traffic service unit must be created")
-        self.assertTrue(timer_file.exists(), "Traffic timer unit must be created")
-        self.assertTrue(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be created")
+        svc_file.write_text("[Unit]\nDescription=Dummy\n", encoding="utf-8")
+        timer_file.write_text("[Unit]\nDescription=Dummy\n", encoding="utf-8")
+        dropin_file.write_text("[Unit]\nConditionPathExists=!/etc/just1knode/traffic_cutoff.active\n", encoding="utf-8")
+        cutoff_flag.write_text("1", encoding="utf-8")
 
-        dropin_content = dropin_file.read_text(encoding="utf-8")
-        self.assertIn("ConditionPathExists=!", dropin_content)
-        self.assertIn("traffic_cutoff.active", dropin_content)
+        self.assertTrue(svc_file.exists())
+        self.assertTrue(timer_file.exists())
+        self.assertTrue(dropin_file.exists())
+        self.assertTrue(cutoff_flag.exists())
 
-        # Removal
-        remove_snippet = f"""
+        systemd_dir_posix = self._bp(systemd_dir)
+        state_dir_posix = self._bp(self.state_dir)
+        snippet = f"""
 export SYSTEMD_SYSTEM_DIR="{systemd_dir_posix}"
-remove_traffic_watchdog_timer
+export STATE_DIR="{state_dir_posix}"
+cleanup_legacy_traffic_watchdog_residue
 """
-        res_rm = self._run_shell_snippet(remove_snippet)
-        self.assertEqual(res_rm.returncode, 0)
+        res = self._run_shell_snippet(snippet)
+        self.assertEqual(res.returncode, 0, f"cleanup_legacy_traffic_watchdog_residue failed: {res.stderr}\n{res.stdout}")
+
         self.assertFalse(svc_file.exists(), "Traffic service unit must be removed")
         self.assertFalse(timer_file.exists(), "Traffic timer unit must be removed")
         self.assertFalse(dropin_file.exists(), "xray.service.d/traffic-cutoff.conf must be removed")
+        self.assertFalse(cutoff_flag.exists(), "traffic_cutoff.active flag must be removed")
 
     def test_detect_host_port80_container_filtering_behaviour(self):
         """Verify detect_host_port80_container correctly matches host TCP :80 bindings and ignores container-only :80 or UDP :80."""
@@ -3036,7 +3037,6 @@ remove_traffic_watchdog_timer
         relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         ssl_sh = (NODE_ROOT / "lib" / "ssl.sh").read_text(encoding="utf-8")
-        traffic_watchdog_sh = (NODE_ROOT / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
 
         self.assertIn("PartOf=xray.service", service_file)
         self.assertIn("StartLimitIntervalSec=30", service_file)
@@ -3060,22 +3060,9 @@ remove_traffic_watchdog_timer
         self.assertNotIn("systemctl restart xray\nsystemctl restart xray-api", ssl_sh.replace(" ", "").replace("2>/dev/null||true", ""))
         self.assertIn("systemctl start xray-api", ssl_sh)
 
-        # Invariant: traffic watchdog resume calls ensure_xray_api_healthy strictly after successful xray start
-        self.assertIn("if [[ $xray_started -eq 1 ]]; then", traffic_watchdog_sh)
-        self.assertIn("ensure_xray_api_healthy", traffic_watchdog_sh)
-
         # Invariant: Doctor reports FAILED status on services without hidden side-effects
         self.assertIn("systemctl is-failed", just1knode_sh)
         self.assertIn("FAILED", just1knode_sh)
-
-    def test_traffic_watchdog_resume_guards_xray_api_start_when_xray_config_invalid(self):
-        """Verify watchdog resume does not attempt to start xray-api if xray config test fails."""
-        watchdog_sh = (NODE_ROOT / "lib" / "traffic_watchdog.sh").read_text(encoding="utf-8")
-        self.assertIn("local xray_started=0", watchdog_sh)
-        self.assertIn("xray_started=1", watchdog_sh)
-        self.assertIn("if [[ $xray_started -eq 1 ]]; then", watchdog_sh)
-        self.assertIn("ensure_xray_api_healthy || true", watchdog_sh)
-        self.assertNotIn("systemctl start xray-api", watchdog_sh)
 
     def test_xray_api_app_discovers_default_inbound_on_origin_fallback(self):
         """Verify app.py target inbounds discovery prioritizes just1k-wl-default on Origin nodes."""
@@ -3525,11 +3512,9 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("'geoip:private'", relays_manage_sh)
 
     def test_state_and_watchdog_locks_use_o_nofollow_and_fchmod(self):
-        """Invariant: state.sh, traffic_watchdog.sh and traffic_watchdog.py must use O_NOFOLLOW and fd-based fchmod."""
+        """Invariant: state.sh must use O_NOFOLLOW and fd-based fchmod."""
         targets = [
             NODE_ROOT / "lib" / "state.sh",
-            NODE_ROOT / "lib" / "traffic_watchdog.sh",
-            NODE_ROOT / "lib" / "traffic_watchdog.py",
         ]
         for path in targets:
             content = path.read_text(encoding="utf-8")

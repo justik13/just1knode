@@ -57,7 +57,6 @@ deploy_xray_systemd_service() {
 Description=Xray Service
 Documentation=https://github.com/xtls
 After=network.target nss-lookup.target
-ConditionPathExists=!/etc/just1knode/traffic_cutoff.active
 
 [Service]
 User=root
@@ -465,6 +464,7 @@ update_node_post() {
     info "4/4. Самодиагностика, авто-конфигурация и проверка сетевых политик..."
     migrate_legacy_state
     heal_node_firewall_and_stealth
+    cleanup_legacy_traffic_watchdog_residue
 
     # Автоматическая оптимизация конфигурации в зависимости от роли сервера
     local role
