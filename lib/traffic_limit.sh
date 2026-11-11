@@ -484,3 +484,19 @@ manage_traffic_limit_menu() {
             ;;
     esac
 }
+
+get_traffic_limit_summary() {
+    local limit_gb
+    limit_gb="$(get_traffic_limit_val "limit_gb" "0")"
+    if [[ -z "$limit_gb" || "$limit_gb" == "0" ]]; then
+        echo "Не задан"
+        return 0
+    fi
+    local used_bytes used_gb status_badge="🟢"
+    used_bytes="$(get_monthly_traffic_bytes 2>/dev/null || echo "0")"
+    used_gb="$(python3 -c 'import sys; print(f"{int(sys.argv[1] or 0) / (1024**3):.1f}")' "$used_bytes" 2>/dev/null || echo "0.0")"
+    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" ]]; then
+        status_badge="🔴"
+    fi
+    echo "${status_badge} ${used_gb} / ${limit_gb} ГБ"
+}

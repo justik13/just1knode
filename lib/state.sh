@@ -193,32 +193,34 @@ try:
     changed = False
     role = str(data.get('role', '')).lower()
 
-    if 'has_relay' not in data:
-        relay_p = str(data.get('relay_port', '')).strip()
-        if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
-            data['has_relay'] = '1'
-            changed = True
-        else:
-            data['has_relay'] = '0'
-            changed = True
+    is_v2_role = role in ('ru_hub', 'eu_hub', 'exit_node')
+    if not is_v2_role:
+        if 'has_relay' not in data:
+            relay_p = str(data.get('relay_port', '')).strip()
+            if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
+                data['has_relay'] = '1'
+                changed = True
+            else:
+                data['has_relay'] = '0'
+                changed = True
 
-    if 'has_vless' not in data:
-        v_dom = str(data.get('vless_domain', '')).strip()
-        if role == 'vless' or (v_dom and v_dom != '-'):
-            data['has_vless'] = '1'
-            changed = True
-        else:
-            data['has_vless'] = '0'
-            changed = True
+        if 'has_vless' not in data:
+            v_dom = str(data.get('vless_domain', '')).strip()
+            if role == 'vless' or (v_dom and v_dom != '-'):
+                data['has_vless'] = '1'
+                changed = True
+            else:
+                data['has_vless'] = '0'
+                changed = True
 
-    has_r = data.get('has_relay') == '1'
-    has_v = data.get('has_vless') == '1'
-    if role != 'origin' and (has_r or has_v) and data.get('role') != 'node':
-        data['role'] = 'node'
-        changed = True
-    elif role in ('awg', 'dual') and not (has_r or has_v):
-        data['role'] = 'unconfigured'
-        changed = True
+        has_r = data.get('has_relay') == '1'
+        has_v = data.get('has_vless') == '1'
+        if role != 'origin' and (has_r or has_v) and data.get('role') != 'node':
+            data['role'] = 'node'
+            changed = True
+        elif role in ('awg', 'dual') and not (has_r or has_v):
+            data['role'] = 'unconfigured'
+            changed = True
 
     if not data.get('xray_api_key') and data.get('awg_api_key'):
         data['xray_api_key'] = data['awg_api_key']
@@ -309,6 +311,10 @@ get_node_status() {
 
     local role
     role="$(get_state_val "role" "unconfigured")"
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        echo "$role"
+        return
+    fi
     if [[ "$role" == "origin" ]] || [[ "$(get_state_val "is_origin" "0")" == "1" ]]; then
         echo "origin"
         return
@@ -473,4 +479,198 @@ ensure_xray_config_permissions() {
         chown root:xrayapi "$cfg" 2>/dev/null || true
         chmod 640 "$cfg" 2>/dev/null || true
     fi
+}
+
+# Единый атомарный мутатор JSON-полей state.json (zero duplication)
+_state_mutate_json() {
+    local action="$1"
+    local arg1="${2:-}"
+    local arg2="${3:-}"
+    init_state_dir
+    python3 -c "
+import sys, json, os, tempfile
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+f, action, arg1, arg2 = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+lock_file = f + '.lock'
+open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+lock_fd = os.open(lock_file, open_flags, 0o660)
+if fcntl:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+try:
+    data = {}
+    if os.path.exists(f) and os.path.getsize(f) > 0:
+        with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+            loaded = json.load(fp)
+            if isinstance(loaded, dict):
+                data = loaded
+
+    if action == 'set_json':
+        data[arg1] = json.loads(arg2)
+    elif action == 'set_module':
+        mod_obj = json.loads(arg2)
+        if not isinstance(mod_obj, dict):
+            raise ValueError('module config must be a dict')
+        mod_obj.setdefault('enabled', True)
+        mods = data.get('modules')
+        if not isinstance(mods, dict):
+            mods = {}
+        mods[arg1] = mod_obj
+        data['modules'] = mods
+    elif action == 'remove_module':
+        mods = data.get('modules')
+        if isinstance(mods, dict) and arg1 in mods:
+            del mods[arg1]
+            data['modules'] = mods
+    elif action == 'upsert_peer':
+        peer = json.loads(arg1)
+        if not isinstance(peer, dict) or not peer.get('code'):
+            raise ValueError('peer must be dict with code')
+        peers = data.get('peers')
+        if not isinstance(peers, list):
+            peers = []
+        code = str(peer['code']).strip().lower()
+        peer['code'] = code
+        peers = [p for p in peers if isinstance(p, dict) and str(p.get('code', '')).strip().lower() != code]
+        peers.append(peer)
+        data['peers'] = peers
+    elif action == 'remove_peer':
+        code = arg1.strip().lower()
+        peers = data.get('peers')
+        if isinstance(peers, list):
+            data['peers'] = [p for p in peers if isinstance(p, dict) and str(p.get('code', '')).strip().lower() != code]
+    else:
+        raise ValueError('Unknown mutation action: ' + action)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
+    try:
+        import grp
+        gid = grp.getgrnam('xrayapi').gr_gid
+        os.fchown(tmp_fd, 0, gid)
+        os.fchmod(tmp_fd, 0o660)
+    except Exception:
+        pass
+    with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:
+        json.dump(data, fp, indent=2, ensure_ascii=False)
+        fp.flush()
+    os.replace(tmp_path, f)
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+" "$STATE_FILE" "$action" "$arg1" "$arg2"
+}
+
+set_state_json_val() {
+    _state_mutate_json "set_json" "$1" "$2"
+}
+
+get_state_json_val() {
+    local key="$1"
+    local default_json="${2:-null}"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "$default_json"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+f, k, d = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    print(json.dumps(data[k], ensure_ascii=False) if k in data else d)
+except Exception:
+    print(d)
+" "$STATE_FILE" "$key" "$default_json"
+}
+
+is_module_enabled() {
+    local mod_name="$1"
+    [[ -f "$STATE_FILE" ]] || return 1
+    python3 -c "
+import sys, json
+f, m = sys.argv[1], sys.argv[2]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    mods = data.get('modules', {})
+    sys.exit(0 if isinstance(mods, dict) and isinstance(mods.get(m), dict) and mods[m].get('enabled') is True else 1)
+except Exception:
+    sys.exit(1)
+" "$STATE_FILE" "$mod_name"
+}
+
+get_module_val() {
+    local mod_name="$1"
+    local field="$2"
+    local default_val="${3:-}"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "$default_val"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+f, m, k, d = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    mods = data.get('modules', {})
+    if isinstance(mods, dict) and isinstance(mods.get(m), dict):
+        v = mods[m].get(k, d)
+        print('' if v is None else v)
+    else:
+        print(d)
+except Exception:
+    print(d)
+" "$STATE_FILE" "$mod_name" "$field" "$default_val"
+}
+
+set_module_config() {
+    _state_mutate_json "set_module" "$1" "${2:-{\"enabled\": true}}"
+}
+
+remove_module_config() {
+    _state_mutate_json "remove_module" "$1"
+}
+
+count_enabled_modules() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "0"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as fp:
+        mods = json.load(fp).get('modules', {})
+    print(sum(1 for v in mods.values() if isinstance(v, dict) and v.get('enabled') is True) if isinstance(mods, dict) else 0)
+except Exception:
+    print(0)
+" "$STATE_FILE"
+}
+
+get_peers_json() {
+    get_state_json_val "peers" "[]"
+}
+
+upsert_peer_json() {
+    _state_mutate_json "upsert_peer" "$1"
+}
+
+remove_peer_json() {
+    _state_mutate_json "remove_peer" "$1"
+}
+
+has_active_xray_config() {
+    local role cur_r cur_v
+    role="$(get_state_val "role" "unconfigured")"
+    cur_r="$(get_state_val "has_relay" "0")"
+    cur_v="$(get_state_val "has_vless" "0")"
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$cur_r" == "1" || "$cur_v" == "1" ]]; then
+        return 0
+    fi
+    return 1
 }

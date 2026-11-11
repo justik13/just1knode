@@ -211,8 +211,25 @@ class ClientStore:
                         sdata = json.load(f)
                         if isinstance(sdata, dict):
                             role = sdata.get("role")
-                            has_vless = str(sdata.get("has_vless", "")) == "1"
-                            has_wl = str(sdata.get("has_wl", "")) == "1" or role == "origin"
+                            modules = sdata.get("modules") if isinstance(sdata.get("modules"), dict) else {}
+                            has_xhttp_mod = any(
+                                isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
+                                for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
+                            )
+                            has_tls_mod = (
+                                isinstance(modules.get("vless_tls"), dict)
+                                and bool(modules["vless_tls"].get("enabled"))
+                            )
+                            has_vless = (
+                                str(sdata.get("has_vless", "")) == "1"
+                                or has_tls_mod
+                                or role == "exit_node"
+                            )
+                            has_wl = (
+                                str(sdata.get("has_wl", "")) == "1"
+                                or role in ("origin", "eu_hub")
+                                or has_xhttp_mod
+                            )
                             if has_wl and not has_vless:
                                 return "white_internet"
                             if has_vless and not has_wl:

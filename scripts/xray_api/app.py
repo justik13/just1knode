@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 import sqlite3
@@ -259,6 +259,63 @@ XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/confi
 CLIENTS_FILE_PATH = Path(os.getenv("CLIENTS_FILE_PATH", "/etc/just1knode/clients.json"))
 STATE_FILE_PATH = Path(os.getenv("STATE_FILE_PATH", "/etc/just1knode/state.json"))
 
+BOT_STATUS_WRITE_INTERVAL = 30.0
+_last_bot_status_ts = 0.0
+_last_bot_status_ip = ""
+
+
+def _record_bot_activity(bot_ip: Optional[str] = None) -> None:
+    """Persist throttled last-seen bot heartbeat in bot_status.json for root CLI UI."""
+    global _last_bot_status_ts, _last_bot_status_ip
+    now = time.time()
+    clean_ip = (bot_ip or "").strip()
+    if (
+        (now - _last_bot_status_ts) < BOT_STATUS_WRITE_INTERVAL
+        and clean_ip == _last_bot_status_ip
+        and (STATE_FILE_PATH.parent / "bot_status.json").exists()
+    ):
+        return
+    if not STATE_FILE_PATH.parent.exists():
+        return
+    status_path = STATE_FILE_PATH.parent / "bot_status.json"
+    tmp_path = STATE_FILE_PATH.parent / "bot_status.json.tmp"
+    payload = {
+        "connected": True,
+        "last_seen_at": int(now),
+        "bot_ip": clean_ip,
+    }
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            tmp_path.chmod(0o640)
+        except Exception:
+            pass
+        tmp_path.replace(status_path)
+        _last_bot_status_ts = now
+        _last_bot_status_ip = clean_ip
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def get_bot_status() -> Dict[str, Any]:
+    """Read persisted bot heartbeat status safely without raising."""
+    status_path = STATE_FILE_PATH.parent / "bot_status.json"
+    if status_path.exists():
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("last_seen_at"):
+                return {
+                    "connected": True,
+                    "last_seen_at": data.get("last_seen_at"),
+                    "bot_ip": data.get("bot_ip") or "",
+                }
+        except Exception:
+            pass
+    return {"connected": False, "last_seen_at": None, "bot_ip": ""}
+
 completed_idempotent_ops = DurableIdempotencyStore(_resolve_idempotency_db_path())
 
 # Concurrency locks for in-flight idempotent operations (prevents check-then-mutate races)
@@ -350,8 +407,15 @@ def get_cdn_domain() -> Optional[str]:
         try:
             with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
                 st = json.load(f)
-                if isinstance(st, dict) and st.get("cdn_domain"):
-                    return str(st["cdn_domain"]).strip()
+                if isinstance(st, dict):
+                    if st.get("cdn_domain"):
+                        return str(st["cdn_domain"]).strip()
+                    modules = st.get("modules")
+                    if isinstance(modules, dict):
+                        for m_key in ("cdn_yandex", "cdn_turboflare"):
+                            m_cfg = modules.get(m_key)
+                            if isinstance(m_cfg, dict) and m_cfg.get("enabled") and m_cfg.get("domain"):
+                                return str(m_cfg["domain"]).strip()
         except Exception as e:
             logger.warning("Could not read cdn_domain from %s: %s", STATE_FILE_PATH, e)
 
@@ -437,19 +501,34 @@ def get_all_managed_inbounds() -> List[str]:
     if not discovered_tags and relay_tags:
         discovered_tags = list(relay_tags)
 
-    # Invariant: Origin nodes that host relays or have role 'origin' only use fallback just1k-wl-default
+    # Invariant: Origin / RU-Hub(XHTTP) nodes only use fallback just1k-wl-default
     # if config.json was unreadable or completely missing managed inbounds.
     is_origin_node = bool(relay_tags)
+    turboflare_enabled = False
     if not is_origin_node and STATE_FILE_PATH.exists():
         try:
             with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
                 sdata = json.load(f)
-                if isinstance(sdata, dict) and sdata.get("role") == "origin":
-                    is_origin_node = True
+                if isinstance(sdata, dict):
+                    role = sdata.get("role")
+                    modules = sdata.get("modules") if isinstance(sdata.get("modules"), dict) else {}
+                    has_xhttp_mod = any(
+                        isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
+                        for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
+                    )
+                    turboflare_enabled = (
+                        isinstance(modules.get("cdn_turboflare"), dict)
+                        and bool(modules["cdn_turboflare"].get("enabled"))
+                    )
+                    if role == "origin" or (role == "ru_hub" and has_xhttp_mod):
+                        is_origin_node = True
         except Exception:
             pass
-    if is_origin_node and (not config_read_ok or not config_tags) and "just1k-wl-default" not in discovered_tags:
-        discovered_tags.insert(0, "just1k-wl-default")
+    if is_origin_node and (not config_read_ok or not config_tags):
+        if "just1k-wl-default" not in discovered_tags:
+            discovered_tags.insert(0, "just1k-wl-default")
+        if turboflare_enabled and "just1k-wl-turboflare" not in discovered_tags:
+            discovered_tags.append("just1k-wl-turboflare")
 
     # 3. Fallback to environment override (for mock/test environments without real config files)
     if not discovered_tags:
@@ -668,6 +747,19 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def track_bot_activity_middleware(request: Request, call_next):
+    if request.url.path.startswith("/v1/"):
+        expected_key = os.getenv("XRAY_API_KEY") or API_KEY
+        req_key = request.headers.get("X-API-Key")
+        if expected_key and req_key and secrets.compare_digest(req_key, expected_key):
+            try:
+                _record_bot_activity(request.client.host if request.client else "")
+            except Exception:
+                pass
+    return await call_next(request)
+
+
 # Security dependency
 def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
     expected_key = os.getenv("XRAY_API_KEY") or API_KEY
@@ -820,22 +912,35 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     secret_path = get_secret_base_path()
 
     node_meta = get_node_state_metadata()
-    vless_domain = node_meta.get("vless_domain") or node_meta.get("sni") or ""
+    vless_domain = node_meta.get("vless_domain") or node_meta.get("domain") or node_meta.get("sni") or ""
+    role = str(node_meta.get("role") or "")
+    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
+    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
+    has_wl_module = any(
+        isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
+        for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
+    )
+    has_vless_module = isinstance(modules.get("vless_tls"), dict) and bool(
+        modules["vless_tls"].get("enabled")
+    )
     detected_services: List[str] = []
     if (
         any(
             t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")
             for t in target_inbounds
         )
-        or node_meta.get("role") == "origin"
+        or role in ("origin", "eu_hub")
+        or (role == "ru_hub" and has_wl_module)
     ):
         detected_services.append("white_internet")
     if (
         any(t.startswith("just1k-vless-") or t == "just1k-vless-direct" for t in target_inbounds)
         or str(node_meta.get("has_vless", "")) == "1"
+        or role == "exit_node"
+        or (role == "ru_hub" and has_vless_module)
     ):
         detected_services.append("vless")
-    if str(node_meta.get("has_relay", "")) == "1" or node_meta.get("role") == "relay":
+    if str(node_meta.get("has_relay", "")) == "1" or role in ("relay", "eu_hub"):
         detected_services.append("relay")
 
     capabilities: List[str] = []
@@ -877,6 +982,8 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     except Exception as e:
         logger.debug("Failed to read disk usage: %s", e)
 
+    bot_status = get_bot_status()
+
     return {
         "status": "ok" if is_running else "error",
         "xray_running": is_running,
@@ -885,6 +992,11 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "inbounds": target_inbounds,
         "services": detected_services,
         "capabilities": capabilities,
+        "role": role,
+        "modules": modules,
+        "peers": peers,
+        "bot_connected": bool(bot_status.get("connected")),
+        "bot_last_seen_at": bot_status.get("last_seen_at"),
         "vless_domain": vless_domain,
         "relays": relays if not relays_err else [],
         "relays_error": relays_err,
@@ -898,6 +1010,28 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "synchronized": node_sync_state.get("status") == "synchronized",
         "last_synced_at": node_sync_state.get("last_synced_at"),
         "disk_usage": disk_usage_info,
+    }
+
+
+@app.get("/v1/node/status")
+def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
+    """Read-only v2 hub metadata summary (role, modules, peers, bot connection)."""
+    node_meta = get_node_state_metadata()
+    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
+    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
+    bot_status = get_bot_status()
+    return {
+        "status": "ok",
+        "role": str(node_meta.get("role") or ""),
+        "domain": str(node_meta.get("domain") or ""),
+        "cdn_domain": get_cdn_domain(),
+        "vless_domain": node_meta.get("vless_domain") or node_meta.get("domain") or "",
+        "sub_path_prefix": get_sub_path_prefix(),
+        "modules": modules,
+        "peers": peers,
+        "inbounds": get_all_managed_inbounds(),
+        "bot_connected": bool(bot_status.get("connected")),
+        "bot_last_seen_at": bot_status.get("last_seen_at"),
     }
 
 
@@ -1869,19 +2003,23 @@ async def deploy_certificate(
             logger.warning("Nginx reload failed: %s", e)
 
     if shutil.which("systemctl"):
-        try:
-            res = await asyncio.create_subprocess_exec(
-                "systemctl",
-                "restart",
-                "xray",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await res.communicate()
-            if res.returncode == 0:
-                actions.append("xray_restarted")
-        except Exception as e:
-            logger.warning("Xray restart failed: %s", e)
+        if (STATE_FILE_PATH.parent / "traffic_limit_exceeded").exists():
+            logger.info("Skipping Xray restart on certificate deploy: traffic_limit_exceeded is active")
+            actions.append("xray_restart_skipped_traffic_limit")
+        else:
+            try:
+                res = await asyncio.create_subprocess_exec(
+                    "systemctl",
+                    "restart",
+                    "xray",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await res.communicate()
+                if res.returncode == 0:
+                    actions.append("xray_restarted")
+            except Exception as e:
+                logger.warning("Xray restart failed: %s", e)
 
     logger.info("TLS certificate updated for %s. Actions: %s", clean_domain, actions)
     return {
