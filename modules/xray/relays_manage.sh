@@ -695,15 +695,19 @@ EOF
         error "Не удалось перезагрузить Nginx после добавления релея $name ($code). Выполнен откат."
     fi
 
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        manifest_rollback
-        error "Xray не запустился после добавления релея $name ($code). Выполнен полный откат."
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — релей $name ($code) добавлен без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            manifest_rollback
+            error "Xray не запустился после добавления релея $name ($code). Выполнен полный откат."
+        fi
+        ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
     fi
-    ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
     manifest_commit
 
     log "Relay '${name}' (код: ${code}) успешно добавлен и подключен к шлюзу Origin!"
@@ -874,15 +878,19 @@ except Exception:
         error "Не удалось перезагрузить Nginx при удалении релея $target. Выполнен откат."
     fi
 
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        manifest_rollback
-        error "Xray не запустился после удаления релея $target. Выполнен полный откат."
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — релей ${target} удалён без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            manifest_rollback
+            error "Xray не запустился после удаления релея $target. Выполнен полный откат."
+        fi
+        ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
     fi
-    ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
     manifest_commit
 
     log "Relay '${target}' (код: ${code}) успешно удален."
@@ -1275,17 +1283,21 @@ print(f'OK:{matched_code}')
         return 1
     fi
 
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        manifest_rollback
-        error "Xray не смог запуститься после обновления релея '${matched_code:-$relay_target}'. Выполнен полный откат."
-        return 1
-    fi
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — настройки релея '${matched_code:-$relay_target}' обновлены без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            manifest_rollback
+            error "Xray не смог запуститься после обновления релея '${matched_code:-$relay_target}'. Выполнен полный откат."
+            return 1
+        fi
 
-    ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
+        ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
+    fi
 
     manifest_commit
     log "✔ Relay '$matched_code' успешно переключен на домен '$new_sni' (режим: $new_sec)!"

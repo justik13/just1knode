@@ -111,11 +111,15 @@ restore_node() {
             chown root:xrayapi "$state_file" 2>/dev/null || true
         fi
         if command -v systemctl >/dev/null 2>&1; then
-            if systemctl is-active --quiet xray 2>/dev/null || systemctl is-enabled --quiet xray 2>/dev/null; then
-                systemctl restart xray 2>/dev/null || true
-            fi
-            if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null; then
-                systemctl restart xray-api 2>/dev/null || true
+            if is_traffic_limit_exceeded; then
+                warn "Лимит трафика исчерпан — службы Xray не запускаются после восстановления."
+            else
+                if systemctl is-active --quiet xray 2>/dev/null || systemctl is-enabled --quiet xray 2>/dev/null; then
+                    systemctl restart xray 2>/dev/null || true
+                fi
+                if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null; then
+                    systemctl restart xray-api 2>/dev/null || true
+                fi
             fi
         fi
         log "✔ Восстановление узла успешно завершено."

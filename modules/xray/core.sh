@@ -113,6 +113,12 @@ update_xray_core() {
 
         log "Применение обновления..."
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
+        if is_traffic_limit_exceeded; then
+            warn "Лимит трафика исчерпан — бинарник Xray обновлён без запуска службы."
+            log "Обновление бинарника завершено! Версия: $($XRAY_BIN version | head -n 1)"
+            rm -rf "$tmp_dir"
+            return 0
+        fi
         set +e
         systemctl restart xray
         local restart_rc=$?
@@ -466,6 +472,9 @@ update_node_post() {
     migrate_legacy_state
     heal_node_firewall_and_stealth
     cleanup_legacy_traffic_watchdog_residue
+    if declare -f reconcile_traffic_limit_on_update >/dev/null 2>&1; then
+        reconcile_traffic_limit_on_update
+    fi
 
     # Автоматическая оптимизация конфигурации в зависимости от роли сервера
     local role

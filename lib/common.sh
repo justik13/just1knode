@@ -1421,6 +1421,7 @@ cleanup_legacy_traffic_watchdog_residue() {
     rm -f "${systemd_dir}/just1knode-traffic.service" "${systemd_dir}/just1knode-traffic.timer" 2>/dev/null || true
     rm -f "${systemd_dir}/xray.service.d/traffic-cutoff.conf" 2>/dev/null || true
     rm -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" /etc/just1knode/traffic_cutoff.active 2>/dev/null || true
+    rm -f "${STATE_DIR:-/etc/just1knode}/traffic_monthly.json" /etc/just1knode/traffic_monthly.json 2>/dev/null || true
     rm -f /run/just1knode_traffic_cutoff "${RUN_DIR:-/run}/just1knode_traffic_cutoff" 2>/dev/null || true
     if [[ -d "${systemd_dir}/xray.service.d" ]] && [[ -z "$(ls -A "${systemd_dir}/xray.service.d" 2>/dev/null)" ]]; then
         rmdir "${systemd_dir}/xray.service.d" 2>/dev/null || true
@@ -1428,6 +1429,21 @@ cleanup_legacy_traffic_watchdog_residue() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl daemon-reload 2>/dev/null || true
         systemctl reset-failed just1knode-traffic.service just1knode-traffic.timer 2>/dev/null || true
+    fi
+}
+
+is_traffic_limit_exceeded() {
+    local state_dir="${STATE_DIR:-/etc/just1knode}"
+    [[ -f "${state_dir}/traffic_limit_exceeded" || -f "${state_dir}/traffic_cutoff.active" ]]
+}
+
+safe_restart_xray() {
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан (активен флаг traffic_limit_exceeded) — запуск Xray пропущен."
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart xray
     fi
 }
 

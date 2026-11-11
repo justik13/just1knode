@@ -296,6 +296,12 @@ show_status() {
             systemctl is-active --quiet nginx && echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444):         ${RED}○ Не работает${NC}"
         fi
     fi
+
+    if [[ "$role" != "не настроен" ]] && declare -f show_traffic_limit_status >/dev/null 2>&1; then
+        if [[ -f "${TRAFFIC_LIMIT_CONFIG:-${STATE_DIR:-/etc/just1knode}/traffic_limit.json}" ]] || command -v vnstat >/dev/null 2>&1; then
+            show_traffic_limit_status
+        fi
+    fi
 }
 
 show_bot_credentials() {
@@ -476,30 +482,38 @@ run_doctor() {
     # gRPC проверяется на Origin, VLESS и модульных узлах с поддержкой VLESS
     if [[ "$role" == "origin" || "$role" == "vless" || "$cur_has_v" == "1" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
-        local grpc_ok=0
-        for _ in 1 2 3; do
-            if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 10085), timeout=2); s.close()" 2>/dev/null; then
-                grpc_ok=1
-                break
-            fi
-            sleep 0.5
-        done
-        if [[ $grpc_ok -eq 1 ]]; then
-            echo -e "  ${GREEN}✔${NC} gRPC сокет Xray отвечает"
+        if is_traffic_limit_exceeded; then
+            echo -e "  ${YELLOW}!${NC} gRPC сокет Xray не проверялся (Xray остановлен по лимиту трафика)"
+            warnings=$((warnings + 1))
         else
-            echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
-            failed=$((failed + 1))
+            local grpc_ok=0
+            for _ in 1 2 3; do
+                if python3 -c "import socket; s = socket.create_connection(('127.0.0.1', 10085), timeout=2); s.close()" 2>/dev/null; then
+                    grpc_ok=1
+                    break
+                fi
+                sleep 0.5
+            done
+            if [[ $grpc_ok -eq 1 ]]; then
+                echo -e "  ${GREEN}✔${NC} gRPC сокет Xray отвечает"
+            else
+                echo -e "  ${RED}✗${NC} gRPC сокет Xray недоступен (127.0.0.1:10085)"
+                failed=$((failed + 1))
+            fi
         fi
     fi
 
     if [[ "$role" == "relay" || "$cur_has_r" == "1" ]]; then
         log "2a. Проверка Relay инбаунд порта..."
         local r_port
-        r_port="$(get_state_val "relay_port" "10443")"
+        r_port="$(get_state_val "relay_port" "")"
         if ! [[ "$r_port" =~ ^[0-9]+$ ]] || (( r_port < 1 || r_port > 65535 )); then
-            r_port="10443"
-        fi
-        if ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
+            echo -e "  ${YELLOW}!${NC} Порт Relay не задан в state.json (или некорректен: '${r_port:-empty}')"
+            warnings=$((warnings + 1))
+        elif is_traffic_limit_exceeded; then
+            echo -e "  ${YELLOW}!${NC} Порт $r_port не проверялся (Xray остановлен по лимиту трафика)"
+            warnings=$((warnings + 1))
+        elif ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
         else
             echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss (выполните: just1knode heal)"
@@ -1735,14 +1749,14 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             install)
                 case "${2:-}" in
                     origin|xray-origin) install_xray_origin_node "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" ;;
-                    relay|xray-relay|exit|xray-exit) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
+                    relay|xray-relay|exit|xray-exit) install_xray_relay_node "${3:-}" "${4:-}" "${5:-}" "${6:-tls}" ;;
                     vless|tls|xray-vless) install_vless_direct_node "${3:-}" ;;
                     *) error "Неизвестный тип установки: $2. Доступно: origin, relay, vless, tls" ;;
                 esac
                 ;;
             install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
             uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
-            install-relay|add-relay) install_xray_relay_node "${2:-10443}" "${3:-}" "${4:-}" "${5:-tls}" ;;
+            install-relay|add-relay) install_xray_relay_node "${2:-}" "${3:-}" "${4:-}" "${5:-tls}" ;;
             uninstall-relay|remove-relay)
                 if [[ "$(get_state_val "role")" == "origin" ]]; then
                     remove_relay_node "${2:-}"
@@ -1799,6 +1813,9 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 restore_node "${2:-}"
                 ;;
             limit|traffic)
+                case "${2:-}" in
+                    set|reset-day|day|disable|off|check|"") check_root; init_state_dir ;;
+                esac
                 case "${2:-}" in
                     set) set_traffic_limit "${3:-}" "${4:-}" ;;
                     reset-day|day) set_traffic_reset_day "${3:-1}" ;;

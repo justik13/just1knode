@@ -153,12 +153,14 @@ if [ -n "${RENEWED_LINEAGE:-}" ]; then
 fi
 
 if [ "$restarted" = "1" ]; then
-    if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
-        if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+    if [ ! -f /etc/just1knode/traffic_limit_exceeded ] && [ ! -f /etc/just1knode/traffic_cutoff.active ]; then
+        if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
+            if /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+                systemctl restart xray 2>/dev/null || true
+            fi
+        else
             systemctl restart xray 2>/dev/null || true
         fi
-    else
-        systemctl restart xray 2>/dev/null || true
     fi
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nginx 2>/dev/null; then
         systemctl reload nginx 2>/dev/null || true
@@ -666,6 +668,16 @@ if cands:
         return 1
     fi
 
+    # Проверка доступности порта туннеля Relay ДО DNS/ACME-операций
+    if ss -tlnp 2>/dev/null | grep -qE ":${relay_port}([[:space:]]|$)" || netstat -tlnp 2>/dev/null | grep -qE ":${relay_port}([[:space:]]|$)"; then
+        local conflict_proc
+        conflict_proc=$(ss -tlnp 2>/dev/null | grep -E ":${relay_port}([[:space:]]|$)" || true)
+        if ! echo "$conflict_proc" | grep -q "xray"; then
+            error "Порт Relay ${relay_port}/tcp уже занят другим процессом на хосте:\n$conflict_proc\nВыберите свободный порт для Relay (например: 10443)."
+            return 1
+        fi
+    fi
+
     # Валидация DNS A-записи домена (строго только для TLS)
     if ! validate_relay_dns "$dest_server" "$my_ip"; then
         return 1
@@ -674,16 +686,6 @@ if cands:
     # Выпуск SSL сертификата (Zero-Signature: порт 80 открывается только на время ACME-челленджа)
     if ! issue_relay_tls_cert "$dest_server"; then
         return 1
-    fi
-
-    # Проверка доступности порта туннеля Relay
-    if ss -tlnp 2>/dev/null | grep -q ":${relay_port} " || netstat -tlnp 2>/dev/null | grep -q ":${relay_port} "; then
-        local conflict_proc
-        conflict_proc=$(ss -tlnp 2>/dev/null | grep ":${relay_port} " || true)
-        if ! echo "$conflict_proc" | grep -q "xray"; then
-            error "Порт Relay ${relay_port}/tcp уже занят другим процессом на хосте:\n$conflict_proc\nВыберите свободный порт для Relay (например: 10443)."
-            return 1
-        fi
     fi
 
     install_xray_binaries
@@ -919,9 +921,16 @@ EOF
     mv -f "$tmp_xray_config" "$XRAY_CONFIG"
     ensure_xray_config_permissions "$XRAY_CONFIG"
 
-    if [[ "$cur_has_vless" == "1" && "$sec_mode" == "tls" ]]; then
-        if ! deploy_vless_fallback_nginx; then
-            warn "Nginx: не удалось настроить fallback для VLESS при переконфигурации Relay."
+    if [[ "$sec_mode" == "tls" ]]; then
+        if [[ -z "$(detect_host_port80_container)" ]]; then
+            install_nginx_if_missing
+        fi
+        if command -v nginx >/dev/null 2>&1; then
+            if ! deploy_vless_fallback_nginx; then
+                warn "Nginx: не удалось настроить fallback (127.0.0.1:80) для TLS Relay."
+            fi
+        else
+            warn "Nginx не установлен — fallback 127.0.0.1:80 для TLS Relay не активирован."
         fi
     fi
 
@@ -949,7 +958,7 @@ EOF
     fi
 
     deploy_xray_systemd_service
-    systemctl restart xray
+    safe_restart_xray
 
     set_state_val "has_relay" "1"
     set_state_val "relay_port" "$relay_port"
@@ -1375,14 +1384,18 @@ except Exception:
         return 1
     fi
 
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        manifest_rollback
-        error "Xray не смог запуститься с новым сертификатом. Выполнен полный откат."
-        return 1
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — сертификат Relay обновлён без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            manifest_rollback
+            error "Xray не смог запуститься с новым сертификатом. Выполнен полный откат."
+            return 1
+        fi
     fi
 
     set_state_val "security" "tls"
@@ -1770,14 +1783,18 @@ print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS +
         error "Ошибка валидации Xray Relay после оптимизации! Выполнен полный откат."
     fi
 
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        warn "Служба Xray Relay не запустилась. Выполняется полный откат..."
-        manifest_rollback
-        error "Откат выполнен: служба Xray Relay не смогла запуститься с новой конфигурацией."
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — конфигурация Relay обновлена без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            warn "Служба Xray Relay не запустилась. Выполняется полный откат..."
+            manifest_rollback
+            error "Откат выполнен: служба Xray Relay не смогла запуститься с новой конфигурацией."
+        fi
     fi
 
     manifest_commit
@@ -1792,8 +1809,15 @@ print('[+] Xray Relay config successfully optimized (UseIPv4 + Independent DNS +
 
     heal_node_firewall_and_stealth
 
+    if [[ "$cur_has_vless" == "1" || ( "$cur_has_relay" == "1" && "$current_sec" == "tls" ) ]]; then
+        if [[ -z "$(detect_host_port80_container)" ]]; then
+            install_nginx_if_missing
+        fi
+        if command -v nginx >/dev/null 2>&1; then
+            deploy_vless_fallback_nginx
+        fi
+    fi
     if [[ "$cur_has_vless" == "1" ]]; then
-        deploy_vless_fallback_nginx
         ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
         setup_xray_api_proxy
     fi
@@ -2085,7 +2109,7 @@ with open(out_f, 'w', encoding='utf-8') as f:
         if [[ "$orig_xray_exists" -eq 1 && -n "$orig_bkp_cfg" && -f "$orig_bkp_cfg" ]]; then
             cp -f "$orig_bkp_cfg" "$XRAY_CONFIG"
             ensure_xray_config_permissions "$XRAY_CONFIG"
-            if ! systemctl restart xray 2>/dev/null; then
+            if ! safe_restart_xray 2>/dev/null; then
                 warn "Критическая ошибка: не удалось перезапустить Xray при откате к предыдущей конфигурации!"
             fi
         elif [[ "$orig_xray_exists" -eq 0 ]]; then
@@ -2158,11 +2182,15 @@ with open(out_f, 'w', encoding='utf-8') as f:
     ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
 
     deploy_xray_systemd_service
-    if ! systemctl restart xray; then
-        warn "Служба Xray не смогла перезапуститься с новой конфигурацией VLESS."
-        rollback_vless_installation
-        error "Ошибка запуска Xray с конфигурацией VLESS. Выполнен откат к исходному состоянию."
-        return 1
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — конфигурация VLESS применена без запуска Xray."
+    else
+        if ! systemctl restart xray; then
+            warn "Служба Xray не смогла перезапуститься с новой конфигурацией VLESS."
+            rollback_vless_installation
+            error "Ошибка запуска Xray с конфигурацией VLESS. Выполнен откат к исходному состоянию."
+            return 1
+        fi
     fi
 
     if ! deploy_vless_fallback_nginx; then
@@ -2385,7 +2413,7 @@ if any(ib.get('tag') == 'just1k-vless-direct' for ib in cfg.get('inbounds', []))
 
     if [[ "$cur_has_r" == "1" ]]; then
         if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" 2>/dev/null; then
-            systemctl restart xray 2>/dev/null || true
+            safe_restart_xray 2>/dev/null || true
         fi
     else
         systemctl stop xray 2>/dev/null || true

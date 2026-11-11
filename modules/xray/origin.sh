@@ -594,7 +594,7 @@ os.replace(t_path, config_file)
     fi
 
     deploy_xray_systemd_service
-    systemctl restart xray
+    safe_restart_xray
 
     if ! deploy_xray_api_service "$api_key" "$cdn_domain"; then
         error "Не удалось развернуть службу xray-api."
@@ -1972,18 +1972,22 @@ except Exception:
         manifest_rollback
         error "Не удалось перезагрузить Nginx после оптимизации! Выполнен откат."
     fi
-    set +e
-    systemctl restart xray
-    local xray_rc=$?
-    set -e
-    if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
-        warn "Служба Xray не запустилась. Выполняется полный откат..."
-        manifest_rollback
-        error "Откат выполнен: служба Xray не смогла запуститься с новой конфигурацией."
-    fi
+    if is_traffic_limit_exceeded; then
+        warn "Лимит трафика исчерпан — конфигурация Origin обновлена без запуска Xray."
+    else
+        set +e
+        systemctl restart xray
+        local xray_rc=$?
+        set -e
+        if [[ $xray_rc -ne 0 ]] || ! systemctl is-active --quiet xray; then
+            warn "Служба Xray не запустилась. Выполняется полный откат..."
+            manifest_rollback
+            error "Откат выполнен: служба Xray не смогла запуститься с новой конфигурацией."
+        fi
 
-    # systemd автоматически перезапускает xray-api благодаря PartOf=xray.service
-    ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
+        # systemd автоматически перезапускает xray-api благодаря PartOf=xray.service
+        ensure_xray_api_healthy || warn "Служба xray-api не ответила вовремя. Проверьте её статус вручную через 'systemctl status xray-api'."
+    fi
 
     manifest_commit
     log "Оптимизация и восстановление конфигурации Origin завершены успешно!"

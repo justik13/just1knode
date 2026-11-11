@@ -224,9 +224,54 @@ try:
         data['xray_api_key'] = data['awg_api_key']
         changed = True
 
+    # Migrate active legacy traffic watchdog settings into traffic_limit.json before key purge
+    state_dir = os.path.dirname(os.path.abspath(f))
+    tl_cfg_path = os.path.join(state_dir, 'traffic_limit.json')
+    tl_exceeded_path = os.path.join(state_dir, 'traffic_limit_exceeded')
+    legacy_cutoff_path = os.path.join(state_dir, 'traffic_cutoff.active')
+    old_tl_status = str(data.get('traffic_limit_status') or '').strip().lower()
+    raw_old_gb = data.get('traffic_limit_gb')
+    raw_old_day = data.get('traffic_reset_day')
+    old_gb = 0
+    try:
+        if raw_old_gb is not None and not isinstance(raw_old_gb, bool):
+            old_gb = int(str(raw_old_gb).strip() or 0)
+    except (TypeError, ValueError):
+        old_gb = 0
+    old_day = 1
+    try:
+        if raw_old_day is not None and not isinstance(raw_old_day, bool):
+            parsed_day = int(str(raw_old_day).strip() or 1)
+            if 1 <= parsed_day <= 31:
+                old_day = parsed_day
+    except (TypeError, ValueError):
+        old_day = 1
+
+    if old_tl_status == 'enabled' and old_gb > 0 and not os.path.exists(tl_cfg_path):
+        tl_fd, tl_tmp = tempfile.mkstemp(dir=state_dir, suffix='.tmp')
+        try:
+            os.fchmod(tl_fd, 0o640)
+            with os.fdopen(tl_fd, 'w', encoding='utf-8') as tfp:
+                json.dump({'limit_gb': old_gb, 'reset_day': old_day}, tfp, indent=2)
+                tfp.flush()
+            os.replace(tl_tmp, tl_cfg_path)
+        except Exception:
+            if os.path.exists(tl_tmp):
+                os.remove(tl_tmp)
+    if (
+        str(data.get('traffic_cutoff_triggered') or '').strip().lower() == 'true'
+        or os.path.exists(legacy_cutoff_path)
+    ) and os.path.exists(tl_cfg_path) and not os.path.exists(tl_exceeded_path):
+        try:
+            with open(tl_exceeded_path, 'a', encoding='utf-8'):
+                pass
+        except Exception:
+            pass
+
     legacy_keys = [
         'has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port',
         'traffic_limit_status', 'traffic_limit_gb', 'traffic_reset_day', 'traffic_cutoff_triggered',
+        'traffic_telegram_token', 'traffic_telegram_chat_id', 'traffic_warn_pct',
         'traffic_tg_token', 'traffic_tg_chat',
     ]
     for k in legacy_keys:
@@ -408,7 +453,11 @@ manifest_rollback() {
     fi
     if [[ -n "${XRAY_CONFIG:-}" && -f "${XRAY_CONFIG:-}" && -n "${XRAY_BIN:-}" && -x "${XRAY_BIN:-}" ]]; then
         if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
-            systemctl restart xray 2>/dev/null || true
+            if declare -f safe_restart_xray >/dev/null 2>&1; then
+                safe_restart_xray >/dev/null 2>&1 || true
+            elif [[ ! -f "${STATE_DIR:-/etc/just1knode}/traffic_limit_exceeded" && ! -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" ]]; then
+                systemctl restart xray 2>/dev/null || true
+            fi
         fi
     fi
 

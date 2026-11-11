@@ -32,11 +32,18 @@ ensure_vnstat() {
 
 apply_vnstat_reset_day() {
     local reset_day="${1:-1}"
+    local vnstat_rotate="$reset_day"
+    if [[ ! "$vnstat_rotate" =~ ^[0-9]+$ ]] || (( vnstat_rotate < 1 )); then
+        vnstat_rotate=1
+    elif (( vnstat_rotate > 28 )); then
+        warn "vnStat поддерживает MonthRotate только в диапазоне 1..28; для vnstat.conf установлено 28 (в конфиге сохранён день ${reset_day})."
+        vnstat_rotate=28
+    fi
     if [[ -f /etc/vnstat.conf ]]; then
         if grep -q "^[# ]*MonthRotate" /etc/vnstat.conf 2>/dev/null; then
-            sed -i -E "s/^[# ]*MonthRotate .*/MonthRotate ${reset_day}/" /etc/vnstat.conf 2>/dev/null || true
+            sed -i -E "s/^[# ]*MonthRotate .*/MonthRotate ${vnstat_rotate}/" /etc/vnstat.conf 2>/dev/null || true
         else
-            echo "MonthRotate ${reset_day}" >> /etc/vnstat.conf 2>/dev/null || true
+            echo "MonthRotate ${vnstat_rotate}" >> /etc/vnstat.conf 2>/dev/null || true
         fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl restart vnstat 2>/dev/null || true
@@ -89,30 +96,66 @@ except Exception:
 }
 
 get_monthly_traffic_bytes() {
-    # Uses vnstat --json m 1 for accurate persistent accounting across reboots
-    ensure_vnstat >/dev/null 2>&1 || true
+    # Uses vnstat --json m 1 for persistent accounting across reboots without mutating system packages
+    local reset_day="${1:-}"
+    if [[ -z "$reset_day" ]]; then
+        reset_day="$(get_traffic_limit_val "reset_day" "")"
+        reset_day="${reset_day:-$(get_state_val "traffic_reset_day" "1")}"
+    fi
+    if [[ ! "$reset_day" =~ ^[0-9]+$ ]] || (( reset_day < 1 || reset_day > 31 )); then
+        reset_day=1
+    fi
+    command -v vnstat >/dev/null 2>&1 || return 1
     python3 -c '
-import json, subprocess
-total = 0
+import datetime, json, subprocess, sys
+
+reset_day = int(sys.argv[1] or 1)
+vnstat_rot = max(1, min(28, reset_day))
 try:
     res = subprocess.run(["vnstat", "--json", "m", "1"], capture_output=True, text=True, timeout=5)
-    if res.returncode == 0 and res.stdout.strip():
-        data = json.loads(res.stdout)
-        # vnStat v1 reports rx/tx in KiB (jsonversion == "1"), v2+ reports bytes
-        unit_mult = 1024 if str(data.get("jsonversion", "")) == "1" else 1
-        for iface in data.get("interfaces", []):
-            name = iface.get("name", "")
-            if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "tun", "tap")):
-                continue
-            months = iface.get("traffic", {}).get("month", [])
-            if months:
-                # Chronologically latest month entry
-                m = max(months, key=lambda x: (x.get("date", {}).get("year", 0), x.get("date", {}).get("month", 0), x.get("id", 0)))
-                total += (int(m.get("rx", 0)) + int(m.get("tx", 0))) * unit_mult
 except Exception:
-    pass
+    sys.exit(1)
+
+if res.returncode != 0 or not res.stdout.strip():
+    sys.exit(1)
+
+try:
+    data = json.loads(res.stdout)
+except Exception:
+    sys.exit(1)
+
+# vnStat v1 reports rx/tx in KiB (jsonversion == "1"), v2+ reports bytes
+unit_mult = 1024 if str(data.get("jsonversion", "")) == "1" else 1
+today = datetime.date.today()
+total = 0
+
+for iface in data.get("interfaces", []):
+    name = iface.get("name", "")
+    if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "tun", "tap")):
+        continue
+    months = iface.get("traffic", {}).get("month", [])
+    if not months:
+        continue
+    m = max(months, key=lambda x: (x.get("date", {}).get("year", 0), x.get("date", {}).get("month", 0), x.get("id", 0)))
+    rot_raw = iface.get("monthrotate", vnstat_rot)
+    try:
+        rot = max(1, min(28, int(rot_raw)))
+    except Exception:
+        rot = vnstat_rot
+    if today.day < rot:
+        first_day = today.replace(day=1)
+        prev_day = first_day - datetime.timedelta(days=1)
+        exp_ym = (prev_day.year, prev_day.month)
+    else:
+        exp_ym = (today.year, today.month)
+    m_date = m.get("date", {})
+    m_ym = (int(m_date.get("year", 0) or 0), int(m_date.get("month", 0) or 0))
+    if m_ym < exp_ym:
+        continue
+    total += (int(m.get("rx", 0)) + int(m.get("tx", 0))) * unit_mult
+
 print(total)
-' 2>/dev/null || echo "0"
+' "$reset_day" 2>/dev/null
 }
 
 deploy_traffic_limit_timer() {
@@ -144,7 +187,7 @@ EOF
 Description=Just1kNode Traffic Limit Watchdog Timer (every 15 min)
 
 [Timer]
-OnBootSec=3min
+OnBootSec=15s
 OnUnitActiveSec=15min
 Unit=just1knode-traffic-limit.service
 
@@ -185,15 +228,23 @@ check_traffic_limit() {
         return 0
     fi
 
-    local limit_gb
+    local limit_gb reset_day
     limit_gb="$(get_traffic_limit_val "limit_gb" "0")"
+    reset_day="$(get_traffic_limit_val "reset_day" "1")"
 
     if ! [[ "$limit_gb" =~ ^[0-9]+$ ]] || [[ "$limit_gb" -le 0 ]]; then
         return 0
     fi
 
+    if ! command -v vnstat >/dev/null 2>&1; then
+        ensure_vnstat >/dev/null 2>&1 || true
+    fi
+
     local total_bytes
-    total_bytes="$(get_monthly_traffic_bytes)"
+    if ! total_bytes="$(get_monthly_traffic_bytes "$reset_day")" || [[ ! "$total_bytes" =~ ^[0-9]+$ ]]; then
+        warn "Не удалось получить статистику трафика из vnStat — состояние лимита оставлено без изменений."
+        return 1
+    fi
 
     local is_exceeded
     is_exceeded="$(python3 -c '
@@ -201,7 +252,7 @@ import sys
 total = int(sys.argv[1] or 0)
 limit_gb = int(sys.argv[2] or 0)
 print(1 if limit_gb > 0 and total >= limit_gb * (1024 ** 3) else 0)
-' "${total_bytes:-0}" "$limit_gb" 2>/dev/null || echo "0")"
+' "$total_bytes" "$limit_gb" 2>/dev/null || echo "0")"
 
     if [[ "$is_exceeded" -eq 1 ]]; then
         warn "Лимит хостинга исчерпан (${limit_gb} ГБ). Остановка службы Xray..."
@@ -209,13 +260,11 @@ print(1 if limit_gb > 0 and total >= limit_gb * (1024 ** 3) else 0)
         if command -v systemctl >/dev/null 2>&1; then
             systemctl stop xray 2>/dev/null || true
         fi
-        set_state_val "traffic_cutoff_triggered" "true" 2>/dev/null || true
     else
         # Traffic is below limit
         if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || -f "$TRAFFIC_LEGACY_CUTOFF_FLAG" ]]; then
             warn "Лимит трафика восстановлен / наступил новый биллинговый цикл. Запуск Xray..."
             rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
-            set_state_val "traffic_cutoff_triggered" "false" 2>/dev/null || true
             if command -v systemctl >/dev/null 2>&1; then
                 systemctl start xray 2>/dev/null || true
             fi
@@ -249,12 +298,8 @@ set_traffic_limit() {
     apply_vnstat_reset_day "$reset_day"
     save_traffic_limit_config "$limit_gb" "$reset_day"
 
-    set_state_val "traffic_limit_status" "enabled" 2>/dev/null || true
-    set_state_val "traffic_limit_gb" "$limit_gb" 2>/dev/null || true
-    set_state_val "traffic_reset_day" "$reset_day" 2>/dev/null || true
-
     deploy_traffic_limit_timer
-    check_traffic_limit
+    check_traffic_limit || true
 
     log "Лимит трафика успешно установлен: ${BOLD}${limit_gb} ГБ${NC} (сброс: ${reset_day}-го числа)."
     log "Фоновый таймер (just1knode-traffic-limit.timer) активен с интервалом 15 минут."
@@ -279,15 +324,13 @@ set_traffic_reset_day() {
     fi
 
     apply_vnstat_reset_day "$reset_day"
-    set_state_val "traffic_reset_day" "$reset_day" 2>/dev/null || true
 
     log "День сброса биллинга изменен на: ${BOLD}${reset_day}-е число${NC}."
-    check_traffic_limit
+    check_traffic_limit || true
 }
 
 disable_traffic_limit() {
     rm -f "$TRAFFIC_LIMIT_CONFIG" 2>/dev/null || true
-    set_state_val "traffic_limit_status" "disabled" 2>/dev/null || true
 
     remove_traffic_limit_timer
 
@@ -297,11 +340,13 @@ disable_traffic_limit() {
     fi
 
     rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
-    set_state_val "traffic_cutoff_triggered" "false" 2>/dev/null || true
 
     if command -v systemctl >/dev/null 2>&1; then
         if [[ "$need_start" -eq 1 ]] || ! systemctl is-active --quiet xray 2>/dev/null; then
             systemctl start xray 2>/dev/null || true
+            if declare -f ensure_xray_api_healthy >/dev/null 2>&1; then
+                ensure_xray_api_healthy || true
+            fi
             log "Служба Xray автоматически запущена после снятия лимита."
         fi
     fi
@@ -311,16 +356,20 @@ disable_traffic_limit() {
 
 show_traffic_limit_status() {
     local limit_gb reset_day is_configured=0
+    reset_day="$(get_traffic_limit_val "reset_day" "")"
+    reset_day="${reset_day:-$(get_state_val "traffic_reset_day" "1")}"
     if [[ -f "$TRAFFIC_LIMIT_CONFIG" ]]; then
         limit_gb="$(get_traffic_limit_val "limit_gb" "0")"
-        reset_day="$(get_traffic_limit_val "reset_day" "1")"
-        if [[ "$limit_gb" -gt 0 ]]; then
+        if [[ "$limit_gb" =~ ^[0-9]+$ ]] && [[ "$limit_gb" -gt 0 ]]; then
             is_configured=1
         fi
     fi
 
-    local total_bytes
-    total_bytes="$(get_monthly_traffic_bytes)"
+    local total_bytes vnstat_ok=1
+    if ! total_bytes="$(get_monthly_traffic_bytes "$reset_day" 2>/dev/null)" || [[ ! "$total_bytes" =~ ^[0-9]+$ ]]; then
+        total_bytes="0"
+        vnstat_ok=0
+    fi
 
     title "СТАТУС ЛИМИТА ТРАФИКА"
 
@@ -334,7 +383,7 @@ lim = lim_gb * (1024 ** 3)
 acc_gb = float(total) / (1024 ** 3)
 pct = (float(total) / float(lim) * 100) if lim > 0 else 0.0
 print(f"{acc_gb:.1f}|{pct:.1f}")
-' "${total_bytes:-0}" "$limit_gb" 2>/dev/null || echo "0.0|0.0")"
+' "$total_bytes" "$limit_gb" 2>/dev/null || echo "0.0|0.0")"
         IFS='|' read -r acc_gb pct <<< "$calc_info"
 
         local status_str="${GREEN}🟢 Включен${NC}"
@@ -343,7 +392,11 @@ print(f"{acc_gb:.1f}|{pct:.1f}")
         fi
 
         echo -e "  Статус:                ${BOLD}${status_str}"
-        echo -e "  Расход за месяц:       ${BOLD}${CYAN}${acc_gb} / ${limit_gb} ГБ (${pct}%)${NC}"
+        if [[ "$vnstat_ok" -eq 1 ]]; then
+            echo -e "  Расход за месяц:       ${BOLD}${CYAN}${acc_gb} / ${limit_gb} ГБ (${pct}%)${NC}"
+        else
+            echo -e "  Расход за месяц:       ${YELLOW}нет данных vnStat${NC} (лимит: ${limit_gb} ГБ)"
+        fi
         echo -e "  День сброса биллинга:  ${BOLD}${reset_day}-е число${NC}"
         local timer_status="не активен"
         if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet just1knode-traffic-limit.timer 2>/dev/null; then
@@ -355,13 +408,27 @@ print(f"{acc_gb:.1f}|{pct:.1f}")
         acc_gb="$(python3 -c '
 import sys
 print(f"{(float(sys.argv[1] or 0) / (1024 ** 3)):.1f}")
-' "${total_bytes:-0}" 2>/dev/null || echo "0.0")"
-        local r_day
-        r_day="$(get_traffic_limit_val "reset_day" "")"
-        r_day="${r_day:-$(get_state_val "traffic_reset_day" "1")}"
+' "$total_bytes" 2>/dev/null || echo "0.0")"
         echo -e "  Статус:                ${BOLD}${YELLOW}⚪ Отключен (Безлимитный режим)${NC}"
-        echo -e "  Расход за месяц:       ${BOLD}${acc_gb} ГБ (безлимитно)${NC}"
-        echo -e "  День сброса биллинга:  ${BOLD}${r_day}-е число${NC}"
+        if [[ "$vnstat_ok" -eq 1 ]]; then
+            echo -e "  Расход за месяц:       ${BOLD}${acc_gb} ГБ (безлимитно)${NC}"
+        else
+            echo -e "  Расход за месяц:       ${YELLOW}нет данных vnStat${NC} (безлимитно)"
+        fi
+        echo -e "  День сброса биллинга:  ${BOLD}${reset_day}-е число${NC}"
+    fi
+}
+
+reconcile_traffic_limit_on_update() {
+    [[ -f "$TRAFFIC_LIMIT_CONFIG" ]] || return 0
+    local limit_gb reset_day
+    limit_gb="$(get_traffic_limit_val "limit_gb" "0")"
+    reset_day="$(get_traffic_limit_val "reset_day" "1")"
+    if [[ "$limit_gb" =~ ^[0-9]+$ ]] && [[ "$limit_gb" -gt 0 ]]; then
+        ensure_vnstat >/dev/null 2>&1 || true
+        apply_vnstat_reset_day "$reset_day"
+        deploy_traffic_limit_timer
+        check_traffic_limit || true
     fi
 }
 
