@@ -455,9 +455,18 @@ update_node() {
         source "${node_dir}/modules/xray/core.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/origin.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/relay.sh" 2>/dev/null || true
-        for mod_f in "${node_dir}/modules/transports/"*.sh "${node_dir}/modules/roles/"*.sh; do
-            [[ -f "$mod_f" ]] && source "$mod_f" 2>/dev/null || true
-        done
+        # shellcheck source=modules/roles/common_xray.sh
+        [[ -f "${node_dir}/modules/roles/common_xray.sh" ]] && { source "${node_dir}/modules/roles/common_xray.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/transports/vless_tls.sh
+        [[ -f "${node_dir}/modules/transports/vless_tls.sh" ]] && { source "${node_dir}/modules/transports/vless_tls.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/transports/vless_xhttp.sh
+        [[ -f "${node_dir}/modules/transports/vless_xhttp.sh" ]] && { source "${node_dir}/modules/transports/vless_xhttp.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/ru_hub.sh
+        [[ -f "${node_dir}/modules/roles/ru_hub.sh" ]] && { source "${node_dir}/modules/roles/ru_hub.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/eu_hub.sh
+        [[ -f "${node_dir}/modules/roles/eu_hub.sh" ]] && { source "${node_dir}/modules/roles/eu_hub.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/exit_node.sh
+        [[ -f "${node_dir}/modules/roles/exit_node.sh" ]] && { source "${node_dir}/modules/roles/exit_node.sh" 2>/dev/null || true; }
     fi
 
     update_node_post "$target" "${is_menu:-0}"
