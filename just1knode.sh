@@ -214,6 +214,8 @@ source "${SCRIPT_DIR}/lib/backup.sh"
 source "${SCRIPT_DIR}/lib/state.sh"
 # shellcheck source=lib/ssl.sh
 source "${SCRIPT_DIR}/lib/ssl.sh"
+# shellcheck source=lib/traffic_limit.sh
+source "${SCRIPT_DIR}/lib/traffic_limit.sh"
 
 # Подключение модулей
 # shellcheck source=modules/xray/core.sh
@@ -459,6 +461,9 @@ run_doctor() {
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Служба $srv активна"
+        elif [[ ( "$srv" == "xray" || "$srv" == "xray-api" ) && -f "${STATE_DIR:-/etc/just1knode}/traffic_limit_exceeded" ]]; then
+            echo -e "  ${YELLOW}!${NC} Служба $srv остановлена по превышению лимита трафика"
+            warnings=$((warnings + 1))
         elif systemctl is-failed --quiet "$srv" 2>/dev/null; then
             echo -e "  ${RED}✗${NC} Служба $srv в состоянии FAILED (ошибка запуска или start-limit-hit)"
             failed=$((failed + 1))
@@ -1067,6 +1072,7 @@ reset_node() {
     systemctl stop xray xray-api 2>/dev/null || true
     systemctl disable xray xray-api 2>/dev/null || true
     cleanup_legacy_traffic_watchdog_residue
+    remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -d /etc/letsencrypt/renewal ]]; then
@@ -1234,11 +1240,12 @@ uninstall_node() {
 
     info "1/11. Остановка и отключение системных служб systemd..."
     cleanup_legacy_traffic_watchdog_residue
+    remove_traffic_limit_timer
     systemctl stop xray xray-api 2>/dev/null || true
     systemctl disable xray xray-api 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl reset-failed xray xray-api just1knode-traffic.service just1knode-traffic.timer 2>/dev/null || true
+    systemctl reset-failed xray xray-api just1knode-traffic.service just1knode-traffic.timer just1knode-traffic-limit.service just1knode-traffic-limit.timer 2>/dev/null || true
 
     info "2/11. Завершение активных процессов ядра и API..."
     local xray_proc_name
@@ -1579,25 +1586,27 @@ main_menu() {
 
             echo -e "  ${BOLD}[1]${NC} 🔄 Управление Relay-узлами на Origin (Добавить / Удалить / Список)"
             echo -e "  ${BOLD}[2]${NC} 📊 Статус узла и подключенные клиенты"
-            echo -e "  ${BOLD}[3]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[4]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[5]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
-            echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[7]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[8]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[4]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[5]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
+            echo -e "  ${BOLD}[6]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
+            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-8]: " choice
+            read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
                 1) manage_relays_menu || true; read -rp "Нажмите Enter для продолжения...";;
                 2) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                3) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                4) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                5) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                7) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                8) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                4) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                5) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
+                6) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1629,15 +1638,16 @@ main_menu() {
 
             echo -e "  ${BOLD}[1]${NC} 🚀 VLESS TLS    $([[ "$cur_has_v" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
             echo -e "  ${BOLD}[2]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
-            echo -e "  ${BOLD}[3]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[4]${NC} 📊 Статус всех служб и активные клиенты"
-            echo -e "  ${BOLD}[5]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[6]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[7]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[8]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
+            echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
+            echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
+            echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
+            echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
+            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
+            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
+            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
             echo -e "  ${BOLD}[0]${NC} ❌ Выход"
             echo ""
-            read -rp "Выберите действие [0-8]: " choice
+            read -rp "Выберите действие [0-9]: " choice
 
             case "$choice" in
                 1)
@@ -1676,12 +1686,13 @@ main_menu() {
                         read -rp "Нажмите Enter для продолжения..."
                     fi
                     ;;
-                3) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                4) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                5) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                6) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                7) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                8) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
+                3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
+                4) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
+                5) show_status || true; read -rp "Нажмите Enter для продолжения...";;
+                6) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
+                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
+                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
+                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
                 0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
                 *) warn "Неверный выбор."; sleep 1;;
             esac
@@ -1786,6 +1797,17 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             restore)
                 restore_node "${2:-}"
+                ;;
+            limit|traffic)
+                case "${2:-}" in
+                    set) set_traffic_limit "${3:-}" "${4:-}" ;;
+                    reset-day|day) set_traffic_reset_day "${3:-1}" ;;
+                    disable|off) disable_traffic_limit ;;
+                    check) check_traffic_limit ;;
+                    status|show) show_traffic_limit_status ;;
+                    "") manage_traffic_limit_menu ;;
+                    *) error "Использование: just1knode limit [set <GB> [day] | off | status]" ;;
+                esac
                 ;;
             status) show_status ;;
             doctor|test) run_doctor || exit 1 ;;
