@@ -411,6 +411,12 @@ ensure_v2_base_stack_installed() {
     set_state_val "api_url" "https://${my_ip}:8444"
     set_state_json_val "modules" "{}"
 
+    local c_code=""
+    c_code="$(detect_node_country_code "$my_ip" 2>/dev/null || true)"
+    if [[ -n "$c_code" ]]; then
+        set_state_val "country_code" "$c_code"
+    fi
+
     deploy_xray_api_service "$api_key" ""
     setup_base_api_nginx || warn "Предупреждение при настройке Nginx для API 8444."
     configure_safe_ufw

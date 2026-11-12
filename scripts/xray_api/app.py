@@ -1249,6 +1249,7 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
     return {
         "status": "ok",
         "role": str(node_meta.get("role") or "unconfigured"),
+        "country_code": str(node_meta.get("country_code") or ""),
         "domain": str(node_meta.get("domain") or ""),
         "cdn_domain": get_cdn_domain(),
         "sub_path_prefix": get_sub_path_prefix(),
