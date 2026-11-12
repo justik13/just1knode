@@ -279,10 +279,20 @@ EOF
     chown -R xrayapi:xrayapi "${XRAY_API_LIB}" 2>/dev/null || true
     chmod 750 "${XRAY_API_LIB}"
 
-    # Права на чтение конфигурации Xray для пользователя xrayapi
-    chmod 755 /usr/local/etc/xray 2>/dev/null || true
-    chown root:xrayapi /usr/local/etc/xray/config.json 2>/dev/null || true
-    chmod 640 /usr/local/etc/xray/config.json 2>/dev/null || true
+    # Права на чтение/синхронизацию TLS сертификатов и конфигурации Xray для пользователя xrayapi
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local xray_cfg_dir="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
+    mkdir -p "${le_dir}/live" "${xray_cfg_dir}/tls" 2>/dev/null || true
+    chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
+    chmod 755 "$le_dir" 2>/dev/null || true
+    chmod 2775 "${le_dir}/live" 2>/dev/null || true
+    chmod 755 "$xray_cfg_dir" 2>/dev/null || true
+    chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
+    chmod 2775 "${xray_cfg_dir}/tls" 2>/dev/null || true
+    if [[ -f "${xray_cfg_dir}/config.json" ]]; then
+        chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
+        chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
+    fi
 
     # Права на каталог состояния для пользователя xrayapi (SGID 2770)
     chown -R root:xrayapi "${STATE_DIR}" 2>/dev/null || true
@@ -327,7 +337,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=${STATE_DIR} ${XRAY_API_LIB} /etc/letsencrypt /usr/local/etc/xray
+ReadWritePaths=${STATE_DIR} ${XRAY_API_LIB} -${LETSENCRYPT_DIR:-/etc/letsencrypt} -${XRAY_CONFIG_DIR:-/usr/local/etc/xray}
 
 [Install]
 WantedBy=multi-user.target

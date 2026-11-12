@@ -120,7 +120,6 @@ setup_base_api_nginx() {
     cat > "$tmp_conf" <<EOF
 server {
     listen 8444 ssl http2;
-    listen [::]:8444 ssl http2;
     server_name ${server_name};
 
     ssl_certificate ${cert_path};
@@ -187,6 +186,7 @@ _sync_all_role_certs() {
     local domain
     domain="$(get_state_val "domain" "")"
     if [[ -n "$domain" && "$domain" != "-" ]]; then
+        _resolve_existing_or_wildcard_cert "$domain" >/dev/null 2>&1 || true
         sync_xray_tls_cert_files "$domain" 2>/dev/null || true
     fi
 }
@@ -245,27 +245,44 @@ heal_v2_role_config() {
 apply_pending_node_updates() {
     check_root
     init_state_dir
+    if declare -F acquire_just1knode_lock >/dev/null 2>&1; then
+        acquire_just1knode_lock
+    fi
+
     local state_dir="${STATE_DIR:-/etc/just1knode}"
     local pending_file="${APPLY_PENDING_PATH:-${state_dir}/.apply_pending}"
     local running_file="${state_dir}/.apply_running"
     local result_file="${state_dir}/last_apply.json"
 
-    if [[ -f "$pending_file" ]]; then
-        mv -f "$pending_file" "$running_file" 2>/dev/null || true
-    fi
-
     local rc=0
-    local role
-    role="$(get_state_val "role" "unconfigured")"
-    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
-        apply_v2_hub_configuration || rc=$?
-    else
-        _sync_all_role_certs
-        setup_base_api_nginx || rc=$?
-        heal_node_firewall_and_stealth || true
+    local role="unconfigured"
+    local max_passes=3
+    local pass=0
+
+    while [[ $pass -lt $max_passes ]]; do
+        pass=$((pass + 1))
+        if [[ -f "$pending_file" ]]; then
+            mv -f "$pending_file" "$running_file" 2>/dev/null || true
+        fi
+
+        rc=0
+        role="$(get_state_val "role" "unconfigured")"
+        if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+            apply_v2_hub_configuration || rc=$?
+        else
+            _sync_all_role_certs
+            setup_base_api_nginx || rc=$?
+            heal_node_firewall_and_stealth || true
+        fi
+
+        rm -f "$running_file" 2>/dev/null || true
+        [[ "$rc" -eq 0 && -f "$pending_file" ]] || break
+    done
+
+    if declare -F release_just1knode_lock >/dev/null 2>&1; then
+        release_just1knode_lock 2>/dev/null || true
     fi
 
-    rm -f "$running_file" 2>/dev/null || true
     python3 - "$result_file" "$rc" "$role" <<'PYEOF' 2>/dev/null || true
 import json, os, sys, tempfile, time
 out_path, rc_str, role = sys.argv[1:4]

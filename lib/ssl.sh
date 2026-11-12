@@ -7,10 +7,30 @@ CERTBOT_DIR="${CERTBOT_DIR:-/var/www/certbot}"
 WWW_HTML_DIR="${WWW_HTML_DIR:-/var/www/html}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx}"
 
+_ensure_letsencrypt_xrayapi_permissions() {
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    mkdir -p "${le_dir}/live" 2>/dev/null || true
+    if getent group xrayapi >/dev/null 2>&1; then
+        chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
+        chmod 755 "$le_dir" 2>/dev/null || true
+        chmod 2775 "${le_dir}/live" 2>/dev/null || true
+    fi
+}
+
+_is_self_signed_cert() {
+    local cert_path="$1"
+    [[ -f "$cert_path" ]] || return 1
+    local issuer subject
+    issuer="$(openssl x509 -noout -issuer -in "$cert_path" 2>/dev/null | sed 's/^issuer=//' | xargs || true)"
+    subject="$(openssl x509 -noout -subject -in "$cert_path" 2>/dev/null | sed 's/^subject=//' | xargs || true)"
+    [[ -n "$issuer" && -n "$subject" && "$issuer" == "$subject" ]]
+}
+
 _create_bootstrap_cert() {
     local domain="$1"
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
     local live_dir="${le_dir}/live/${domain}"
+    _ensure_letsencrypt_xrayapi_permissions
     mkdir -p "$live_dir"
     if openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "${live_dir}/privkey.pem" \
@@ -21,8 +41,12 @@ _create_bootstrap_cert() {
         -keyout "${live_dir}/privkey.pem" \
         -out "${live_dir}/fullchain.pem" \
         -subj "/CN=${domain}" >/dev/null 2>&1; then
+        if getent group xrayapi >/dev/null 2>&1; then
+            chown root:xrayapi "$live_dir" "${live_dir}/fullchain.pem" "${live_dir}/privkey.pem" 2>/dev/null || true
+            chmod 2775 "$live_dir" 2>/dev/null || true
+        fi
         chmod 644 "${live_dir}/fullchain.pem"
-        chmod 600 "${live_dir}/privkey.pem"
+        chmod 640 "${live_dir}/privkey.pem"
         return 0
     fi
     return 1
@@ -33,33 +57,57 @@ _resolve_existing_or_wildcard_cert() {
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
     local direct_cert="${le_dir}/live/${domain}/fullchain.pem"
     local direct_key="${le_dir}/live/${domain}/privkey.pem"
+    local direct_valid=0
+    local direct_self_signed=0
 
     if [[ -f "$direct_cert" && -f "$direct_key" ]] && \
        openssl x509 -checkend 86400 -noout -in "$direct_cert" 2>/dev/null && \
        (openssl x509 -checkhost "$domain" -noout -in "$direct_cert" 2>/dev/null || \
         openssl x509 -subject -noout -in "$direct_cert" 2>/dev/null | grep -Fq "CN = ${domain}" || \
         openssl x509 -subject -noout -in "$direct_cert" 2>/dev/null | grep -Fq "CN=${domain}"); then
-        log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
-        return 0
+        direct_valid=1
+        if _is_self_signed_cert "$direct_cert"; then
+            direct_self_signed=1
+        else
+            log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
+            return 0
+        fi
     fi
 
+    # Ищем подписанный CA/Wildcard сертификат в соседних каталогах live/* (и при наличии заменяем им bootstrap self-signed)
     local cand cand_dir cand_key
     for cand in "${le_dir}/live"/*/fullchain.pem; do
         [[ -f "$cand" ]] || continue
         cand_dir="$(dirname "$cand")"
         cand_key="${cand_dir}/privkey.pem"
-        if [[ -f "$cand_key" ]] && \
-           openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
-           openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null; then
+        [[ -f "$cand_key" ]] || continue
+        [[ "$cand" == "$direct_cert" ]] && continue
+        if openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
+           openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null && \
+           ! _is_self_signed_cert "$cand"; then
+            _ensure_letsencrypt_xrayapi_permissions
             mkdir -p "${le_dir}/live/${domain}"
             cp -f "$cand" "${le_dir}/live/${domain}/fullchain.pem"
             cp -f "$cand_key" "${le_dir}/live/${domain}/privkey.pem"
+            if getent group xrayapi >/dev/null 2>&1; then
+                chown root:xrayapi "${le_dir}/live/${domain}" "${le_dir}/live/${domain}/fullchain.pem" "${le_dir}/live/${domain}/privkey.pem" 2>/dev/null || true
+                chmod 2775 "${le_dir}/live/${domain}" 2>/dev/null || true
+            fi
             chmod 644 "${le_dir}/live/${domain}/fullchain.pem"
-            chmod 600 "${le_dir}/live/${domain}/privkey.pem"
-            log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '${domain}'!"
+            chmod 640 "${le_dir}/live/${domain}/privkey.pem"
+            if [[ $direct_self_signed -eq 1 ]]; then
+                log "✔ Bootstrap-сертификат '${domain}' заменён боевым Wildcard из $(basename "$cand_dir")!"
+            else
+                log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '${domain}'!"
+            fi
             return 0
         fi
     done
+
+    if [[ $direct_valid -eq 1 ]]; then
+        log "✔ Используется действующий стартовый TLS-сертификат для '${domain}'."
+        return 0
+    fi
 
     return 1
 }

@@ -341,12 +341,14 @@ show_v2_connection_card() {
         echo ""
         if is_module_enabled "cdn_yandex"; then
             local y_dom
-            y_dom="$(get_module_val "cdn_yandex" "domain" "-")"
+            y_dom="$(get_module_val "cdn_yandex" "cdn_domain" "")"
+            [[ -z "$y_dom" ]] && y_dom="$(get_module_val "cdn_yandex" "domain" "-")"
             echo -e "  Yandex CDN:  ${CYAN}${y_dom}${NC}"
         fi
         if is_module_enabled "cdn_turboflare"; then
             local tf_dom
-            tf_dom="$(get_module_val "cdn_turboflare" "domain" "-")"
+            tf_dom="$(get_module_val "cdn_turboflare" "cdn_domain" "")"
+            [[ -z "$tf_dom" ]] && tf_dom="$(get_module_val "cdn_turboflare" "domain" "-")"
             echo -e "  TurboFlare:  ${CYAN}${tf_dom}${NC}"
         fi
         if is_module_enabled "vless_xhttp"; then
@@ -972,14 +974,28 @@ targets = []
 if os.path.exists(links_path):
     try:
         links = json.load(open(links_path, encoding="utf-8"))
-        for bucket in ("standard_bridges", "bi_bridges", "exits"):
-            for item in (links.get(bucket) or []):
+        link_groups = [
+            ("standard", ((links.get("standard") or {}).get("bridges") if isinstance(links.get("standard"), dict) else None)),
+            ("bi", ((links.get("bi") or {}).get("bridges") if isinstance(links.get("bi"), dict) else None)),
+            ("bridges", links.get("bridges")),
+            ("standard_bridges", links.get("standard_bridges")),
+            ("bi_bridges", links.get("bi_bridges")),
+            ("exit_nodes", links.get("exit_nodes")),
+            ("exits", links.get("exits")),
+        ]
+        seen_link_keys = set()
+        for bucket, items in link_groups:
+            for item in (items or []):
                 if isinstance(item, dict) and item.get("ip"):
+                    k_tp = (str(item["ip"]).strip(), int(item.get("port") or 443))
+                    if k_tp in seen_link_keys:
+                        continue
+                    seen_link_keys.add(k_tp)
                     targets.append((
                         item.get("name") or item.get("code") or bucket,
                         item.get("code") or bucket,
-                        item["ip"],
-                        int(item.get("port") or 443),
+                        k_tp[0],
+                        k_tp[1],
                     ))
     except Exception:
         pass

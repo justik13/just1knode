@@ -599,7 +599,8 @@ heal_node_firewall_and_stealth() {
     fi
 
     if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
-        if ! ufw status 2>/dev/null | grep -F "$origin_bot_ip" | grep -q "8444"; then
+        local bot_ip_re="${origin_bot_ip//./\\.}"
+        if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${bot_ip_re}(/32)?([[:space:]]|$)" | grep -q "8444"; then
             if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
                 log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
             fi
@@ -686,7 +687,8 @@ for ip in seen:
                 if echo "$r_body" | grep -Fq "$wl_comment"; then
                     local keep=0 a_ip
                     for a_ip in "${allowed_ips[@]}"; do
-                        if echo "$r_body" | grep -Fw "$a_ip" -q; then
+                        local a_ip_re="${a_ip//./\\.}"
+                        if echo "$r_body" | grep -Eq "(^|[[:space:]])${a_ip_re}(/32)?([[:space:]]|$)"; then
                             keep=1
                             break
                         fi
@@ -703,10 +705,11 @@ for ip in seen:
             done
         fi
 
-        local aip
+        local aip aip_re
         for aip in "${allowed_ips[@]}"; do
             if validate_ipv4 "$aip" || validate_ip "$aip"; then
-                if ! ufw status 2>/dev/null | grep -F "$aip" | grep -q "$wl_port"; then
+                aip_re="${aip//./\\.}"
+                if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${aip_re}(/32)?([[:space:]]|$)" | grep -q "$wl_port"; then
                     ufw allow from "$aip" to any port "$wl_port" proto tcp comment "$wl_comment" >/dev/null 2>&1 || true
                 fi
             fi

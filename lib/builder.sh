@@ -255,10 +255,18 @@ def merged_clients(tag, primary_map, flow_val=""):
     return list(merged.values())
 
 def cert_pair(target_dom=None):
-    t_dom = (target_dom or domain or "").strip()
+    t_dom = (target_dom or domain or "").strip().lower().lstrip("*.")
+    candidates = []
     if t_dom:
-        le_pem = os.path.join(le_dir, "live", t_dom, "fullchain.pem")
-        le_key = os.path.join(le_dir, "live", t_dom, "privkey.pem")
+        candidates.append(t_dom)
+        parts = t_dom.split(".")
+        for i in range(1, max(1, len(parts) - 1)):
+            parent_zone = ".".join(parts[i:])
+            if "." in parent_zone:
+                candidates.append(parent_zone)
+    for cand in candidates:
+        le_pem = os.path.join(le_dir, "live", cand, "fullchain.pem")
+        le_key = os.path.join(le_dir, "live", cand, "privkey.pem")
         if os.path.exists(le_pem) and os.path.exists(le_key):
             return le_pem, le_key
     pem = os.path.join(xray_tls_dir, "fullchain.pem")
@@ -487,6 +495,7 @@ if role == "ru_hub":
     base_cdn_spec = CDN_PROVIDER_SPECS[active_cdns[0]] if active_cdns else None
     used_ports = {ib.get("port") for ib in cfg["inbounds"] if ib.get("port")}
     next_port = 8005
+    location_nginx_routes = []
     for loc in loc_sources:
         if not isinstance(loc, dict):
             continue
@@ -507,6 +516,7 @@ if role == "ru_hub":
                 build_xhttp_inbound(r_tag, r_port, r_path, base_cdn_spec, merged_clients(r_tag, wl_clients))
             )
             bi_inbounds.append(r_tag)
+            location_nginx_routes.append((r_path, f"xray_xhttp_relay_{code}", base_cdn_spec))
 
     # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента!)
     cfg["dns"] = {
@@ -539,7 +549,7 @@ if role == "ru_hub":
             continue
         p_code = clean_code(p.get("code"), f"hub{idx+1}")
         ob_tag = f"bridge-std-{p_code}"
-        if ob_tag in std_outbounds:
+        if p_code in std_outbounds:
             continue
         ob = build_bridge_outbound(ob_tag, p)
         if ob is None:
@@ -557,7 +567,7 @@ if role == "ru_hub":
             continue
         p_code = clean_code(p.get("code"), f"hub{idx+1}")
         ob_tag = f"bridge-bi-{p_code}"
-        if ob_tag in bi_outbounds:
+        if p_code in bi_outbounds:
             continue
         ob = build_bridge_outbound(ob_tag, p)
         if ob is None:
@@ -598,7 +608,7 @@ if role == "ru_hub":
             while r_port in used_ports:
                 r_port += 1
             used_ports.add(r_port)
-            r_tag = f"just1k-vless-route-{b_code}"
+            r_tag = f"just1k-vless-route-{r_idx}-{b_code}"
             rc_file, rk_file = cert_pair(r_sni)
             cfg["inbounds"].append({
                 "tag": r_tag,
@@ -635,7 +645,6 @@ if role == "ru_hub":
             + "\n\n".join(stream_upstream_blocks) + "\n\n"
             + "server {\n"
             + "    listen 443 reuseport;\n"
-            + "    listen [::]:443 reuseport;\n"
             + "    ssl_preread on;\n"
             + "    proxy_protocol on;\n"
             + "    proxy_pass $just1k_sni_backend;\n"
@@ -675,7 +684,6 @@ if role == "ru_hub":
             "    listen 127.0.0.1:8080 default_server;\n"
             if has_vless_tls else
             f"    listen 443 ssl http2 default_server;\n"
-            f"    listen [::]:443 ssl http2 default_server;\n"
             f"    ssl_certificate {c_file};\n"
             f"    ssl_certificate_key {k_file};\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -709,15 +717,13 @@ if role == "ru_hub":
                 "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
                 "    }\n"
             )
-        for ck in active_cdns:
-            sp = CDN_PROVIDER_SPECS[ck]
-            m_cfg = modules.get(ck, {})
-            c_path = str(m_cfg.get("path") or f"{secret_base}/{sp['subpath']}").rstrip("/")
+        def make_xhttp_loc(c_path_raw, upstream_name, sp):
+            cp = c_path_raw.rstrip("/")
             opt_line = "        proxy_method $xhttp_proxy_method;\n" if sp.get("options_rewrite") else ""
-            loc_blocks.append(
-                f"    location ^~ {c_path} {{\n"
-                f"        rewrite ^{re.escape(c_path)}/?$ {c_path}/ break;\n"
-                f"        proxy_pass http://{sp['upstream']};\n"
+            return (
+                f"    location ^~ {cp} {{\n"
+                f"        rewrite ^{re.escape(cp)}/?$ {cp}/ break;\n"
+                f"        proxy_pass http://{upstream_name};\n"
                 + opt_line
                 + "        proxy_http_version 1.1;\n"
                 '        proxy_set_header Connection "";\n'
@@ -741,6 +747,19 @@ if role == "ru_hub":
                 '        add_header Accept-Ranges none always;\n'
                 "    }\n"
             )
+
+        seen_loc_paths = set()
+        for ck in active_cdns:
+            sp = CDN_PROVIDER_SPECS[ck]
+            m_cfg = modules.get(ck, {})
+            c_path = str(m_cfg.get("path") or f"{secret_base}/{sp['subpath']}").rstrip("/")
+            seen_loc_paths.add(c_path)
+            loc_blocks.append(make_xhttp_loc(c_path, sp["upstream"], sp))
+        for r_path, r_upstream, r_sp in location_nginx_routes:
+            cp = str(r_path).rstrip("/")
+            if cp and cp not in seen_loc_paths:
+                seen_loc_paths.add(cp)
+                loc_blocks.append(make_xhttp_loc(cp, r_upstream, r_sp))
         loc_blocks.append(
             "    location = /cdn-check {\n"
             "        add_header Content-Type text/plain;\n"
@@ -749,8 +768,12 @@ if role == "ru_hub":
         )
         if os.path.isdir(relays_d):
             loc_blocks.append(f"    include {relays_d}/*.conf;")
-        cdn_dom = str(state.get("cdn_domain") or "").strip()
-        srv_names = " ".join([x for x in dict.fromkeys([domain, cdn_dom, "_"]) if x])
+        cdn_doms = [str(state.get("cdn_domain") or "").strip()]
+        for ck in active_cdns:
+            m_cfg = modules.get(ck, {})
+            if isinstance(m_cfg, dict):
+                cdn_doms.append(str(m_cfg.get("cdn_domain") or m_cfg.get("domain") or "").strip())
+        srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms + ["_"]) if x and x != "-"])
         nginx_text = (
             "server {\n"
             + listen_block
