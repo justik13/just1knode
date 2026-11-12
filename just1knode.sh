@@ -1177,7 +1177,6 @@ reset_node() {
 uninstall_node() {
     title "ПОЛНОЕ БЕЗВОЗВРАТНОЕ УДАЛЕНИЕ JUST1KNODE (UNINSTALL)"
     check_root
-    init_state_dir
 
     local force=false
     local confirm_code=""
@@ -1809,10 +1808,20 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 else
                     case "$_m_act" in
                         install|setup)
-                            declare -F "${_m_id}_install" >/dev/null 2>&1 && "${_m_id}_install" || { error "Модуль '$_m_id' не поддерживает установку."; exit 1; }
+                            if declare -F "${_m_id}_install" >/dev/null 2>&1; then
+                                "${_m_id}_install"
+                            else
+                                error "Модуль '$_m_id' не поддерживает установку."
+                                exit 1
+                            fi
                             ;;
                         uninstall|remove|del)
-                            declare -F "${_m_id}_uninstall" >/dev/null 2>&1 && "${_m_id}_uninstall" || { error "Модуль '$_m_id' не поддерживает удаление."; exit 1; }
+                            if declare -F "${_m_id}_uninstall" >/dev/null 2>&1; then
+                                "${_m_id}_uninstall"
+                            else
+                                error "Модуль '$_m_id' не поддерживает удаление."
+                                exit 1
+                            fi
                             ;;
                         *) error "Использование: just1knode module $_m_id [install|uninstall]" ;;
                     esac
