@@ -624,6 +624,63 @@ def get_all_managed_inbounds() -> List[str]:
     return discovered_tags
 
 
+def _get_xhttp_location_routes() -> List[Dict[str, Any]]:
+    """Return concrete active XHTTP inbound paths/ports for multi-CDN and multi-hub bot discovery."""
+    routes: List[Dict[str, Any]] = []
+    if not XRAY_CONFIG_PATH.exists():
+        return routes
+
+    node_meta = get_node_state_metadata()
+    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
+    enabled_cdns = [
+        k for k, v in modules.items()
+        if str(k).startswith("cdn_") and isinstance(v, dict) and v.get("enabled") is True
+    ]
+
+    try:
+        with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return routes
+
+    for ib in cfg.get("inbounds", []):
+        if not isinstance(ib, dict):
+            continue
+        tag = str(ib.get("tag") or "")
+        if not tag.startswith("just1k-wl-"):
+            continue
+        ss = ib.get("streamSettings") if isinstance(ib.get("streamSettings"), dict) else {}
+        if ss.get("network") != "xhttp":
+            continue
+        xs = ss.get("xhttpSettings") if isinstance(ss.get("xhttpSettings"), dict) else {}
+        path = str(xs.get("path") or "")
+        if not path:
+            continue
+        loc_code = None
+        cdn_hint = None
+        if tag.startswith("just1k-wl-inbound-"):
+            raw_suffix = tag[len("just1k-wl-inbound-"):]
+            if "__" in raw_suffix:
+                loc_code, cdn_hint = raw_suffix.split("__", 1)
+            else:
+                loc_code = raw_suffix
+                cdn_hint = enabled_cdns[0] if enabled_cdns else None
+        elif tag == "just1k-wl-default":
+            cdn_hint = "cdn_yandex"
+        elif tag == "just1k-wl-turboflare":
+            cdn_hint = "cdn_turboflare"
+        routes.append({
+            "inbound_tag": tag,
+            "port": ib.get("port"),
+            "path": path,
+            "location_code": loc_code,
+            "cdn": cdn_hint,
+            "uplink_http_method": xs.get("uplinkHTTPMethod"),
+            "uplink_data_placement": xs.get("uplinkDataPlacement"),
+        })
+    return routes
+
+
 def is_wl_inbound_tag(t: str) -> bool:
     """Check if tag belongs to white_internet, strictly excluding internal relay tunnels."""
     return t.startswith("just1k-wl-") or t == "just1k-wl-default"
@@ -974,7 +1031,6 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     domain = str(node_meta.get("domain") or "")
     role = str(node_meta.get("role") or "")
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
     has_wl_module = any(
         isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
         for k in modules
@@ -1055,7 +1111,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "modules": modules,
         "module_errors": module_errors,
         "links": links_data,
-        "peers": peers,
+        "xhttp_locations": _get_xhttp_location_routes(),
         "traffic_limit": traffic_limit,
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
@@ -1098,6 +1154,8 @@ def _validate_uuid_strict(value: str) -> str:
 
 
 class BridgePeerSpec(BaseModel):
+    id: Optional[str] = Field(default=None, max_length=64)
+    tag: Optional[str] = Field(default=None, max_length=64)
     code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
     name: Optional[str] = None
     ip: str
@@ -1146,6 +1204,7 @@ class HubRouteSpec(BaseModel):
     code: Optional[str] = Field(default=None, max_length=32)
     ingress_uuid: Optional[str] = None
     route_user: str = Field(..., min_length=1, max_length=128)
+    exit_id: Optional[str] = Field(default=None, max_length=64)
     exit_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
 
     @model_validator(mode="after")
@@ -1165,7 +1224,6 @@ class NodeLinksSectionSpec(BaseModel):
 class NodeLinksUpdateRequest(BaseModel):
     standard: Optional[NodeLinksSectionSpec] = None
     bi: Optional[NodeLinksSectionSpec] = None
-    bridges: Optional[List[BridgePeerSpec]] = None
     exit_nodes: Optional[List[BridgePeerSpec]] = None
     allowed_ru_ips: Optional[List[str]] = None
     allowed_hub_ips: Optional[List[str]] = None
@@ -1187,7 +1245,6 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
     """Read-only v2 hub auto-discovery metadata (role, modules, errors, links, bot)."""
     node_meta = get_node_state_metadata()
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
     bot_status = get_bot_status()
     return {
         "status": "ok",
@@ -1200,7 +1257,7 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
         "modules": modules,
         "module_errors": _load_module_errors(),
         "links": _load_links_data(),
-        "peers": peers,
+        "xhttp_locations": _get_xhttp_location_routes(),
         "inbounds": get_all_managed_inbounds(),
         "traffic_limit": _load_traffic_limit_summary(),
         "bot_connected": bool(bot_status.get("connected")),
@@ -2001,7 +2058,7 @@ def _sync_write_certificates(
         tmp_privkey.write_text(privkey_pem.strip() + "\n", encoding="utf-8")
         try:
             tmp_fullchain.chmod(0o644)
-            tmp_privkey.chmod(0o600)
+            tmp_privkey.chmod(0o640)
         except Exception:
             pass
 
@@ -2009,7 +2066,7 @@ def _sync_write_certificates(
         tmp_privkey.replace(privkey_file)
         try:
             fullchain_file.chmod(0o644)
-            privkey_file.chmod(0o600)
+            privkey_file.chmod(0o640)
         except Exception:
             pass
     except Exception:
@@ -2026,12 +2083,12 @@ def _sync_write_certificates(
             shutil.copy2(str(fullchain_file), str(xray_tls_dir / "fullchain.pem"))
             shutil.copy2(str(privkey_file), str(xray_tls_dir / "privkey.pem"))
             (xray_tls_dir / "fullchain.pem").chmod(0o644)
-            (xray_tls_dir / "privkey.pem").chmod(0o600)
+            (xray_tls_dir / "privkey.pem").chmod(0o640)
             if (xray_tls_dir / "vless_fullchain.pem").exists():
                 shutil.copy2(str(fullchain_file), str(xray_tls_dir / "vless_fullchain.pem"))
                 shutil.copy2(str(privkey_file), str(xray_tls_dir / "vless_privkey.pem"))
                 (xray_tls_dir / "vless_fullchain.pem").chmod(0o644)
-                (xray_tls_dir / "vless_privkey.pem").chmod(0o600)
+                (xray_tls_dir / "vless_privkey.pem").chmod(0o640)
         except Exception as e:
             logger.warning("Could not sync to %s: %s", xray_tls_dir, e)
 

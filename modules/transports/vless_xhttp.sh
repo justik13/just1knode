@@ -53,7 +53,7 @@ vless_xhttp_install() {
     local secret_path
     secret_path="$(get_state_val "secret_base_path" "")"
     if [[ -z "$secret_path" || "$secret_path" == "-" ]]; then
-        secret_path="/w_$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
+        secret_path="/assets_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
         set_state_val "secret_base_path" "$secret_path"
     fi
 

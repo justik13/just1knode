@@ -182,11 +182,34 @@ EOF
 }
 
 _sync_all_role_certs() {
-    local domain
+    local domain sni_dom
     domain="$(get_state_val "domain" "")"
     if [[ -n "$domain" && "$domain" != "-" ]]; then
         _resolve_existing_or_wildcard_cert "$domain" >/dev/null 2>&1 || true
         sync_xray_tls_cert_files "$domain" 2>/dev/null || true
+    fi
+    local lf="${LINKS_FILE:-${STATE_DIR:-/etc/just1knode}/links.json}"
+    if [[ -f "$lf" ]]; then
+        while IFS= read -r sni_dom; do
+            [[ -z "$sni_dom" || "$sni_dom" == "$domain" ]] && continue
+            _resolve_existing_or_wildcard_cert "$sni_dom" >/dev/null 2>&1 || true
+        done < <(python3 - "$lf" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fp:
+        lk = json.load(fp)
+    routes = ((lk.get("standard") or {}).get("sni_routes") or []) if isinstance(lk, dict) else []
+    seen = set()
+    for rt in routes:
+        if isinstance(rt, dict) and rt.get("sni"):
+            s = str(rt["sni"]).strip().lower().rstrip(".")
+            if s and s not in seen:
+                seen.add(s)
+                print(s)
+except Exception:
+    pass
+PYEOF
+)
     fi
 }
 
@@ -333,7 +356,6 @@ change_role_guarded() {
     fi
 
     set_state_val "role" "unconfigured"
-    set_state_json_val "peers" "[]"
     set_state_json_val "allowed_ru_ips" "[]"
     save_links_json "{}"
     _sync_nginx_main_stream_include "false"
@@ -414,7 +436,6 @@ select_role_wizard() {
     set_state_val "domain" "$input_dom"
     set_state_val "api_url" "https://${input_dom}:8444"
     set_state_json_val "modules" "{}"
-    set_state_json_val "peers" "[]"
     save_links_json "{}"
 
     if [[ "$new_role" == "eu_hub" || "$new_role" == "exit_node" ]]; then

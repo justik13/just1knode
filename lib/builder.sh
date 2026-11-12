@@ -84,9 +84,26 @@ assemble_v2_hub_config() {
         broken_csv="$(IFS=,; echo "${BROKEN_MODULE_IDS[*]}")"
     fi
 
+    local cur_role=""
+    cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
+    if [[ "$cur_role" == "ru_hub" ]] && is_module_enabled "vless_tls" 2>/dev/null; then
+        if declare -F ensure_nginx_stream_module >/dev/null 2>&1; then
+            ensure_nginx_stream_module >/dev/null 2>&1 || true
+        fi
+    fi
+
     local nginx_stream_avail="false"
     if _nginx_has_stream_module 2>/dev/null; then
         nginx_stream_avail="true"
+    fi
+
+    local ssl_reject_avail="false"
+    if command -v nginx >/dev/null 2>&1; then
+        local ngx_ver=""
+        ngx_ver="$(nginx -v 2>&1 | sed -nE 's/.*nginx\/([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n1 || true)"
+        if [[ -n "$ngx_ver" ]] && python3 -c 'import sys; p=[int(x) for x in sys.argv[1].split(".")]; sys.exit(0 if tuple(p[:3]) >= (1, 19, 4) else 1)' "$ngx_ver" 2>/dev/null; then
+            ssl_reject_avail="true"
+        fi
     fi
 
     local tmp_xray tmp_nginx tmp_map tmp_stream meta_tmp
@@ -100,7 +117,7 @@ assemble_v2_hub_config() {
         "$state_file" "$clients_file" "$links_file" \
         "$cfg_file" "$tmp_xray" "$tmp_nginx" "$tmp_map" "$tmp_stream" \
         "$xray_tls_dir" "$le_dir" "$cdn_specs_json" \
-        "$broken_csv" "$nginx_stream_avail" > "$meta_tmp" <<'PYEOF'
+        "$broken_csv" "$nginx_stream_avail" "$ssl_reject_avail" > "$meta_tmp" <<'PYEOF'
 import ipaddress
 import json
 import os
@@ -123,9 +140,11 @@ import uuid as uuid_lib
     cdn_specs_raw,
     broken_csv,
     nginx_stream_avail_str,
-) = sys.argv[1:14]
+    ssl_reject_avail_str,
+) = sys.argv[1:15]
 
 nginx_stream_avail = nginx_stream_avail_str == "true"
+ssl_reject_avail = ssl_reject_avail_str == "true"
 broken_modules = {x.strip() for x in broken_csv.split(",") if x.strip()}
 
 try:
@@ -192,7 +211,6 @@ elif not secret_base.startswith("/"):
     secret_base = "/" + secret_base
 
 modules = state.get("modules") if isinstance(state.get("modules"), dict) else {}
-peers = state.get("peers") if isinstance(state.get("peers"), list) else []
 
 def mod_on(name):
     if name in broken_modules:
@@ -232,7 +250,7 @@ elif isinstance(clients_db, list):
 for cid, meta in raw_clients_entries.items():
     if not isinstance(meta, dict):
         continue
-    email = str(meta.get("email") or cid)
+    email = str(cid)
     top_tombstone = bool(meta.get("tombstone", False))
     ss = meta.get("service_states") if isinstance(meta.get("service_states"), dict) else {}
     if ss:
@@ -267,7 +285,7 @@ def merged_clients(tag, primary_map, flow_val="", revoked_set=None):
     merged = {}
     for c in existing_clients_by_tag.get(tag, []):
         if isinstance(c, dict) and c.get("id") and c["id"] not in revoked:
-            item = {"id": c["id"], "email": c.get("email") or c["id"]}
+            item = {"id": c["id"], "email": str(c["id"])}
             if flow_val:
                 item["flow"] = flow_val
             merged[c["id"]] = item
@@ -418,27 +436,21 @@ nginx_needed = False
 fallback80_needed = False
 map_needed = False
 stream_needed = False
+resolved_tunnel_uuid = ""
 
 api_rule = {"type": "field", "inboundTag": ["just1k-wl-api-grpc"], "outboundTag": "just1k-wl-api"}
 
 if role == "ru_hub":
+    cfg["routing"]["domainStrategy"] = "AsIs"
     has_vless_tls = mod_on("vless_tls")
     has_xhttp = mod_on("vless_xhttp")
     active_cdns = [k for k in CDN_PROVIDER_SPECS if mod_on(k)] if has_xhttp else []
 
-    # Раздельное извлечение мостов Стандарт vs БИ (links.json v2 + локальный резерв peers)
+    # Строго раздельное извлечение мостов Стандарт vs БИ (чистый v2 links.json без peers/shared_bridges)
     std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
     bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
-    shared_bridges = [
-        p for p in (links.get("bridges") if isinstance(links.get("bridges"), list) else peers)
-        if isinstance(p, dict) and p.get("ip") and p.get("uuid")
-    ]
     std_bridges_raw = std_cfg.get("bridges") if isinstance(std_cfg.get("bridges"), list) else []
     bi_bridges_raw = bi_cfg.get("bridges") if isinstance(bi_cfg.get("bridges"), list) else []
-    if not std_bridges_raw and shared_bridges:
-        std_bridges_raw = shared_bridges
-    if not bi_bridges_raw and shared_bridges:
-        bi_bridges_raw = shared_bridges
 
     sni_routes_raw = std_cfg.get("sni_routes") if isinstance(std_cfg.get("sni_routes"), list) else []
     valid_sni_routes = []
@@ -504,17 +516,17 @@ if role == "ru_hub":
         )
         bi_inbounds.append(c_tag)
 
-    # Локационные XHTTP инбаунды (БИ per-location paths из links.json v2)
+    # Локационные XHTTP инбаунды: автоматическая матрица (каждая локация x каждый активный CDN)
     seen_loc_codes = set()
     loc_sources = []
     if isinstance(bi_cfg.get("locations"), list):
         loc_sources.extend(bi_cfg["locations"])
     loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
 
-    base_cdn_spec = CDN_PROVIDER_SPECS[active_cdns[0]] if active_cdns else None
     used_ports = {ib.get("port") for ib in cfg["inbounds"] if ib.get("port")}
     next_port = 8005
     location_nginx_routes = []
+    bi_loc_inbounds_by_target = {}
     for loc in loc_sources:
         if not isinstance(loc, dict):
             continue
@@ -522,35 +534,76 @@ if role == "ru_hub":
         if not code or code in seen_loc_codes:
             continue
         seen_loc_codes.add(code)
-        r_tag = f"just1k-wl-inbound-{code}"
-        r_port = int(loc.get("inbound_port") or 0)
-        if not r_port or r_port in used_ports:
-            while next_port in used_ports:
-                next_port += 1
-            r_port = next_port
-        used_ports.add(r_port)
-        r_path = str(loc.get("path") or f"{secret_base}/{code}")
-        if base_cdn_spec is not None:
+        target_bridge = clean_code(loc.get("bridge_code") or code, code)
+
+        # По умолчанию каждая локация поднимается сразу на всех активных CDN-модулях узла
+        loc_cdns = list(active_cdns)
+        explicit_cdns = loc.get("cdns") if isinstance(loc.get("cdns"), list) else (
+            [loc.get("cdn")] if loc.get("cdn") else None
+        )
+        if explicit_cdns:
+            filtered = [str(c).strip() for c in explicit_cdns if str(c).strip() in active_cdns]
+            if filtered:
+                loc_cdns = filtered
+
+        cdn_paths = loc.get("paths") if isinstance(loc.get("paths"), dict) else {}
+        for cdn_idx, cdn_key in enumerate(loc_cdns):
+            sp = CDN_PROVIDER_SPECS[cdn_key]
+            m_cfg = modules.get(cdn_key, {})
+            spec_eff = dict(sp)
+            if isinstance(m_cfg, dict) and m_cfg.get("xPaddingPlacement"):
+                spec_eff["xPaddingPlacement"] = str(m_cfg["xPaddingPlacement"])
+
+            if len(loc_cdns) == 1:
+                relay_slug = code
+            else:
+                relay_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
+            r_tag = f"just1k-wl-inbound-{relay_slug}"
+
+            req_port = int(loc.get("inbound_port") or 0) if len(loc_cdns) == 1 else 0
+            if not req_port or req_port in used_ports:
+                while next_port in used_ports:
+                    next_port += 1
+                r_port = next_port
+            else:
+                r_port = req_port
+            used_ports.add(r_port)
+
+            if cdn_paths.get(cdn_key):
+                r_path = str(cdn_paths[cdn_key])
+            elif len(loc_cdns) == 1 or (cdn_idx == 0 and loc.get("path")):
+                r_path = str(loc.get("path") or f"{secret_base}/{code}")
+            else:
+                r_path = f"{secret_base}/{sp['subpath']}/{code}"
+            if not r_path.startswith("/"):
+                r_path = "/" + r_path
+
             cfg["inbounds"].append(
-                build_xhttp_inbound(r_tag, r_port, r_path, base_cdn_spec, merged_clients(r_tag, wl_clients, "", revoked_wl))
+                build_xhttp_inbound(r_tag, r_port, r_path, spec_eff, merged_clients(r_tag, wl_clients, "", revoked_wl))
             )
             bi_inbounds.append(r_tag)
-            location_nginx_routes.append((r_path, f"xray_xhttp_relay_{code}", base_cdn_spec))
+            bi_loc_inbounds_by_target.setdefault(target_bridge, []).append(r_tag)
+            location_nginx_routes.append((r_path, f"xray_xhttp_relay_{relay_slug}", spec_eff))
 
-    # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента!)
+    # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; без не-РФ DNS-резолва)
+    ru_domains = [
+        "geosite:category-ru", "geosite:tld-ru",
+        "domain:ru", "domain:su", "domain:xn--p1ai", "domain:2ip.ru",
+    ]
     cfg["dns"] = {
         "servers": [
             {
                 "address": "77.88.8.8",
                 "port": 53,
-                "domains": [
-                    "geosite:category-ru", "geosite:tld-ru",
-                    "domain:ru", "domain:su", "domain:xn--p1ai", "domain:2ip.ru",
-                ],
+                "domains": ru_domains,
                 "skipFallback": True,
             },
-            "77.88.8.1",
-            "195.208.4.1",
+            {
+                "address": "195.208.4.1",
+                "port": 53,
+                "domains": ru_domains,
+                "skipFallback": True,
+            },
         ],
         "queryStrategy": "UseIPv4",
     }
@@ -602,16 +655,12 @@ if role == "ru_hub":
     ])
 
     all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
-    ru_domains = [
-        "geosite:category-ru", "geosite:tld-ru",
-        "domain:ru", "domain:su", "domain:xn--p1ai", "domain:2ip.ru",
-    ]
     rules = [api_rule] + antiabuse_rules()
     if all_client_inbounds:
-        rules.extend([
-            {"type": "field", "inboundTag": all_client_inbounds, "domain": ru_domains, "outboundTag": "just1k-wl-direct"},
-            {"type": "field", "inboundTag": all_client_inbounds, "ip": ["geoip:ru"], "outboundTag": "just1k-wl-direct"},
-        ])
+        # Строго доменный direct для РФ + AsIs: зарубежные запросы уходят в мосты по FQDN без DNS в РФ
+        rules.append(
+            {"type": "field", "inboundTag": all_client_inbounds, "domain": ru_domains, "outboundTag": "just1k-wl-direct"}
+        )
 
     # Пер-SNI маршруты Стандарта (если включён nginx stream ssl_preread)
     stream_map_entries = []
@@ -672,12 +721,11 @@ if role == "ru_hub":
         with open(out_stream_path, "w", encoding="utf-8") as sfp:
             sfp.write(stream_text)
 
-    # Локационные БИ-правила (inbound-<code> -> bridge-bi-<code>)
-    existing_ib_tags = {ib.get("tag") for ib in cfg["inbounds"]}
+    # Локационные БИ-правила (все CDN-инбаунды локации -> соответствующий мост bridge-bi-<code>)
     for b_code, ob_tag in bi_outbounds.items():
-        loc_ib = f"just1k-wl-inbound-{b_code}"
-        if loc_ib in existing_ib_tags:
-            rules.append({"type": "field", "inboundTag": [loc_ib], "outboundTag": ob_tag})
+        loc_tags = bi_loc_inbounds_by_target.get(b_code, [])
+        if loc_tags:
+            rules.append({"type": "field", "inboundTag": loc_tags, "outboundTag": ob_tag})
 
     # Zero-Trust Fallback: иностранный трафик без моста ИДЁТ В BLACKHOLE, НИКОГДА НЕ В DIRECT!
     if std_inbounds:
@@ -700,14 +748,43 @@ if role == "ru_hub":
         nginx_needed = True
         c_file, k_file = cert_pair(domain)
         listen_block = (
-            "    listen 127.0.0.1:8080 default_server;\n"
+            "    listen 127.0.0.1:8080;\n"
             if has_vless_tls else
-            f"    listen 443 ssl http2 default_server;\n"
+            f"    listen 443 ssl http2;\n"
             f"    ssl_certificate {c_file};\n"
             f"    ssl_certificate_key {k_file};\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
             "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
         )
+        if has_vless_tls:
+            catchall_block = (
+                "server {\n"
+                "    listen 127.0.0.1:8080 default_server;\n"
+                "    server_name _;\n"
+                "    server_tokens off;\n"
+                "    return 444;\n"
+                "}\n\n"
+            )
+        elif ssl_reject_avail:
+            catchall_block = (
+                "server {\n"
+                "    listen 443 ssl http2 default_server;\n"
+                "    server_name _;\n"
+                "    server_tokens off;\n"
+                "    ssl_reject_handshake on;\n"
+                "}\n\n"
+            )
+        else:
+            catchall_block = (
+                "server {\n"
+                "    listen 443 ssl http2 default_server;\n"
+                "    server_name _;\n"
+                f"    ssl_certificate {c_file};\n"
+                f"    ssl_certificate_key {k_file};\n"
+                "    server_tokens off;\n"
+                "    return 444;\n"
+                "}\n\n"
+            )
         cidr_lines = []
         seen_cidr = set()
         use_xff = False
@@ -779,20 +856,15 @@ if role == "ru_hub":
             if cp and cp not in seen_loc_paths:
                 seen_loc_paths.add(cp)
                 loc_blocks.append(make_xhttp_loc(cp, r_upstream, r_sp))
-        loc_blocks.append(
-            "    location = /cdn-check {\n"
-            "        add_header Content-Type text/plain;\n"
-            "        return 204;\n"
-            "    }\n"
-        )
         cdn_doms = [str(state.get("cdn_domain") or "").strip()]
         for ck in active_cdns:
             m_cfg = modules.get(ck, {})
             if isinstance(m_cfg, dict):
                 cdn_doms.append(str(m_cfg.get("cdn_domain") or m_cfg.get("domain") or "").strip())
-        srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms + ["_"]) if x and x != "-"])
+        srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms) if x and x != "-"]) or (domain or "localhost")
         nginx_text = (
-            "server {\n"
+            catchall_block
+            + "server {\n"
             + listen_block
             + f"    server_name {srv_names};\n"
             + "    server_tokens off;\n"
@@ -821,11 +893,14 @@ elif role == "eu_hub":
     t_uuid = str(state.get("tunnel_uuid") or "").strip()
     if not is_valid_uuid(t_uuid):
         t_uuid = str(uuid_lib.uuid4())
+        resolved_tunnel_uuid = t_uuid
     relay_port = int(state.get("relay_port") or 443)
 
     in_clients_map = {}
-    def add_hub_client(uid, email):
-        if is_valid_uuid(uid) and uid not in in_clients_map:
+    def add_hub_client(uid, email, override=False):
+        if not is_valid_uuid(uid):
+            return
+        if uid not in in_clients_map or override:
             in_clients_map[uid] = {"id": uid, "email": email, "flow": "xtls-rprx-vision"}
 
     add_hub_client(t_uuid, "ru-hub@just1k")
@@ -833,15 +908,11 @@ elif role == "eu_hub":
         if isinstance(item, dict):
             u = str(item.get("uuid") or item.get("ingress_uuid") or "").strip()
             em = str(item.get("route_user") or item.get("email") or f"ingress-{clean_code(item.get('code'), 'ru')}@just1k")
-            add_hub_client(u, em)
+            add_hub_client(u, em, override=bool(item.get("route_user") or item.get("email")))
     for item in (links.get("routes") or []):
         if isinstance(item, dict) and item.get("ingress_uuid"):
             em = str(item.get("route_user") or f"ingress-{clean_code(item.get('code'), 'rt')}@just1k")
-            add_hub_client(str(item["ingress_uuid"]).strip(), em)
-    for p in peers:
-        if isinstance(p, dict) and p.get("ingress_uuid"):
-            c_code = clean_code(p.get("code"), "ru")
-            add_hub_client(str(p["ingress_uuid"]).strip(), str(p.get("route_user") or f"ingress-{c_code}@just1k"))
+            add_hub_client(str(item["ingress_uuid"]).strip(), em, override=bool(item.get("route_user")))
 
     cfg["inbounds"].append({
         "tag": "inbound-tls",
@@ -861,19 +932,21 @@ elif role == "eu_hub":
         "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
     })
 
-    # СТРОГО без freedom: только выходы на Выходные НОДЫ + blackhole
+    # СТРОГО без freedom: только выходы на Выходные НОДЫ (links.json v2) + blackhole
     exit_sources = links.get("exit_nodes") if isinstance(links.get("exit_nodes"), list) else []
-    if peers:
-        exit_sources = list(exit_sources) + [p for p in peers if isinstance(p, dict) and p.get("ip") and p.get("uuid")]
 
     primary_exit_tag = None
     route_rules = [api_rule] + antiabuse_rules()
     seen_exits = {}
+    exit_by_id = {}
+    exit_by_uuid = {}
+    exit_by_code = {}
     for idx, p in enumerate(exit_sources):
         if not isinstance(p, dict):
             continue
         p_code = clean_code(p.get("code"), f"exit{idx+1}")
-        ob_tag = f"exit-{p_code}"
+        explicit_tag = str(p.get("tag") or "").strip()
+        ob_tag = explicit_tag if (explicit_tag and re.fullmatch(r"[a-zA-Z0-9_-]+", explicit_tag)) else f"exit-{p_code}"
         if ob_tag in seen_exits:
             ob_tag = f"exit-{p_code}-{idx+1}"
         ob = build_bridge_outbound(ob_tag, p)
@@ -881,6 +954,12 @@ elif role == "eu_hub":
             continue
         seen_exits[ob_tag] = ob
         cfg["outbounds"].append(ob)
+        if p.get("id"):
+            exit_by_id[str(p["id"]).strip()] = ob_tag
+        p_uid = str(p.get("uuid") or "").strip().lower()
+        if p_uid:
+            exit_by_uuid[p_uid] = ob_tag
+        exit_by_code.setdefault(p_code, ob_tag)
         if not primary_exit_tag or p.get("is_default"):
             primary_exit_tag = ob_tag
         if p.get("route_user"):
@@ -891,14 +970,32 @@ elif role == "eu_hub":
             })
 
     for rt in (links.get("routes") or []):
-        if isinstance(rt, dict) and rt.get("route_user") and rt.get("exit_code"):
-            target_tag = f"exit-{clean_code(rt['exit_code'], '')}"
-            if target_tag in seen_exits:
-                route_rules.append({
-                    "type": "field",
-                    "user": [str(rt["route_user"])],
-                    "outboundTag": target_tag,
-                })
+        if not isinstance(rt, dict):
+            continue
+        r_users = []
+        if rt.get("route_user"):
+            r_users.append(str(rt["route_user"]))
+        if isinstance(rt.get("route_users"), list):
+            r_users.extend([str(u) for u in rt["route_users"] if u])
+        if not r_users:
+            continue
+        target_tag = None
+        if rt.get("exit_id") and str(rt["exit_id"]).strip() in exit_by_id:
+            target_tag = exit_by_id[str(rt["exit_id"]).strip()]
+        elif rt.get("exit_tag") and str(rt["exit_tag"]).strip() in seen_exits:
+            target_tag = str(rt["exit_tag"]).strip()
+        elif rt.get("exit_uuid") and str(rt["exit_uuid"]).strip().lower() in exit_by_uuid:
+            target_tag = exit_by_uuid[str(rt["exit_uuid"]).strip().lower()]
+        elif rt.get("exit_code"):
+            cand_code = clean_code(rt["exit_code"], "")
+            cand_tag = f"exit-{cand_code}"
+            target_tag = cand_tag if cand_tag in seen_exits else exit_by_code.get(cand_code)
+        if target_tag and target_tag in seen_exits:
+            route_rules.append({
+                "type": "field",
+                "user": list(dict.fromkeys(r_users)),
+                "outboundTag": target_tag,
+            })
 
     cfg["outbounds"].extend([
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
@@ -917,6 +1014,7 @@ elif role == "exit_node":
     t_uuid = str(state.get("tunnel_uuid") or "").strip()
     if not is_valid_uuid(t_uuid):
         t_uuid = str(uuid_lib.uuid4())
+        resolved_tunnel_uuid = t_uuid
 
     # СТРОГО ТОЛЬКО bridge UUID от хабов — НИКАКИХ пользовательских vless_clients на выходной ноде!
     bridge_clients = {}
@@ -969,6 +1067,7 @@ print(json.dumps({
     "map_needed": map_needed,
     "stream_needed": stream_needed,
     "secret_base_path": secret_base,
+    "tunnel_uuid": resolved_tunnel_uuid,
 }))
 PYEOF
     then
@@ -976,8 +1075,8 @@ PYEOF
         return 1
     fi
 
-    local nginx_needed="false" fallback80_needed="false" map_needed="false" stream_needed="false" resolved_secret=""
-    read -r nginx_needed fallback80_needed map_needed stream_needed resolved_secret < <(python3 -c "
+    local nginx_needed="false" fallback80_needed="false" map_needed="false" stream_needed="false" resolved_secret="" resolved_tunnel_uuid=""
+    read -r nginx_needed fallback80_needed map_needed stream_needed resolved_secret resolved_tunnel_uuid < <(python3 -c "
 import json, sys
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
     m = json.load(f)
@@ -986,13 +1085,17 @@ print(
     'true' if m.get('fallback80_needed') else 'false',
     'true' if m.get('map_needed') else 'false',
     'true' if m.get('stream_needed') else 'false',
-    m.get('secret_base_path', '')
+    m.get('secret_base_path') or '-',
+    m.get('tunnel_uuid') or '-',
 )
-" "$meta_tmp" 2>/dev/null || echo "false false false false ")
+" "$meta_tmp" 2>/dev/null || echo "false false false false - -")
     rm -f "$meta_tmp" 2>/dev/null || true
 
-    if [[ -n "$resolved_secret" ]]; then
+    if [[ -n "$resolved_secret" && "$resolved_secret" != "-" ]]; then
         set_state_val "secret_base_path" "$resolved_secret" 2>/dev/null || true
+    fi
+    if [[ -n "$resolved_tunnel_uuid" && "$resolved_tunnel_uuid" != "-" ]]; then
+        set_state_val "tunnel_uuid" "$resolved_tunnel_uuid" 2>/dev/null || true
     fi
 
     ensure_xray_config_permissions "$tmp_xray"

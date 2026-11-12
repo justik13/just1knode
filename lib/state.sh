@@ -352,23 +352,6 @@ try:
         if isinstance(mods, dict) and arg1 in mods:
             del mods[arg1]
             data['modules'] = mods
-    elif action == 'upsert_peer':
-        peer = json.loads(arg1)
-        if not isinstance(peer, dict) or not peer.get('code'):
-            raise ValueError('peer must be dict with code')
-        peers = data.get('peers')
-        if not isinstance(peers, list):
-            peers = []
-        code = str(peer['code']).strip().lower()
-        peer['code'] = code
-        peers = [p for p in peers if isinstance(p, dict) and str(p.get('code', '')).strip().lower() != code]
-        peers.append(peer)
-        data['peers'] = peers
-    elif action == 'remove_peer':
-        code = arg1.strip().lower()
-        peers = data.get('peers')
-        if isinstance(peers, list):
-            data['peers'] = [p for p in peers if isinstance(p, dict) and str(p.get('code', '')).strip().lower() != code]
     else:
         raise ValueError('Unknown mutation action: ' + action)
 
@@ -477,18 +460,6 @@ try:
 except Exception:
     print(0)
 " "$STATE_FILE"
-}
-
-get_peers_json() {
-    get_state_json_val "peers" "[]"
-}
-
-upsert_peer_json() {
-    _state_mutate_json "upsert_peer" "$1"
-}
-
-remove_peer_json() {
-    _state_mutate_json "remove_peer" "$1"
 }
 
 get_links_json() {

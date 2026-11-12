@@ -52,6 +52,38 @@ _create_bootstrap_cert() {
     return 1
 }
 
+_cert_is_newer_than() {
+    local cand_cert="$1"
+    local cur_cert="$2"
+    [[ -f "$cand_cert" && -f "$cur_cert" ]] || return 1
+    python3 - "$cand_cert" "$cur_cert" <<'PYEOF'
+import hashlib, os, subprocess, sys
+from datetime import datetime, timezone
+
+cand, cur = sys.argv[1], sys.argv[2]
+
+def _cert_meta(path):
+    with open(path, "rb") as fp:
+        digest = hashlib.sha256(fp.read()).hexdigest()
+    out = subprocess.check_output(
+        ["openssl", "x509", "-noout", "-startdate", "-in", path],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    ).strip()
+    raw = out.split("=", 1)[1].strip()
+    dt = datetime.strptime(" ".join(raw.split()), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    return digest, dt.timestamp(), os.path.getmtime(path)
+
+try:
+    c_fp, c_nb, c_mt = _cert_meta(cand)
+    d_fp, d_nb, d_mt = _cert_meta(cur)
+    is_newer = (c_fp != d_fp) and (c_nb > d_nb or (c_nb == d_nb and c_mt > d_mt))
+    sys.exit(0 if is_newer else 1)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
 _resolve_existing_or_wildcard_cert() {
     local domain="$1"
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
@@ -68,14 +100,12 @@ _resolve_existing_or_wildcard_cert() {
         direct_valid=1
         if _is_self_signed_cert "$direct_cert"; then
             direct_self_signed=1
-        else
-            log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
-            return 0
         fi
     fi
 
-    # Ищем подписанный CA/Wildcard сертификат в соседних каталогах live/* (и при наличии заменяем им bootstrap self-signed)
-    local cand cand_dir cand_key
+    # Ищем подписанный CA/Wildcard сертификат в соседних каталогах live/*:
+    # заменяем им bootstrap self-signed ИЛИ устаревший прямой/прошлый wildcard-сертификат
+    local cand cand_dir cand_key best_cand="" best_key="" best_dir=""
     for cand in "${le_dir}/live"/*/fullchain.pem; do
         [[ -f "$cand" ]] || continue
         cand_dir="$(dirname "$cand")"
@@ -85,10 +115,27 @@ _resolve_existing_or_wildcard_cert() {
         if openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
            openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null && \
            ! _is_self_signed_cert "$cand"; then
+            if [[ -z "$best_cand" ]] || _cert_is_newer_than "$cand" "$best_cand"; then
+                best_cand="$cand"
+                best_key="$cand_key"
+                best_dir="$cand_dir"
+            fi
+        fi
+    done
+
+    if [[ -n "$best_cand" ]]; then
+        local should_copy=0
+        if [[ $direct_valid -eq 0 || $direct_self_signed -eq 1 ]]; then
+            should_copy=1
+        elif _cert_is_newer_than "$best_cand" "$direct_cert"; then
+            should_copy=1
+        fi
+
+        if [[ $should_copy -eq 1 ]]; then
             _ensure_letsencrypt_xrayapi_permissions
             mkdir -p "${le_dir}/live/${domain}"
-            cp -f "$cand" "${le_dir}/live/${domain}/fullchain.pem"
-            cp -f "$cand_key" "${le_dir}/live/${domain}/privkey.pem"
+            cp -f "$best_cand" "${le_dir}/live/${domain}/fullchain.pem"
+            cp -f "$best_key" "${le_dir}/live/${domain}/privkey.pem"
             if getent group xrayapi >/dev/null 2>&1; then
                 chown root:xrayapi "${le_dir}/live/${domain}" "${le_dir}/live/${domain}/fullchain.pem" "${le_dir}/live/${domain}/privkey.pem" 2>/dev/null || true
                 chmod 2775 "${le_dir}/live/${domain}" 2>/dev/null || true
@@ -96,16 +143,22 @@ _resolve_existing_or_wildcard_cert() {
             chmod 644 "${le_dir}/live/${domain}/fullchain.pem"
             chmod 640 "${le_dir}/live/${domain}/privkey.pem"
             if [[ $direct_self_signed -eq 1 ]]; then
-                log "✔ Bootstrap-сертификат '${domain}' заменён боевым Wildcard из $(basename "$cand_dir")!"
+                log "✔ Bootstrap-сертификат '${domain}' заменён боевым Wildcard из $(basename "$best_dir")!"
+            elif [[ $direct_valid -eq 1 ]]; then
+                log "✔ TLS-сертификат '${domain}' обновлён более свежим Wildcard из $(basename "$best_dir")!"
             else
-                log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '${domain}'!"
+                log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$best_dir"), покрывающий '${domain}'!"
             fi
             return 0
         fi
-    done
+    fi
 
     if [[ $direct_valid -eq 1 ]]; then
-        log "✔ Используется действующий стартовый TLS-сертификат для '${domain}'."
+        if [[ $direct_self_signed -eq 1 ]]; then
+            log "✔ Используется действующий стартовый TLS-сертификат для '${domain}'."
+        else
+            log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
+        fi
         return 0
     fi
 

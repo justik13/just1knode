@@ -410,7 +410,6 @@ ensure_v2_base_stack_installed() {
     set_state_val "api_key" "$api_key"
     set_state_val "api_url" "https://${my_ip}:8444"
     set_state_json_val "modules" "{}"
-    set_state_json_val "peers" "[]"
 
     deploy_xray_api_service "$api_key" ""
     setup_base_api_nginx || warn "Предупреждение при настройке Nginx для API 8444."
@@ -1021,18 +1020,6 @@ if os.path.exists(links_path):
                     ))
     except Exception:
         pass
-try:
-    peers = json.load(open(state_path, encoding="utf-8")).get("peers", [])
-except Exception:
-    peers = []
-seen = {(t[2], t[3]) for t in targets}
-for p in (peers if isinstance(peers, list) else []):
-    if not isinstance(p, dict) or not p.get("ip"): continue
-    key = (p["ip"], int(p.get("port", 443)))
-    if key in seen: continue
-    seen.add(key)
-    code = p.get("code", "-")
-    targets.append((p.get("name", code), code, p["ip"], int(p.get("port", 443))))
 for name, code, ip, port in targets:
     t0 = time.perf_counter()
     try:

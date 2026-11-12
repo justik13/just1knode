@@ -99,10 +99,11 @@ install_base_deps() {
 
 install_nginx_if_missing() {
     if ! command -v nginx >/dev/null 2>&1; then
-        log "Установка Nginx и Certbot..."
+        log "Установка Nginx, mod-stream и Certbot..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
+        apt-get install -y -qq nginx libnginx-mod-stream certbot python3-certbot-nginx ca-certificates || \
+            apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
         # Отключаем дефолтный сайт сразу после установки пакета для предотвращения конфликта портов
         local def_site="${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/default"
         if [[ -f "$def_site" || -L "$def_site" ]]; then
@@ -112,6 +113,24 @@ install_nginx_if_missing() {
         systemctl enable nginx 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
     fi
+}
+
+ensure_nginx_stream_module() {
+    install_nginx_if_missing
+    command -v nginx >/dev/null 2>&1 || return 1
+    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
+        return 0
+    fi
+    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|$)'; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        log "Доустановка модуля Nginx Stream (libnginx-mod-stream) для SNI-маршрутизации..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 || true
+    fi
+    compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1
 }
 
 # Обнаружение Docker-контейнера, слушающего хостовый TCP-порт 80
