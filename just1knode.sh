@@ -95,6 +95,10 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a "$tmp_extract/scripts/xray_api/." "$INSTALL_DIR/scripts/xray_api/"
         fi
+        if [[ -d "$tmp_extract/scripts/systemd" ]]; then
+            mkdir -p "$INSTALL_DIR/scripts/systemd"
+            cp -a "$tmp_extract/scripts/systemd/." "$INSTALL_DIR/scripts/systemd/"
+        fi
         bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
             bootstrap_sha="$(timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' || true)"
@@ -216,30 +220,27 @@ source "${SCRIPT_DIR}/lib/state.sh"
 source "${SCRIPT_DIR}/lib/ssl.sh"
 # shellcheck source=lib/traffic_limit.sh
 source "${SCRIPT_DIR}/lib/traffic_limit.sh"
+# shellcheck source=lib/module_loader.sh
+source "${SCRIPT_DIR}/lib/module_loader.sh"
+# shellcheck source=lib/builder.sh
+source "${SCRIPT_DIR}/lib/builder.sh"
 
-# Подключение модулей
+# Подключение системных и ролевых модулей
 # shellcheck source=modules/xray/core.sh
 source "${SCRIPT_DIR}/modules/xray/core.sh"
 # shellcheck source=modules/xray/api.sh
 source "${SCRIPT_DIR}/modules/xray/api.sh"
-# shellcheck source=modules/xray/origin.sh
-source "${SCRIPT_DIR}/modules/xray/origin.sh"
-# shellcheck source=modules/xray/relay.sh
-source "${SCRIPT_DIR}/modules/xray/relay.sh"
-# shellcheck source=modules/xray/relays_manage.sh
-source "${SCRIPT_DIR}/modules/xray/relays_manage.sh"
-# shellcheck source=modules/roles/common_xray.sh
-source "${SCRIPT_DIR}/modules/roles/common_xray.sh"
-# shellcheck source=modules/transports/vless_tls.sh
-source "${SCRIPT_DIR}/modules/transports/vless_tls.sh"
-# shellcheck source=modules/transports/vless_xhttp.sh
-source "${SCRIPT_DIR}/modules/transports/vless_xhttp.sh"
+# shellcheck source=modules/roles/base.sh
+source "${SCRIPT_DIR}/modules/roles/base.sh"
 # shellcheck source=modules/roles/ru_hub.sh
 source "${SCRIPT_DIR}/modules/roles/ru_hub.sh"
 # shellcheck source=modules/roles/eu_hub.sh
 source "${SCRIPT_DIR}/modules/roles/eu_hub.sh"
 # shellcheck source=modules/roles/exit_node.sh
 source "${SCRIPT_DIR}/modules/roles/exit_node.sh"
+
+# Изолированная динамическая загрузка независимых транспортных и CDN модулей
+load_all_transport_modules
 
 # Вспомогательные хелперы статуса для интерфейса v2
 get_bot_connection_label() {
@@ -455,29 +456,11 @@ show_status() {
     init_state_dir
 
     local role
-    role="$(get_state_val "role" "не настроен")"
+    role="$(get_state_val "role" "unconfigured")"
     echo -e "  Версия just1knode:    ${BOLD}${CYAN}$(node_version_label)${NC}"
     echo -e "  Роль узла:            ${BOLD}${GREEN}${role}${NC}"
 
-    if [[ "$role" == "origin" ]]; then
-        local domain cdn_domain api_url secret_path
-        domain="$(get_state_val "domain" "-")"
-        cdn_domain="$(get_state_val "cdn_domain" "-")"
-        api_url="$(get_state_val "api_url" "-")"
-        secret_path="$(get_state_val "secret_base_path" "-")"
-
-        echo -e "  Origin Домен:         ${CYAN}${domain}${NC}"
-        echo -e "  CDN Домен:            ${CYAN}${cdn_domain}${NC}"
-        echo -e "  API URL:              ${CYAN}${api_url}${NC}"
-        echo -e "  Секретный префикс:    ${MAGENTA}${secret_path}${NC}"
-
-        echo -e "\n  Службы:"
-        systemctl is-active --quiet xray && echo -e "    Xray Core:   ${GREEN}● Активен${NC}" || echo -e "    Xray Core:   ${RED}○ Не работает${NC}"
-        systemctl is-active --quiet xray-api && echo -e "    xray-api:    ${GREEN}● Активен${NC}" || echo -e "    xray-api:    ${RED}○ Не работает${NC}"
-        systemctl is-active --quiet nginx && echo -e "    Nginx:       ${GREEN}● Активен${NC}" || echo -e "    Nginx:       ${RED}○ Не работает${NC}"
-
-        list_relays
-    elif [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         local domain api_url bot_ip
         domain="$(get_state_val "domain" "-")"
         api_url="$(get_state_val "api_url" "-")"
@@ -494,8 +477,13 @@ show_status() {
             echo -e "    VLESS TLS:          $(vless_tls_status_label)"
             echo -e "    VLESS XHTTP:        $(vless_xhttp_status_label)"
             if is_module_enabled "vless_xhttp"; then
-                echo -e "      Yandex CDN:       $(cdn_module_status_label "cdn_yandex")"
-                echo -e "      TurboFlare:       $(cdn_module_status_label "cdn_turboflare")"
+                local m kind label
+                for m in "${LOADED_TRANSPORT_MODULES[@]}"; do
+                    kind="$(get_module_meta_field "$m" "kind" "transport")"
+                    [[ "$kind" == "cdn" ]] || continue
+                    label="$(get_module_meta_field "$m" "label" "$m")"
+                    printf "      %-18s %s\n" "${label}:" "$(cdn_module_status_label "$m")"
+                done
             fi
         elif [[ "$role" == "eu_hub" ]]; then
             echo -e "  Порт моста:           ${CYAN}443/tcp${NC}"
@@ -507,38 +495,26 @@ show_status() {
         systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
         systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
         systemctl is-active --quiet nginx && echo -e "    Nginx (8444/443):     ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444/443):     ${RED}○ Не работает${NC}"
+        if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" ]]; then
+            systemctl is-active --quiet just1knode-apply.path && echo -e "    Apply Watcher:        ${GREEN}● Активен${NC}" || echo -e "    Apply Watcher:        ${YELLOW}○ Не активен${NC}"
+        fi
     else
-        local cur_has_r cur_has_v
-        cur_has_r="$(get_state_val "has_relay" "0")"
-        cur_has_v="$(get_state_val "has_vless" "0")"
-
-        if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
-            local v_dom
-            v_dom="$(get_state_val "vless_domain" "-")"
-            echo -e "  [TLS/VLESS] Домен:    ${CYAN}${v_dom}${NC} (Порт: 443 TLS XTLS-Vision)"
-        fi
-        if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
-            local r_port r_orig r_sni r_sec
-            r_port="$(get_state_val "relay_port" "-")"
-            r_orig="$(get_state_val "origin_ip" "-")"
-            r_sni="$(get_state_val "sni" "-")"
-            r_sec="$(get_state_val "security" "tls")"
-            echo -e "  [Relay] Порт туннеля: ${CYAN}${r_port}${NC} (${r_sec^^}, Origin: ${r_orig}, SNI: ${r_sni})"
-        fi
-
+        echo -e "  Отображение:          $(role_display_name "$role")"
+        echo -e "  Бот:                  $(get_bot_connection_label)"
         echo -e "\n  Службы:"
-        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
-            systemctl is-active --quiet xray && echo -e "    Xray Core:            ${GREEN}● Активен${NC}" || echo -e "    Xray Core:            ${RED}○ Не работает${NC}"
-        fi
-        if [[ "$cur_has_v" == "1" || "$role" == "vless" || "$role" == "origin" ]]; then
-            systemctl is-active --quiet xray-api && echo -e "    xray-api:             ${GREEN}● Активен${NC}" || echo -e "    xray-api:             ${RED}○ Не работает${NC}"
-        fi
-        if [[ "$cur_has_v" == "1" || "$role" == "vless" || "$role" == "origin" || "$role" == "relay" ]]; then
-            systemctl is-active --quiet nginx && echo -e "    Nginx (8444):         ${GREEN}● Активен${NC}" || echo -e "    Nginx (8444):         ${RED}○ Не работает${NC}"
-        fi
+        systemctl is-active --quiet xray-api && echo -e "    xray-api (8444):      ${GREEN}● Активен${NC}" || echo -e "    xray-api (8444):      ${YELLOW}○ Не работает${NC}"
+        systemctl is-active --quiet nginx && echo -e "    Nginx:                ${GREEN}● Активен${NC}" || echo -e "    Nginx:                ${YELLOW}○ Не работает${NC}"
     fi
 
-    if [[ "$role" != "не настроен" ]] && declare -f show_traffic_limit_status >/dev/null 2>&1; then
+    if [[ ${#BROKEN_MODULE_IDS[@]} -gt 0 ]]; then
+        echo -e "\n  ${YELLOW}Изолированные модули (ошибки загрузки):${NC}"
+        local idx
+        for ((idx = 0; idx < ${#BROKEN_MODULE_IDS[@]}; idx++)); do
+            echo -e "    ${RED}● ${BROKEN_MODULE_IDS[$idx]}${NC}: ${BROKEN_MODULE_REASONS[$idx]}"
+        done
+    fi
+
+    if [[ "$role" != "unconfigured" ]] && declare -f show_traffic_limit_status >/dev/null 2>&1; then
         if [[ -f "${TRAFFIC_LIMIT_CONFIG:-${STATE_DIR:-/etc/just1knode}/traffic_limit.json}" ]] || command -v vnstat >/dev/null 2>&1; then
             show_traffic_limit_status
         fi
@@ -546,167 +522,32 @@ show_status() {
 }
 
 show_bot_credentials() {
-    title "ДАННЫЕ ДЛЯ ДОБАВЛЕНИЯ В TELEGRAM-БОТ (/admin)"
-    local role
-    role="$(get_state_val "role")"
-    if [[ "$role" != "origin" ]]; then
-        warn "Данные для бота доступны только на сервере с ролью Origin."
-        return
-    fi
-
-    local domain cdn_domain api_url api_key secret_path bot_ip bot_domain
-    domain="$(get_state_val "domain" "-")"
-    cdn_domain="$(get_state_val "cdn_domain" "-")"
-    api_url="$(get_state_val "api_url" "-")"
-    api_key="$(get_state_val "api_key" "-")"
-    if [[ -z "$api_key" || "$api_key" == "-" ]] && [[ -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
-        api_key="$(grep -m1 '^XRAY_API_KEY=' "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" 2>/dev/null | cut -d= -f2- || echo "-")"
-    fi
-    secret_path="$(get_state_val "secret_base_path" "-")"
-    bot_ip="$(get_state_val "bot_ip" "-")"
-    bot_domain="$(get_state_val "bot_domain" "-")"
-
-    echo -e "  🌐 Origin Домен:      ${CYAN}${domain}${NC}"
-    echo -e "  ☁️ CDN Домен:         ${CYAN}${cdn_domain}${NC}"
-    echo -e "  🔗 API URL бота:      ${CYAN}${api_url}${NC}"
-    echo -e "  🤖 BOT IP:            ${CYAN}${bot_ip}${NC}"
-    echo -e "  🤖 BOT Домен:         ${CYAN}${bot_domain}${NC}"
-    echo -e "  🔑 API Ключ:          ${YELLOW}${api_key}${NC}"
-    echo -e "  🛡️ Секретный префикс: ${MAGENTA}${secret_path}${NC}"
-    echo -e "  🩺 Проверка CDN:      curl -X OPTIONS https://${cdn_domain}/cdn-check\n"
-}
-
-show_relay_credentials() {
-    title "ДАННЫЕ ПОДКЛЮЧЕНИЯ RELAY (КОМАНДА ДЛЯ ORIGIN)"
-    local role cur_has_r
-    role="$(get_state_val "role")"
-    cur_has_r="$(get_state_val "has_relay" "0")"
-    if [[ "$role" != "relay" && ( "$role" != "node" || "$cur_has_r" != "1" ) ]]; then
-        warn "Данные доступны только на сервере с настроенным компонентом Relay."
-        return
-    fi
-
-    local my_ip r_port r_uuid r_sec r_pubkey r_shortid r_sni
-    my_ip="$(get_public_ipv4 || true)"
-    r_port="$(get_state_val "relay_port" "10443")"
-    r_uuid="$(get_state_val "tunnel_uuid")"
-    if [[ -z "$r_uuid" && -f "$XRAY_CONFIG" ]]; then
-        r_uuid="$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        cfg = json.load(f)
-    for ib in cfg.get('inbounds', []):
-        if ib.get('tag') in ('inbound-tls', 'inbound-reality', 'from-origin') or ib.get('port') in (10443, 8443):
-            clients = ib.get('settings', {}).get('clients', [])
-            if clients and isinstance(clients, list):
-                uid = clients[0].get('id')
-                if uid:
-                    print(uid)
-                    sys.exit(0)
-except Exception:
-    pass
-" "$XRAY_CONFIG" 2>/dev/null || true)"
-        [[ -n "$r_uuid" ]] && set_state_val "tunnel_uuid" "$r_uuid" 2>/dev/null || true
-    fi
-    r_sec="$(get_state_val "security" "")"
-    r_pubkey="$(get_state_val "public_key" "")"
-    r_shortid="$(get_state_val "short_id" "")"
-    r_sni="$(get_state_val "sni" "")"
-
-    # Определение режима и нормализация для устаревших узлов с fallback на TLS
-    if [[ -z "$r_sec" ]]; then
-        if [[ -f "$XRAY_CONFIG" ]]; then
-            r_sec="$(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        cfg = json.load(f)
-    for ib in cfg.get('inbounds', []):
-        sec = ib.get('streamSettings', {}).get('security')
-        if sec in ('tls', 'reality'):
-            print('tls')
-            sys.exit(0)
-except Exception:
-    pass
-print('tls')
-" "$XRAY_CONFIG" 2>/dev/null || echo "tls")"
-        else
-            r_sec="tls"
-        fi
-        set_state_val "security" "tls" 2>/dev/null || true
-    fi
-    r_sec="tls"
-
-    local detected_code=""
-    if [[ -n "$my_ip" ]]; then
-        detected_code="$(detect_node_country_code "$my_ip" 2>/dev/null || true)"
-    fi
-    if [[ -z "$detected_code" && -n "$r_sni" ]]; then
-        local first_label="${r_sni%%.*}"
-        if [[ "${#first_label}" -eq 2 && "$first_label" =~ ^[a-zA-Z]+$ ]]; then
-            detected_code="${first_label,,}"
-        fi
-    fi
-    if [[ -z "$detected_code" ]]; then
-        detected_code="relay-01"
-    fi
-
-    local detected_country="Зарубежный шлюз"
-    case "$detected_code" in
-        de) detected_country="🇩🇪 Германия" ;;
-        nl) detected_country="🇳🇱 Нидерланды" ;;
-        fi) detected_country="🇫🇮 Финляндия" ;;
-        se) detected_country="🇸🇪 Швеция" ;;
-        us) detected_country="🇺🇸 США" ;;
-        gb|uk) detected_country="🇬🇧 Великобритания" ;;
-        fr) detected_country="🇫🇷 Франция" ;;
-        tr) detected_country="🇹🇷 Турция" ;;
-        kz) detected_country="🇰🇿 Казахстан" ;;
-        pl) detected_country="🇵🇱 Польша" ;;
-        at) detected_country="🇦🇹 Австрия" ;;
-        ch) detected_country="🇨🇭 Швейцария" ;;
-        ee) detected_country="🇪🇪 Эстония" ;;
-        *) detected_country="$(get_country_display_name "$detected_code")" ;;
-    esac
-
-    echo -e "${BOLD}Скопируйте и выполните эту команду на вашем Origin-сервере:${NC}"
-    echo -e "${GREEN}just1knode relay add \"${detected_country}\" ${my_ip} ${r_port} \"${r_uuid}\" \"${detected_code}\" \"tls\" \"-\" \"-\" \"${r_sni}\"${NC}\n"
-    echo -e "${BOLD}Или, если релей уже был добавлен ранее, обновите SNI на Origin:${NC}"
-    echo -e "${CYAN}just1knode relay sni ${detected_code} ${r_sni} tls${NC}\n"
+    show_v2_connection_card
 }
 
 run_doctor() {
     title "КОМПЛЕКСНАЯ САМОДИАГНОСТИКА (DOCTOR)"
     local failed=0
     local warnings=0
-    local role
-    role="$(get_state_val "role" "не определена")"
-    local cur_has_v cur_has_r
-    cur_has_v="$(get_state_val "has_vless" "0")"
-    cur_has_r="$(get_state_val "has_relay" "0")"
+    local role domain
+    role="$(get_state_val "role" "unconfigured")"
+    domain="$(get_state_val "domain")"
+
+    log "0. Проверка целостности транспортных модулей..."
+    if [[ ${#BROKEN_MODULE_IDS[@]} -eq 0 ]]; then
+        echo -e "  ${GREEN}✔${NC} Все транспортные модули загружены (активно: ${#LOADED_TRANSPORT_MODULES[@]})"
+    else
+        local idx
+        for ((idx = 0; idx < ${#BROKEN_MODULE_IDS[@]}; idx++)); do
+            echo -e "  ${RED}✗${NC} Изолирован битый модуль '${BROKEN_MODULE_IDS[$idx]}': ${BROKEN_MODULE_REASONS[$idx]}"
+            failed=$((failed + 1))
+        done
+    fi
 
     log "1. Проверка системных служб..."
-    local services_to_check=()
-    if [[ "$role" == "origin" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
-        services_to_check+=("xray" "nginx" "xray-api")
-    elif [[ "$role" == "relay" ]]; then
-        services_to_check+=("xray")
-    elif [[ "$role" == "vless" ]]; then
-        services_to_check+=("xray" "nginx" "xray-api")
-    elif [[ "$role" == "node" ]]; then
-        if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" ]]; then
-            services_to_check+=("xray")
-        fi
-        if [[ "$cur_has_v" == "1" ]]; then
-            services_to_check+=("xray-api")
-            if [[ ! " ${services_to_check[*]} " =~ [[:space:]]nginx[[:space:]] ]]; then
-                services_to_check+=("nginx")
-            fi
-        fi
-        if [[ "$cur_has_r" == "0" && "$cur_has_v" == "0" ]]; then
-            services_to_check+=("xray")
-        fi
+    local services_to_check=("nginx" "xray-api")
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        services_to_check=("xray" "nginx" "xray-api")
     fi
     for srv in "${services_to_check[@]}"; do
         if systemctl is-active --quiet "$srv" 2>/dev/null; then
@@ -723,8 +564,17 @@ run_doctor() {
         fi
     done
 
-    # gRPC проверяется на Origin, VLESS, v2 хабах/нодах и модульных узлах с поддержкой VLESS
-    if [[ "$role" == "origin" || "$role" == "vless" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$cur_has_v" == "1" ]]; then
+    if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" ]]; then
+        if systemctl is-active --quiet just1knode-apply.path 2>/dev/null; then
+            echo -e "  ${GREEN}✔${NC} Триггер применения конфигурации just1knode-apply.path активен"
+        else
+            echo -e "  ${YELLOW}!${NC} Триггер just1knode-apply.path не активен"
+            warnings=$((warnings + 1))
+        fi
+    fi
+
+    # gRPC проверяется на всех настроенных v2-ролях
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         log "2. Проверка gRPC порта Xray (127.0.0.1:10085)..."
         if is_traffic_limit_exceeded; then
             echo -e "  ${YELLOW}!${NC} gRPC сокет Xray не проверялся (Xray остановлен по лимиту трафика)"
@@ -747,33 +597,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "relay" || "$cur_has_r" == "1" ]]; then
-        log "2a. Проверка Relay инбаунд порта..."
-        local r_port
-        r_port="$(get_state_val "relay_port" "")"
-        if ! [[ "$r_port" =~ ^[0-9]+$ ]] || (( r_port < 1 || r_port > 65535 )); then
-            echo -e "  ${YELLOW}!${NC} Порт Relay не задан в state.json (или некорректен: '${r_port:-empty}')"
-            warnings=$((warnings + 1))
-        elif is_traffic_limit_exceeded; then
-            echo -e "  ${YELLOW}!${NC} Порт $r_port не проверялся (Xray остановлен по лимиту трафика)"
-            warnings=$((warnings + 1))
-        elif ss -tln 2>/dev/null | grep -qE "[:\s]${r_port}\b" || python3 -c "import sys, socket; p = int(sys.argv[1]); s = socket.create_connection(('127.0.0.1', p), timeout=2); s.close()" "$r_port" 2>/dev/null; then
-            echo -e "  ${GREEN}✔${NC} Порт $r_port прослушивается Xray Relay"
-        else
-            echo -e "  ${YELLOW}!${NC} Порт $r_port не найден в ss (выполните: just1knode heal)"
-            warnings=$((warnings + 1))
-        fi
-    fi
-
-    if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then
-        log "3. Проверка конфигурации Xray..."
-        if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
-            echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
-        else
-            echo -e "  ${RED}✗${NC} Ошибка конфигурации Xray"
-            failed=$((failed + 1))
-        fi
-    elif [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         log "3. Проверка конфигурации Xray..."
         if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
@@ -783,7 +607,7 @@ run_doctor() {
         fi
     fi
 
-    if [[ "$role" == "origin" || "$role" == "vless" || "$role" == "node" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$cur_has_v" == "1" ]] && (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
+    if (command -v nginx >/dev/null 2>&1 && (systemctl is-active --quiet nginx 2>/dev/null || [[ -f /etc/nginx/nginx.conf ]])); then
         log "4. Проверка синтаксиса Nginx..."
         if nginx -t 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Nginx корректна"
@@ -793,10 +617,10 @@ run_doctor() {
         fi
     fi
 
-    log "5. Проверка SSL сертификатов Let's Encrypt..."
+    log "5. Проверка SSL сертификатов..."
     local check_domains=()
-    local d_cand d_cand_lower already existing key domain
-    for key in "domain" "vless_domain" "sni"; do
+    local d_cand d_cand_lower already existing key d_item
+    for key in "domain" "sni"; do
         d_cand="$(get_state_val "$key" "")"
         d_cand_lower="${d_cand,,}"
         if [[ -n "$d_cand" && "$d_cand" != "-" && "$d_cand_lower" != "none" && "$d_cand_lower" != "null" ]]; then
@@ -814,35 +638,35 @@ run_doctor() {
     done
 
     if [[ ${#check_domains[@]} -eq 0 ]]; then
-        echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (нормально для Relay)"
+        echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (ожидается настройка роли или bootstrap SAN-сертификат)"
     else
-        for domain in "${check_domains[@]}"; do
-            if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
-                local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+        for d_item in "${check_domains[@]}"; do
+            if [[ -f "/etc/letsencrypt/live/${d_item}/fullchain.pem" ]]; then
+                local cert_file="/etc/letsencrypt/live/${d_item}/fullchain.pem"
                 local exp_date
                 exp_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || echo "НЕИЗВЕСТНО")"
 
                 # Проверка истечения срока действия (F21)
                 if ! openssl x509 -checkend 0 -noout -in "$cert_file" 2>/dev/null; then
-                    echo -e "  ${RED}✗${NC} SSL сертификат для $domain истек ($exp_date)!"
+                    echo -e "  ${RED}✗${NC} SSL сертификат для $d_item истек ($exp_date)!"
                     failed=$((failed + 1))
                 elif ! openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
-                    echo -e "  ${YELLOW}!${NC} SSL сертификат для $domain истекает менее чем через 30 дней: $exp_date"
+                    echo -e "  ${YELLOW}!${NC} SSL сертификат для $d_item истекает менее чем через 30 дней: $exp_date"
                 else
-                    echo -e "  ${GREEN}✔${NC} SSL сертификат для $domain валиден до: $exp_date"
+                    echo -e "  ${GREEN}✔${NC} SSL сертификат для $d_item валиден до: $exp_date"
                 fi
 
                 # Проверка соответствия домена SAN / CN (F21)
                 local cert_text
                 cert_text="$(openssl x509 -noout -text -in "$cert_file" 2>/dev/null || true)"
-                if echo "$cert_text" | grep -qE "DNS:${domain}\b|CN\s*=\s*${domain}\b"; then
-                    echo -e "  ${GREEN}✔${NC} Домен $domain подтвержден в сертификате (SAN/CN)"
+                if echo "$cert_text" | grep -qE "DNS:${d_item}\b|DNS:\*\.${d_item#*.}\b|CN\s*=\s*${d_item}\b"; then
+                    echo -e "  ${GREEN}✔${NC} Домен $d_item подтвержден в сертификате (SAN/CN)"
                 else
-                    echo -e "  ${RED}✗${NC} Домен $domain не найден в SAN/CN сертификата!"
+                    echo -e "  ${RED}✗${NC} Домен $d_item не найден в SAN/CN сертификата!"
                     failed=$((failed + 1))
                 fi
             else
-                echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $domain не найден (нормально для Relay)"
+                echo -e "  ${YELLOW}i${NC} SSL сертификат для домена $d_item не найден в /etc/letsencrypt/live"
             fi
         done
     fi
@@ -865,7 +689,7 @@ run_doctor() {
         ss_tcp_listen="$(ss -tlnp 2>/dev/null || true)"
         ss_udp_listen="$(ss -ulnp 2>/dev/null || true)"
 
-        if [[ "$role" == "origin" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$role" == "unconfigured" ]]; then
             local bot_ip
             bot_ip="$(get_state_val "bot_ip")"
             if echo "$ufw_out" | grep -E "8444(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
@@ -880,53 +704,19 @@ run_doctor() {
                 echo -e "  ${YELLOW}!${NC} BOT_IP не настроен в state.json"
                 warnings=$((warnings + 1))
             fi
-            if [[ "$role" == "eu_hub" ]]; then
+            if [[ "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
                 if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт 443 Зарубежного ХАБа открыт для всего мира (0.0.0.0/0)!"
+                    echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт 443 (${role}) открыт для всего мира (0.0.0.0/0)!"
                     failed=$((failed + 1))
                 else
-                    echo -e "  ${GREEN}✔${NC} Порт 443 Зарубежного ХАБа закрыт от внешнего мира (только RU ХАБы)"
+                    echo -e "  ${GREEN}✔${NC} Порт 443 (${role}) закрыт от внешнего мира (Zero-Trust whitelist)"
                 fi
-            elif [[ "$role" == "exit_node" ]] || ([[ "$role" == "ru_hub" ]] && (is_module_enabled "vless_tls" 2>/dev/null || is_module_enabled "vless_xhttp" 2>/dev/null)); then
+            elif [[ "$role" == "ru_hub" ]] && (is_module_enabled "vless_tls" 2>/dev/null || is_module_enabled "vless_xhttp" 2>/dev/null); then
                 if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                     echo -e "  ${GREEN}✔${NC} Порт 443 открыт для клиентских подключений"
                 else
                     echo -e "  ${YELLOW}!${NC} Порт 443 не найден среди разрешенных в UFW"
                     warnings=$((warnings + 1))
-                fi
-            fi
-        elif [[ "$role" == "node" || "$role" == "vless" || "$role" == "relay" ]]; then
-            local cur_has_v cur_has_r
-            cur_has_v="$(get_state_val "has_vless" "0")"
-            cur_has_r="$(get_state_val "has_relay" "0")"
-            local bot_ip
-            bot_ip="$(get_state_val "bot_ip")"
-
-            if [[ "$cur_has_v" == "1" || "$role" == "vless" ]]; then
-                if echo "$ufw_out" | grep -E "443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    echo -e "  ${GREEN}✔${NC} Порт VLESS 443 открыт для клиентских подключений"
-                else
-                    echo -e "  ${YELLOW}!${NC} Порт VLESS 443 не найден среди разрешенных в UFW"
-                    warnings=$((warnings + 1))
-                fi
-                if [[ -n "$bot_ip" ]] && echo "$ufw_out" | grep -F "$bot_ip" | grep -q "8444"; then
-                    echo -e "  ${GREEN}✔${NC} Порт 8444 защищен и доступен только с BOT_IP ($bot_ip)"
-                elif [[ -n "$bot_ip" ]]; then
-                    echo -e "  ${YELLOW}!${NC} Правило для BOT_IP ($bot_ip) на порт 8444 не найдено в UFW"
-                    failed=$((failed + 1))
-                fi
-            fi
-
-            if [[ "$cur_has_r" == "1" || "$role" == "relay" ]]; then
-                local relay_port origin_ip
-                relay_port="$(get_state_val "relay_port" "10443")"
-                origin_ip="$(get_state_val "origin_ip")"
-
-                if echo "$ufw_out" | grep -E "${relay_port}(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    echo -e "  ${RED}✗${NC} УЯЗВИМОСТЬ: Порт релея $relay_port открыт для всех (0.0.0.0/0)!"
-                    failed=$((failed + 1))
-                elif [[ -n "$origin_ip" ]] && echo "$ufw_out" | grep -F "$origin_ip" | grep -q "$relay_port"; then
-                    echo -e "  ${GREEN}✔${NC} Порт $relay_port защищен и доступен только с ORIGIN_IP ($origin_ip)"
                 fi
             fi
         fi
@@ -1038,11 +828,11 @@ run_doctor() {
                                 break
                             fi
                         done
-                        # 2. Легитимные веб-порты 80 и 443
-                        if [[ ("$r_port" == "80" || "$r_port" == "443") && ("$proto" == "tcp" || "$proto" == "any") ]]; then
-                            if [[ "$role" == "origin" || "$role" == "relay" || "$role" == "node" || "$role" == "ru_hub" || "$role" == "exit_node" ]] || command -v nginx >/dev/null 2>&1; then
-                                is_authorized=1
-                            fi
+                        # 2. Легитимные веб-порты 80 и 443 (только для публичной роли RU ХАБ)
+                        if [[ "$r_port" == "443" && ("$proto" == "tcp" || "$proto" == "any") && "$role" == "ru_hub" ]]; then
+                            is_authorized=1
+                        elif [[ "$r_port" == "80" && ("$proto" == "tcp" || "$proto" == "any") && "$role" == "ru_hub" && "${USE_WILDCARD_CERT:-1}" == "0" ]]; then
+                            is_authorized=1
                         fi
 
                         if [[ $is_authorized -eq 0 ]]; then
@@ -1072,63 +862,7 @@ run_doctor() {
         warnings=$((warnings + 1))
     fi
 
-    if [[ "$role" == "origin" && -f "$RELAYS_FILE" ]]; then
-        log "7. Проверка доступности подключенных Relay-узлов..."
-        auto_heal_relays_registry
-        local relay_probe_res
-        relay_probe_res=$(python3 -c "
-import json, socket, sys, os, time
-rf = sys.argv[1]
-if os.path.exists(rf):
-    try:
-        with open(rf, 'r', encoding='utf-8') as f:
-            relays = json.load(f)
-        for r in relays:
-            if not isinstance(r, dict): continue
-            name = r.get('name', '-')
-            code = r.get('code', '-')
-            ip = r.get('ip', '')
-            port = int(r.get('port', 10443))
-            if not ip: continue
-            last_err = None
-            rtt_ms = None
-            for attempt in range(3):
-                t0 = time.perf_counter()
-                try:
-                    s = socket.create_connection((ip, port), timeout=5.0)
-                    rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
-                    s.close()
-                    last_err = None
-                    break
-                except Exception as e:
-                    last_err = e
-                    if attempt < 2:
-                        time.sleep(0.5)
-            if last_err is None and rtt_ms is not None:
-                print(f'OK\t{name}\t{code}\t{ip}\t{port}\t{rtt_ms}')
-            else:
-                print(f'FAIL\t{name}\t{code}\t{ip}\t{port}\t{last_err}')
-    except Exception as e:
-        print(f'ERROR\t{e}')
-" "$RELAYS_FILE" 2>/dev/null || true)
-        if [[ -n "$relay_probe_res" ]]; then
-            while IFS=$'\t' read -r status name code ip port val; do
-                if [[ "$status" == "OK" ]]; then
-                    echo -e "  ${GREEN}✔${NC} Relay '$name' ($code: $ip:$port) доступен (RTT: ${val}ms)"
-                elif [[ "$status" == "FAIL" ]]; then
-                    echo -e "  ${RED}✗${NC} Relay '$name' ($code: $ip:$port) НЕ ОТВЕЧАЕТ (${val:-timeout})!"
-                    failed=$((failed + 1))
-                elif [[ "$status" == "ERROR" ]]; then
-                    echo -e "  ${RED}✗${NC} Ошибка проверки реестра релеев: $name"
-                    failed=$((failed + 1))
-                fi
-            done <<< "$relay_probe_res"
-        else
-            echo -e "  ${YELLOW}i${NC} Нет зарегистрированных Relay-узлов для проверки"
-        fi
-    fi
-
-    if [[ "$role" == "origin" ]] || ([[ "$role" == "ru_hub" ]] && is_module_enabled "vless_xhttp" 2>/dev/null && [[ -n "$(get_state_val "bot_domain" "")" && "$(get_state_val "bot_domain" "")" != "-" ]]); then
+    if [[ "$role" == "ru_hub" ]] && is_module_enabled "vless_xhttp" 2>/dev/null && [[ -n "$(get_state_val "bot_domain" "")" && "$(get_state_val "bot_domain" "")" != "-" ]]; then
         local sub_prefix
         sub_prefix="$(get_state_val "sub_path_prefix" 2>/dev/null || true)"
         if [[ -z "$sub_prefix" ]]; then
@@ -1229,21 +963,39 @@ if os.path.exists(rf):
     fi
 
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" ]]; then
-        log "7. Проверка доступности подключенных пиров (${role})..."
+        log "7. Проверка доступности подключенных пиров и связей (${role})..."
         local peer_probe_res
-        peer_probe_res=$(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
-import json, socket, sys, time
+        peer_probe_res=$(python3 - "${LINKS_FILE:-/etc/just1knode/links.json}" "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
+import json, os, socket, sys, time
+links_path, state_path = sys.argv[1], sys.argv[2]
+targets = []
+if os.path.exists(links_path):
+    try:
+        links = json.load(open(links_path, encoding="utf-8"))
+        for bucket in ("standard_bridges", "bi_bridges", "exits"):
+            for item in (links.get(bucket) or []):
+                if isinstance(item, dict) and item.get("ip"):
+                    targets.append((
+                        item.get("name") or item.get("code") or bucket,
+                        item.get("code") or bucket,
+                        item["ip"],
+                        int(item.get("port") or 443),
+                    ))
+    except Exception:
+        pass
 try:
-    peers = json.load(open(sys.argv[1], encoding="utf-8")).get("peers", [])
+    peers = json.load(open(state_path, encoding="utf-8")).get("peers", [])
 except Exception:
     peers = []
+seen = {(t[2], t[3]) for t in targets}
 for p in (peers if isinstance(peers, list) else []):
-    if not isinstance(p, dict): continue
+    if not isinstance(p, dict) or not p.get("ip"): continue
+    key = (p["ip"], int(p.get("port", 443)))
+    if key in seen: continue
+    seen.add(key)
     code = p.get("code", "-")
-    name = p.get("name", code)
-    ip = p.get("ip", "")
-    port = int(p.get("port", 443))
-    if not ip: continue
+    targets.append((p.get("name", code), code, p["ip"], int(p.get("port", 443))))
+for name, code, ip, port in targets:
     t0 = time.perf_counter()
     try:
         s = socket.create_connection((ip, port), timeout=5.0)
@@ -1264,11 +1016,11 @@ PYEOF
                 fi
             done <<< "$peer_probe_res"
         else
-            echo -e "  ${YELLOW}i${NC} Пиры для роли $role не настроены"
+            echo -e "  ${YELLOW}i${NC} Связи (мосты / ноды) для роли $role не настроены"
         fi
     fi
 
-    if [[ "$role" == "relay" || "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
+    if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
         log "10. Проверка правил сетевой защиты Anti-Abuse..."
         if check_antiabuse_rules; then
             echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
@@ -1390,12 +1142,15 @@ reset_node() {
         fi
     fi
 
-    systemctl stop xray xray-api 2>/dev/null || true
-    systemctl disable xray xray-api 2>/dev/null || true
+    systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
+    systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
     cleanup_legacy_traffic_watchdog_residue
     remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
+    if [[ -f /etc/nginx/nginx.conf ]]; then
+        sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' /etc/nginx/nginx.conf 2>/dev/null || true
+    fi
     if [[ -d /etc/letsencrypt/renewal ]]; then
         for rconf in /etc/letsencrypt/renewal/*.conf; do
             [[ -f "$rconf" ]] || continue
@@ -1562,11 +1317,14 @@ uninstall_node() {
     info "1/11. Остановка и отключение системных служб systemd..."
     cleanup_legacy_traffic_watchdog_residue
     remove_traffic_limit_timer
-    systemctl stop xray xray-api 2>/dev/null || true
-    systemctl disable xray xray-api 2>/dev/null || true
-    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
+    systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
+    systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.service" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl reset-failed xray xray-api just1knode-traffic.service just1knode-traffic.timer just1knode-traffic-limit.service just1knode-traffic-limit.timer 2>/dev/null || true
+    systemctl reset-failed just1knode-apply.path just1knode-apply.service xray xray-api just1knode-traffic.service just1knode-traffic.timer just1knode-traffic-limit.service just1knode-traffic-limit.timer 2>/dev/null || true
 
     info "2/11. Завершение активных процессов ядра и API..."
     local xray_proc_name
@@ -1604,6 +1362,10 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/conf.d/just1k-stream443.conf" "${nginx_conf_dir}/streams-enabled/just1k-stream443.conf" 2>/dev/null || true
+    if [[ -f "${nginx_conf_dir}/nginx.conf" ]]; then
+        sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' "${nginx_conf_dir}/nginx.conf" 2>/dev/null || true
+    fi
     rm -rf "${nginx_conf_dir}/fallback_ssl" 2>/dev/null || true
     rm -rf "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" 2>/dev/null || true
     remove_antiabuse_protection 2>/dev/null || true
@@ -1854,97 +1616,6 @@ uninstall_node() {
     exit 0
 }
 
-# Legacy-меню для модульных узлов v1 (role == "node")
-legacy_node_main_panel() {
-    local cur_has_r cur_has_v
-    cur_has_r="$(get_state_val "has_relay" "0")"
-    cur_has_v="$(get_state_val "has_vless" "0")"
-
-    echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🌐 ЗАРУБЕЖНЫЙ МОДУЛЬНЫЙ УЗЕЛ (Legacy)${NC}\n"
-    echo -e "  Службы узла:"
-    if [[ "$cur_has_v" == "1" ]]; then
-        local v_dom
-        v_dom="$(get_state_val "vless_domain" "-")"
-        echo -e "    🚀 VLESS TLS (443):  ${GREEN}● Активен${NC}  (Домен: ${CYAN}${v_dom}${NC})"
-    else
-        echo -e "    🚀 VLESS TLS (443):  ${YELLOW}○ Не установлен${NC}"
-    fi
-
-    if [[ "$cur_has_r" == "1" ]]; then
-        local r_port r_orig
-        r_port="$(get_state_val "relay_port" "10443")"
-        r_orig="$(get_state_val "origin_ip" "-")"
-        echo -e "    🛡️  Relay (Туннель):  ${GREEN}● Активен${NC}  (Порт: ${CYAN}${r_port}${NC} ➔ Origin: ${CYAN}${r_orig}${NC})"
-    else
-        echo -e "    🛡️  Relay (Туннель):  ${YELLOW}○ Не установлен${NC}"
-    fi
-    echo ""
-
-    echo -e "  ${BOLD}[1]${NC} 🚀 VLESS TLS    $([[ "$cur_has_v" == "1" ]] && echo "[Ключи / Удалить]" || echo "[Установить службу]")"
-    echo -e "  ${BOLD}[2]${NC} 🛡️  Relay        $([[ "$cur_has_r" == "1" ]] && echo "[Данные / Удалить]" || echo "[Установить службу]")"
-    echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-    echo -e "  ${BOLD}[4]${NC} 🤖 Настроить / обновить IP Telegram-бота (BOT_IP)"
-    echo -e "  ${BOLD}[5]${NC} 📊 Статус всех служб и активные клиенты"
-    echo -e "  ${BOLD}[6]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-    echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-    echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-    echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
-    echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-    echo ""
-    local choice=""
-    read -rp "Выберите действие [0-9]: " choice
-
-    case "$choice" in
-        1)
-            if [[ "$cur_has_v" == "1" ]]; then
-                echo -e "\n${BOLD}=== УПРАВЛЕНИЕ VLESS TLS ===${NC}"
-                echo "[1] Показать данные для Telegram-бота (/admin)"
-                echo "[2] 🌐 Настроить / сменить домен VLESS TLS"
-                echo "[3] Удалить VLESS TLS с этого сервера"
-                echo "[0] Назад"
-                local v_choice=""
-                read -rp "Выбор [0-3]: " v_choice
-                case "$v_choice" in
-                    1) show_vless_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                    2) setup_vless_domain || true; read -rp "Нажмите Enter для продолжения...";;
-                    3) uninstall_vless_component || true; read -rp "Нажмите Enter для продолжения...";;
-                esac
-            else
-                install_vless_direct_node || true
-                read -rp "Нажмите Enter для продолжения..."
-            fi
-            ;;
-        2)
-            if [[ "$cur_has_r" == "1" ]]; then
-                echo -e "\n${BOLD}=== УПРАВЛЕНИЕ RELAY (БЕЛЫЙ ИНТЕРНЕТ) ===${NC}"
-                echo "[1] Показать данные подключения (команда для Origin)"
-                echo "[2] Настроить персональный домен Relay"
-                echo "[3] Удалить Relay с этого сервера"
-                echo "[0] Назад"
-                local r_choice=""
-                read -rp "Выбор [0-3]: " r_choice
-                case "$r_choice" in
-                    1) show_relay_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                    2) setup_relay_domain || true; read -rp "Нажмите Enter для продолжения...";;
-                    3) uninstall_relay_component || true; read -rp "Нажмите Enter для продолжения...";;
-                esac
-            else
-                install_xray_relay_node || true
-                read -rp "Нажмите Enter для продолжения..."
-            fi
-            ;;
-        3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
-        4) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-        5) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-        6) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-        7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-        8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-        9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
-        0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
-        *) warn "Неверный выбор."; sleep 1;;
-    esac
-}
-
 # =============================================================================
 # ДИНАМИЧЕСКОЕ КОНТЕКСТНОЕ МЕНЮ (UNIFIED HUB v2)
 # =============================================================================
@@ -1981,118 +1652,77 @@ main_menu() {
         local status
         status="$(get_node_status)"
 
-        if [[ "$status" == "origin" ]]; then
-            local domain cdn_domain bot_dom
-            domain="$(get_state_val "domain" "-")"
-            cdn_domain="$(get_state_val "cdn_domain" "-")"
-            bot_dom="$(get_state_val "bot_domain" "-")"
+        echo -e "  Роль:   $(role_display_name "$status")"
+        echo -e "  Бот:    $(get_bot_connection_label)"
+        echo -e "  SSL:    $(get_ssl_header_summary)"
+        echo -e "  Трафик: $(get_traffic_limit_summary)"
+        echo ""
 
-            echo -e "  Статус текущего сервера: ${BOLD}${GREEN}🇷🇺 ORIGIN (Legacy)${NC}"
-            echo -e "  Origin: ${CYAN}${domain}${NC}  |  CDN: ${CYAN}${cdn_domain}${NC}  |  Bot: ${CYAN}${bot_dom}${NC}\n"
-
-            echo -e "  ${BOLD}[1]${NC} 🔄 Управление Relay-узлами на Origin (Добавить / Удалить / Список)"
-            echo -e "  ${BOLD}[2]${NC} 📊 Статус узла и подключенные клиенты"
-            echo -e "  ${BOLD}[3]${NC} ⏱️  Лимит сетевого трафика (Traffic Limit)"
-            echo -e "  ${BOLD}[4]${NC} 🩺 Комплексная самодиагностика (Doctor)"
-            echo -e "  ${BOLD}[5]${NC} 🔑 Показать данные для Telegram-бота (/admin)"
-            echo -e "  ${BOLD}[6]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP фаервола 8444)"
-            echo -e "  ${BOLD}[7]${NC} 🔄 Обновить утилиту и конфигурацию узла (Auto-Heal & Update)"
-            echo -e "  ${BOLD}[8]${NC} ⚠️ Сбросить / переустановить узел"
-            echo -e "  ${BOLD}[9]${NC} 🗑️  Полное удаление (Uninstall just1knode с сервера)"
-            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-            echo ""
-            read -rp "Выберите действие [0-9]: " choice
-
-            case "$choice" in
-                1) manage_relays_menu || true; read -rp "Нажмите Enter для продолжения...";;
-                2) show_status || true; read -rp "Нажмите Enter для продолжения...";;
-                3) manage_traffic_limit_menu || true; read -rp "Нажмите Enter для продолжения...";;
-                4) run_doctor || true; read -rp "Нажмите Enter для продолжения...";;
-                5) show_bot_credentials || true; read -rp "Нажмите Enter для продолжения...";;
-                6) set_origin_bot_ip || true; read -rp "Нажмите Enter для продолжения...";;
-                7) update_node "all" "1" || true; read -rp "Нажмите Enter для продолжения...";;
-                8) reset_node || true; read -rp "Нажмите Enter для продолжения...";;
-                9) uninstall_node || true; read -rp "Нажмите Enter для продолжения...";;
-                0) echo -e "\n${GREEN}До свидания!${NC}\n"; exit 0;;
-                *) warn "Неверный выбор."; sleep 1;;
-            esac
-
-        elif [[ "$status" == "node" ]]; then
-            legacy_node_main_panel
-
+        if [[ "$status" == "unconfigured" ]]; then
+            echo -e "  ${BOLD}[1]${NC} ⚙️  Выберите роль (РУ ХАБ / Зарубежный ХАБ / Выходная НОДА)"
         else
-            echo -e "  Роль:   $(role_display_name "$status")"
-            echo -e "  Бот:    $(get_bot_connection_label)"
-            echo -e "  SSL:    $(get_ssl_header_summary)"
-            echo -e "  Трафик: $(get_traffic_limit_summary)"
-            echo ""
-
-            if [[ "$status" == "unconfigured" ]]; then
-                echo -e "  ${BOLD}[1]${NC} ⚙️  Выберите роль (РУ ХАБ / Зарубежный ХАБ / Выходная НОДА)"
-            else
-                echo -e "  ${BOLD}[1]${NC} ⚙️  Управление ролью ($(role_display_name "$status"))"
-            fi
-            echo -e "  ${BOLD}[2]${NC} 🔑 Данные для подключения"
-            echo -e "  ${BOLD}[3]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP)"
-            echo -e "  ${BOLD}[4]${NC} ⏱️  Лимит трафика хостинга"
-            echo -e "  ${BOLD}[5]${NC} 🔄 Проверить обновления (Update & Auto-Heal)"
-            echo -e "  ${BOLD}[6]${NC} 🩺 Статус и диагностика (Doctor)"
-            echo -e "  ${BOLD}[7]${NC} 🗑️  Полное удаление без остатков (Uninstall)"
-            echo -e "  ${BOLD}[R]${NC} ⚠️  Сбросить настройки узла (Reset)"
-            echo -e "  ${BOLD}[0]${NC} ❌ Выход"
-            echo ""
-            local choice=""
-            read -rp "Выберите действие: " choice || true
-
-            case "$choice" in
-                1)
-                    case "$status" in
-                        ru_hub) ru_hub_menu || true ;;
-                        eu_hub) eu_hub_menu || true ;;
-                        exit_node) exit_node_menu || true ;;
-                        *) select_role_wizard || true; read -rp "Нажмите Enter для продолжения..." || true ;;
-                    esac
-                    ;;
-                2)
-                    show_v2_connection_card || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                3)
-                    set_origin_bot_ip || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                4)
-                    manage_traffic_limit_menu || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                5)
-                    update_node "all" "1" || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                6)
-                    show_status || true
-                    echo ""
-                    run_doctor || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                7)
-                    uninstall_node || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                r|R)
-                    reset_node || true
-                    read -rp "Нажмите Enter для продолжения..." || true
-                    ;;
-                0)
-                    echo -e "\n${GREEN}До свидания!${NC}\n"
-                    exit 0
-                    ;;
-                *)
-                    warn "Неверный выбор."
-                    sleep 1
-                    ;;
-            esac
+            echo -e "  ${BOLD}[1]${NC} ⚙️  Управление ролью ($(role_display_name "$status"))"
         fi
+        echo -e "  ${BOLD}[2]${NC} 🔑 Данные для подключения"
+        echo -e "  ${BOLD}[3]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP)"
+        echo -e "  ${BOLD}[4]${NC} ⏱️  Лимит трафика хостинга"
+        echo -e "  ${BOLD}[5]${NC} 🔄 Проверить обновления (Update & Auto-Heal)"
+        echo -e "  ${BOLD}[6]${NC} 🩺 Статус и диагностика (Doctor)"
+        echo -e "  ${BOLD}[7]${NC} 🗑️  Полное удаление без остатков (Uninstall)"
+        echo -e "  ${BOLD}[R]${NC} ⚠️  Сбросить настройки узла (Reset)"
+        echo -e "  ${BOLD}[0]${NC} ❌ Выход"
+        echo ""
+        local choice=""
+        read -rp "Выберите действие: " choice || true
+
+        case "$choice" in
+            1)
+                case "$status" in
+                    ru_hub) ru_hub_menu || true ;;
+                    eu_hub) eu_hub_menu || true ;;
+                    exit_node) exit_node_menu || true ;;
+                    *) select_role_wizard || true; read -rp "Нажмите Enter для продолжения..." || true ;;
+                esac
+                ;;
+            2)
+                show_v2_connection_card || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            3)
+                set_origin_bot_ip || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            4)
+                manage_traffic_limit_menu || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            5)
+                update_node "all" "1" || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            6)
+                show_status || true
+                echo ""
+                run_doctor || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            7)
+                uninstall_node || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            r|R)
+                reset_node || true
+                read -rp "Нажмите Enter для продолжения..." || true
+                ;;
+            0)
+                echo -e "\n${GREEN}До свидания!${NC}\n"
+                exit 0
+                ;;
+            *)
+                warn "Неверный выбор."
+                sleep 1
+                ;;
+        esac
     done
 }
 
@@ -2103,25 +1733,9 @@ heal_node_config() {
     role="$(get_state_val "role")"
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         heal_v2_role_config
-    elif [[ "$role" == "origin" ]]; then
-        heal_and_update_origin_config
-    elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
-        heal_and_update_relay_config
-        apply_antiabuse_protection
-    elif [[ "$role" == "node" ]]; then
-        local has_v has_r
-        has_v="$(get_state_val "has_vless" "0")"
-        has_r="$(get_state_val "has_relay" "0")"
-        if [[ "$has_v" == "1" || "$has_r" == "1" ]]; then
-            heal_and_update_relay_config
-        fi
-        if [[ "$has_v" == "1" || "$has_r" == "1" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
-            apply_antiabuse_protection
-        fi
-        heal_node_firewall_and_stealth
-        log "Конфигурация модульного узла актуализирована."
     else
-        error "Узел не настроен."
+        error "Узел не настроен. Запустите 'just1knode role select' для выбора роли."
+        return 1
     fi
 }
 
@@ -2167,80 +1781,50 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             yandex-cdn)
                 case "${2:-install}" in
-                    install|setup) cdn_provider_install "cdn_yandex" "${3:-}" ;;
-                    uninstall|remove|del) cdn_provider_uninstall "cdn_yandex" ;;
+                    install|setup) cdn_module_install "cdn_yandex" ;;
+                    uninstall|remove|del) cdn_module_uninstall "cdn_yandex" ;;
                     *) error "Использование: just1knode yandex-cdn [install|uninstall]" ;;
                 esac
                 ;;
             turboflare)
                 case "${2:-install}" in
-                    install|setup) cdn_provider_install "cdn_turboflare" "${3:-}" ;;
-                    uninstall|remove|del) cdn_provider_uninstall "cdn_turboflare" ;;
+                    install|setup) cdn_module_install "cdn_turboflare" ;;
+                    uninstall|remove|del) cdn_module_uninstall "cdn_turboflare" ;;
                     *) error "Использование: just1knode turboflare [install|uninstall]" ;;
                 esac
+                ;;
+            module)
+                _m_id="${2:-}"
+                _m_act="${3:-install}"
+                if [[ -z "$_m_id" ]]; then
+                    error "Использование: just1knode module <id> [install|uninstall]"
+                    exit 1
+                fi
+                if [[ "$_m_id" == cdn_* ]]; then
+                    case "$_m_act" in
+                        install|setup) cdn_module_install "$_m_id" ;;
+                        uninstall|remove|del) cdn_module_uninstall "$_m_id" ;;
+                        *) error "Использование: just1knode module $_m_id [install|uninstall]" ;;
+                    esac
+                else
+                    case "$_m_act" in
+                        install|setup)
+                            declare -F "${_m_id}_install" >/dev/null 2>&1 && "${_m_id}_install" || { error "Модуль '$_m_id' не поддерживает установку."; exit 1; }
+                            ;;
+                        uninstall|remove|del)
+                            declare -F "${_m_id}_uninstall" >/dev/null 2>&1 && "${_m_id}_uninstall" || { error "Модуль '$_m_id' не поддерживает удаление."; exit 1; }
+                            ;;
+                        *) error "Использование: just1knode module $_m_id [install|uninstall]" ;;
+                    esac
+                fi
+                unset _m_id _m_act
                 ;;
             creds|credentials)
                 show_v2_connection_card
                 ;;
-            install)
-                case "${2:-}" in
-                    origin|xray-origin) install_xray_origin_node "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" ;;
-                    relay|xray-relay|exit|xray-exit) install_xray_relay_node "${3:-}" "${4:-}" "${5:-}" "${6:-tls}" ;;
-                    vless|tls|xray-vless) install_vless_direct_node "${3:-}" ;;
-                    *) error "Неизвестный тип установки: $2. Доступно: origin, relay, vless, tls" ;;
-                esac
-                ;;
-            install-vless|install-tls|add-vless) install_vless_direct_node "${2:-}" ;;
-            uninstall-vless|uninstall-tls|remove-vless) uninstall_vless_component "${2:-}" ;;
-            install-relay|add-relay) install_xray_relay_node "${2:-}" "${3:-}" "${4:-}" "${5:-tls}" ;;
-            uninstall-relay|remove-relay)
-                if [[ "$(get_state_val "role")" == "origin" ]]; then
-                    remove_relay_node "${2:-}"
-                else
-                    uninstall_relay_component "${2:-}"
-                fi
-                ;;
-            setup-domain|relay-domain|setup_domain)
-                setup_relay_domain "${2:-}"
-                ;;
-            vless-domain|setup-vless-domain)
-                setup_vless_domain "${2:-}"
-                ;;
-            tls|vless)
-                case "${2:-}" in
-                    install|setup) install_vless_direct_node "${3:-}" ;;
-                    domain|set-domain|change-domain) setup_vless_domain "${3:-}" ;;
-                    status) show_status ;;
-                    creds|bot) show_vless_bot_credentials ;;
-                    bot-ip|set-bot-ip) set_origin_bot_ip "${3:-}" ;;
-                    uninstall|remove|del) uninstall_vless_component "${3:-}" ;;
-                    *) install_vless_direct_node "${2:-}" ;;
-                esac
-                ;;
-            relay)
-                case "${2:-}" in
-                    install|setup) install_xray_relay_node "${3:-10443}" "${4:-}" "${5:-}" "${6:-tls}" ;;
-                    creds|info) show_relay_credentials ;;
-                    uninstall)
-                        if [[ "$(get_state_val "role")" == "origin" && -n "${3:-}" ]]; then
-                            remove_relay_node "${3:-}"
-                        else
-                            uninstall_relay_component "${3:-}"
-                        fi
-                        ;;
-                    remove|del)
-                        if [[ "$(get_state_val "role")" == "origin" ]]; then
-                            remove_relay_node "${3:-}"
-                        else
-                            error "Команда 'relay remove <код_узла>' предназначена для выполнения на сервере Origin. Для удаления компонента Relay на текущем узле используйте: just1knode relay uninstall"
-                        fi
-                        ;;
-                    add) add_relay_node "${3:-}" "${4:-}" "${5:-10443}" "${6:-}" "${7:-}" "${8:-}" "${9:-}" "${10:-}" "${11:-}" "${12:-}" ;;
-                    rename) rename_relay_node "${3:-}" "${4:-}" ;;
-                    sni|domain) update_relay_sni "${3:-}" "${4:-}" "${5:-tls}" "${6:-}" ;;
-                    list) list_relays ;;
-                    *) manage_relays_menu ;;
-                esac
+            apply-pending|apply-links)
+                check_root
+                apply_pending_node_updates
                 ;;
             backup)
                 backup_node "${2:-}"
@@ -2290,20 +1874,8 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 ;;
             reset) reset_node ;;
             uninstall|remove|purge)
-                case "${2:-}" in
-                    vless|tls) uninstall_vless_component "${3:-}" ;;
-                    relay)
-                        if [[ "$(get_state_val "role")" == "origin" && -n "${3:-}" ]]; then
-                            remove_relay_node "${3:-}"
-                        else
-                            uninstall_relay_component "${3:-}"
-                        fi
-                        ;;
-                    *)
-                        shift
-                        uninstall_node "$@"
-                        ;;
-                esac
+                shift
+                uninstall_node "$@"
                 ;;
             *) error "Неизвестная команда: $1. Запустите 'just1knode' без аргументов для входа в меню." ;;
         esac

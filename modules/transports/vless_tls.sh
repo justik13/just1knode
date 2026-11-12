@@ -3,8 +3,23 @@
 # JUST1KNODE v2 - Транспортный модуль VLESS TLS (Vision, порт 443)
 # =============================================================================
 
+vless_tls_meta() {
+    cat <<'EOF'
+{
+  "id": "vless_tls",
+  "kind": "transport",
+  "parent": "",
+  "label": "VLESS TLS",
+  "roles": ["ru_hub"],
+  "order": 10
+}
+EOF
+}
+
 vless_tls_status_label() {
-    if is_module_enabled "vless_tls"; then
+    if is_module_broken "vless_tls"; then
+        echo -e "${RED}🔴 Ошибка модуля (изолирован)${NC}"
+    elif is_module_enabled "vless_tls"; then
         echo -e "${GREEN}🟢 Установлен (порт 443)${NC}"
     else
         echo -e "${YELLOW}⚪ Не установлен${NC}"
@@ -16,8 +31,8 @@ vless_tls_install() {
     init_state_dir
     local role domain
     role="$(get_state_val "role" "unconfigured")"
-    if [[ "$role" != "ru_hub" && "$role" != "exit_node" ]]; then
-        warn "Модуль VLESS TLS доступен только для ролей 'РУ ХАБ' и 'Выходная НОДА'."
+    if [[ "$role" != "ru_hub" ]]; then
+        warn "Модуль VLESS TLS доступен только для роли 'РУ ХАБ'."
         return 1
     fi
 
@@ -45,7 +60,7 @@ vless_tls_install() {
     set_state_val "vless_port" "443"
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-        ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+        ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
     fi
 
     if ! apply_v2_hub_configuration; then
@@ -99,6 +114,6 @@ except Exception:
         fi
     fi
 
-    log "✔ Модуль VLESS TLS удален (клиенты в clients.json сохранены)."
+    log "✔ Модуль VLESS TLS удален."
     return 0
 }

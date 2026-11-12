@@ -1,0 +1,8 @@
+[Unit]
+Description=Just1kNode Apply Pending Configuration Changes
+After=network.target xray.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/just1knode apply-pending
+TimeoutStartSec=90

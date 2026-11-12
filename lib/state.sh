@@ -7,13 +7,14 @@ STATE_DIR="${STATE_DIR:-/etc/just1knode}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
 RELAYS_FILE="${RELAYS_FILE:-${STATE_DIR}/relays.json}"
+LINKS_FILE="${LINKS_FILE:-${STATE_DIR}/links.json}"
 
 init_state_dir() {
     mkdir -p "$STATE_DIR"
     chown root:xrayapi "$STATE_DIR" 2>/dev/null || true
     chmod 2770 "$STATE_DIR" 2>/dev/null || true
 
-    for f in "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE"; do
+    for f in "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE"; do
         if [[ -L "$f" ]]; then
             rm -f "$f"
         fi
@@ -28,9 +29,12 @@ init_state_dir() {
     if [[ ! -f "$RELAYS_FILE" ]]; then
         echo "[]" > "$RELAYS_FILE"
     fi
+    if [[ ! -f "$LINKS_FILE" ]]; then
+        echo "{}" > "$LINKS_FILE"
+    fi
 
-    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" 2>/dev/null || true
-    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" 2>/dev/null || true
+    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE" 2>/dev/null || true
+    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE" 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -301,7 +305,7 @@ finally:
 " "$STATE_FILE" 2>/dev/null || true
 }
 
-# Определение фактического статуса сервера
+# Определение фактического статуса сервера (только роли v2)
 get_node_status() {
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "unconfigured"
@@ -315,21 +319,7 @@ get_node_status() {
         echo "$role"
         return
     fi
-    if [[ "$role" == "origin" ]] || [[ "$(get_state_val "is_origin" "0")" == "1" ]]; then
-        echo "origin"
-        return
-    fi
-
-    local has_v has_r
-    has_v="$(get_state_val "has_vless" "0")"
-    has_r="$(get_state_val "has_relay" "0")"
-
-    # Модульный зарубежный узел (TLS / Relay)
-    if [[ "$has_v" == "1" || "$has_r" == "1" || "$role" == "node" || "$role" =~ ^(vless|relay)$ ]]; then
-        echo "node"
-    else
-        echo "unconfigured"
-    fi
+    echo "unconfigured"
 }
 
 # Транзакционный манифест
@@ -342,6 +332,7 @@ manifest_begin() {
 
     local targets=(
         "$RELAYS_FILE"
+        "$LINKS_FILE"
         "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
         "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}"
         "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/just1k-xhttp-upstreams.conf"
@@ -664,12 +655,69 @@ remove_peer_json() {
     _state_mutate_json "remove_peer" "$1"
 }
 
+get_links_json() {
+    local lf="${LINKS_FILE:-${STATE_DIR}/links.json}"
+    if [[ ! -f "$lf" ]]; then
+        echo "{}"
+        return 0
+    fi
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fp:
+        d = json.load(fp)
+    print(json.dumps(d if isinstance(d, dict) else {}, ensure_ascii=False))
+except Exception:
+    print("{}")
+' "$lf"
+}
+
+save_links_json() {
+    local payload_json="$1"
+    init_state_dir
+    local lf="${LINKS_FILE:-${STATE_DIR}/links.json}"
+    python3 -c '
+import json, os, sys, tempfile
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+os.umask(0o007)
+lf, raw = sys.argv[1], sys.argv[2]
+data = json.loads(raw)
+if not isinstance(data, dict):
+    raise ValueError("links.json root must be object")
+
+lock_file = lf + ".lock"
+open_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+lock_fd = os.open(lock_file, open_flags, 0o660)
+try:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(lf)), suffix=".tmp")
+    try:
+        import grp
+        gid = grp.getgrnam("xrayapi").gr_gid
+        os.fchown(tmp_fd, 0, gid)
+    except Exception:
+        pass
+    os.fchmod(tmp_fd, 0o660)
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2, ensure_ascii=False)
+        fp.flush()
+    os.replace(tmp_path, lf)
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+' "$lf" "$payload_json"
+}
+
 has_active_xray_config() {
-    local role cur_r cur_v
+    local role
     role="$(get_state_val "role" "unconfigured")"
-    cur_r="$(get_state_val "has_relay" "0")"
-    cur_v="$(get_state_val "has_vless" "0")"
-    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$role" == "origin" || "$role" == "relay" || "$role" == "vless" || "$cur_r" == "1" || "$cur_v" == "1" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         return 0
     fi
     return 1

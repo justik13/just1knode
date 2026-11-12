@@ -568,26 +568,11 @@ ensure_xrayapi_user() {{ return 0; }}
         res4 = self._run_shell_snippet(cmd4, extra_env={"JUST1KNODE_REF": "node-sha", "JUST1KBOT_REF": "bot-sha"})
         self.assertIn("REF: node-sha", res4.stdout)
 
-    def test_add_relay_country_code_path_traversal_sanitization(self):
-        """Adversarial input: add_relay_node with path traversal payload in country code."""
-        self._create_mock_script("nginx", "#!/bin/sh\nexit 0\n")
-        self._create_mock_script("xray", "#!/bin/sh\nexit 0\n")
-
-        # Setup base state as origin
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin"}, f)
-
-        # Attack payload: ../../../etc/cron.d/malicious
-        cmd = 'add_relay_node "Evil" "1.2.3.4" "10443" "uuid-123" "../../../etc/cron.d/hack" "tls" "" "" "evil.com"'
-        res = self._run_shell_snippet(cmd)
-        self.assertNotEqual(res.returncode, 0, "add_relay_node must reject path traversal characters in code")
-        self.assertIn("Недопустимый код страны", res.stderr + res.stdout)
-
     def test_doctor_diagnostics_fault_matrix(self):
         """Doctor tool fault injection: closed gRPC socket, failed nginx syntax, failed xray config."""
-        # Setup base state as origin
+        # Setup base state as ru_hub
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "domain": "origin.test", "bot_ip": "10.0.0.1"}, f)
+            json.dump({"role": "ru_hub", "domain": "hub.test", "bot_ip": "10.0.0.1"}, f)
 
         # Mock systemctl active
         self._create_mock_script("systemctl", "#!/bin/sh\nexit 0\n")
@@ -608,19 +593,10 @@ ensure_xrayapi_user() {{ return 0; }}
         self.assertIn("gRPC сокет Xray недоступен", res.stdout + res.stderr)
         self.assertIn("Обнаружено ошибок", res.stdout + res.stderr)
 
-    def test_install_origin_rejects_node_role_and_active_components(self):
-        """Origin installation must strictly reject nodes with role='node' or active Relay/VLESS components."""
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_relay": "1", "has_vless": "0"}, f)
-
-        res = self._run_shell_snippet("install_xray_origin_node 'origin.test'")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("Origin (Белый Интернет) требует выделенный изолированный сервер", res.stdout + res.stderr)
-
     def test_update_node_post_skips_xray_core_for_nodes_without_xray(self):
-        """Nodes without active Xray components (has_relay=0, has_vless=0) must not run update_xray_core."""
+        """Unconfigured nodes without active role must not run update_xray_core."""
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "unconfigured"}, f)
 
         # Mock xray binary to fail if invoked for core update
         self._create_mock_script("xray", "#!/bin/sh\necho 'ERROR: xray core updated unexpectedly' >&2\nexit 1\n")

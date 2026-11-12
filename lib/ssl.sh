@@ -7,9 +7,81 @@ CERTBOT_DIR="${CERTBOT_DIR:-/var/www/certbot}"
 WWW_HTML_DIR="${WWW_HTML_DIR:-/var/www/html}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx}"
 
+_create_bootstrap_cert() {
+    local domain="$1"
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local live_dir="${le_dir}/live/${domain}"
+    mkdir -p "$live_dir"
+    if openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "${live_dir}/privkey.pem" \
+        -out "${live_dir}/fullchain.pem" \
+        -subj "/CN=${domain}" \
+        -addext "subjectAltName=DNS:${domain}" >/dev/null 2>&1 || \
+       openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "${live_dir}/privkey.pem" \
+        -out "${live_dir}/fullchain.pem" \
+        -subj "/CN=${domain}" >/dev/null 2>&1; then
+        chmod 644 "${live_dir}/fullchain.pem"
+        chmod 600 "${live_dir}/privkey.pem"
+        return 0
+    fi
+    return 1
+}
+
+_resolve_existing_or_wildcard_cert() {
+    local domain="$1"
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local direct_cert="${le_dir}/live/${domain}/fullchain.pem"
+    local direct_key="${le_dir}/live/${domain}/privkey.pem"
+
+    if [[ -f "$direct_cert" && -f "$direct_key" ]] && \
+       openssl x509 -checkend 86400 -noout -in "$direct_cert" 2>/dev/null && \
+       (openssl x509 -checkhost "$domain" -noout -in "$direct_cert" 2>/dev/null || \
+        openssl x509 -subject -noout -in "$direct_cert" 2>/dev/null | grep -Fq "CN = ${domain}" || \
+        openssl x509 -subject -noout -in "$direct_cert" 2>/dev/null | grep -Fq "CN=${domain}"); then
+        log "✔ Обнаружен действующий TLS-сертификат для '${domain}'!"
+        return 0
+    fi
+
+    local cand cand_dir cand_key
+    for cand in "${le_dir}/live"/*/fullchain.pem; do
+        [[ -f "$cand" ]] || continue
+        cand_dir="$(dirname "$cand")"
+        cand_key="${cand_dir}/privkey.pem"
+        if [[ -f "$cand_key" ]] && \
+           openssl x509 -checkend 86400 -noout -in "$cand" 2>/dev/null && \
+           openssl x509 -checkhost "$domain" -noout -in "$cand" 2>/dev/null; then
+            mkdir -p "${le_dir}/live/${domain}"
+            cp -f "$cand" "${le_dir}/live/${domain}/fullchain.pem"
+            cp -f "$cand_key" "${le_dir}/live/${domain}/privkey.pem"
+            chmod 644 "${le_dir}/live/${domain}/fullchain.pem"
+            chmod 600 "${le_dir}/live/${domain}/privkey.pem"
+            log "✔ Обнаружен действующий Wildcard-сертификат в $(basename "$cand_dir"), покрывающий '${domain}'!"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 obtain_ssl_certificate() {
     local domain="$1"
     local email="$2"
+
+    if _resolve_existing_or_wildcard_cert "$domain"; then
+        return 0
+    fi
+
+    local use_wildcard="${USE_WILDCARD_CERT:-1}"
+    if [[ "$use_wildcard" == "1" ]]; then
+        log "🔒 Режим Zero-Signature: порт 80 не открывается, выпуск certbot пропущен."
+        log "Генерация стартового bootstrap-сертификата для '${domain}' (ожидание боевого Wildcard от бота)..."
+        if _create_bootstrap_cert "$domain"; then
+            log "✔ Стартовый bootstrap-сертификат создан для '${domain}'."
+            return 0
+        fi
+        error "Не удалось создать bootstrap-сертификат для ${domain}."
+    fi
 
     log "Получение SSL-сертификата Let's Encrypt для ${domain}..."
     mkdir -p "${CERTBOT_DIR}"
@@ -82,7 +154,11 @@ sync_xray_tls_cert_files() {
         install -m 640 "$src" "${xray_tls_dir}/${t}" 2>/dev/null || cp -f "$src" "${xray_tls_dir}/${t}"
         if getent group xrayapi >/dev/null 2>&1; then
             chown root:xrayapi "${xray_tls_dir}/${t}" 2>/dev/null || true
-            chmod 644 "${xray_tls_dir}/${t}" 2>/dev/null || chmod 640 "${xray_tls_dir}/${t}" 2>/dev/null || true
+            if [[ "$t" == *fullchain.pem ]]; then
+                chmod 644 "${xray_tls_dir}/${t}" 2>/dev/null || true
+            else
+                chmod 640 "${xray_tls_dir}/${t}" 2>/dev/null || true
+            fi
         else
             chown root:nogroup "${xray_tls_dir}/${t}" 2>/dev/null || true
         fi
@@ -98,7 +174,7 @@ get_ssl_cert_expiry() {
     fi
 }
 
-# Автоматическое определение существующего или выпуск нового SSL Let's Encrypt без ручного ввода путей
+# Автоматическое определение существующего/Wildcard сертификата или Zero-Signature Bootstrap TLS
 ensure_domain_ssl_auto() {
     local domain="$1"
     local prefix="${2:-}"
@@ -109,13 +185,25 @@ ensure_domain_ssl_auto() {
 
     deploy_certbot_renewal_hook
 
-    if [[ -f "$cert_file" && -f "$key_file" ]]; then
-        if openssl x509 -checkend 86400 -noout -in "$cert_file" 2>/dev/null; then
-            log "✔ Обнаружен действующий SSL-сертификат Let's Encrypt для ${domain}."
+    if _resolve_existing_or_wildcard_cert "$domain"; then
+        sync_xray_tls_cert_files "$domain" "$prefix" || return 1
+        return 0
+    fi
+
+    local use_wildcard="${USE_WILDCARD_CERT:-1}"
+    if [[ "$use_wildcard" == "1" ]]; then
+        log "🔒 Режим Zero-Signature: порт 80 не открывается (bootstrap до доставки Wildcard через бота)."
+        if _create_bootstrap_cert "$domain"; then
             sync_xray_tls_cert_files "$domain" "$prefix" || return 1
+            log "✔ Стартовый bootstrap-сертификат подключен для '${domain}'."
             return 0
         fi
-        warn "SSL-сертификат для ${domain} истекает или истек. Выполняется перевыпуск..."
+        warn "Не удалось создать bootstrap-сертификат для '${domain}'."
+        return 1
+    fi
+
+    if [[ -f "$cert_file" && -f "$key_file" ]]; then
+        warn "SSL-сертификат для ${domain} истекает или не подходит. Выполняется перевыпуск ACME..."
     fi
 
     if ! command -v certbot >/dev/null 2>&1; then

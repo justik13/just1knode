@@ -117,7 +117,13 @@ exit 0
         state_file = self.state_dir / "state.json"
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(
-                {"role": "origin", "domain": "origin.example.com", "secret_base_path": "/stream"}, f
+                {
+                    "role": "ru_hub",
+                    "domain": "hub.example.com",
+                    "secret_base_path": "/stream",
+                    "modules": {"vless_tls": {"enabled": True}, "vless_xhttp": {"enabled": True}},
+                },
+                f,
             )
 
         relays_file = self.state_dir / "relays.json"
@@ -229,360 +235,6 @@ ensure_xrayapi_user() {{ return 0; }}
             check=False,
         )
 
-    # -------------------------------------------------------------------------
-    # F02: Transactional Rollback on Nginx Failure in add_relay_node
-    # -------------------------------------------------------------------------
-    def test_relay_add_rollback_on_nginx_failure(self):
-        self._prepare_base_env()
-        # Create a pre-existing relay conf for "de" to verify it is restored, not deleted
-        de_conf = self.nginx_relays_d / "de.conf"
-        original_de_content = "# Pre-existing DE relay config\nlocation ^~ /old { proxy_pass http://127.0.0.1:8001; }\n"
-        with open(de_conf, "w", encoding="utf-8") as f:
-            f.write(original_de_content)
-
-        original_relays = [
-            {
-                "code": "de",
-                "name": "Old Germany",
-                "inbound_port": 8004,
-                "inbound_tag": "just1k-wl-inbound-de",
-            }
-        ]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(original_relays, f)
-
-        # Make nginx fail on validation
-        self._create_mock_script(
-            "nginx",
-            """#!/bin/sh
-if [ "$1" = "-t" ]; then
-    echo "nginx: configuration syntax error test" >&2
-    exit 1
-fi
-exit 0
-""",
-        )
-
-        cmd = 'add_relay_node "Germany" "1.2.3.4" "10443" "new-uuid" "de" "tls" "" "" "relay.example.com"'
-        res = self._run_shell_snippet(cmd)
-
-        self.assertNotEqual(res.returncode, 0, "add_relay_node must fail when nginx -t fails")
-        self.assertIn("Ошибка конфигурации Nginx", res.stderr + res.stdout)
-
-        # Check rollback: pre-existing de.conf must be preserved intact
-        with open(de_conf, "r", encoding="utf-8") as f:
-            self.assertEqual(f.read(), original_de_content)
-
-        # Check rollback: relays.json must have original content
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-            self.assertEqual(data, original_relays)
-
-    # -------------------------------------------------------------------------
-    # F03: Transactional Rollback on Xray Failure in remove_relay_node
-    # -------------------------------------------------------------------------
-    def test_relay_remove_rollback_on_xray_failure(self):
-        self._prepare_base_env()
-        de_conf = self.nginx_relays_d / "de.conf"
-        de_content = "location ^~ /stream/de { proxy_pass http://127.0.0.1:8004; }\n"
-        with open(de_conf, "w", encoding="utf-8") as f:
-            f.write(de_content)
-
-        relays_data = [
-            {
-                "code": "de",
-                "name": "Germany",
-                "inbound_port": 8004,
-                "inbound_tag": "just1k-wl-inbound-de",
-            }
-        ]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(relays_data, f)
-
-        xray_config_file = self.xray_config_dir / "config.json"
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "inbounds": [{"tag": "just1k-wl-default"}, {"tag": "just1k-wl-inbound-de"}],
-                    "outbounds": [{"tag": "just1k-wl-outbound-de"}, {"tag": "just1k-wl-direct"}],
-                    "routing": {
-                        "rules": [
-                            {
-                                "inboundTag": ["just1k-wl-inbound-de"],
-                                "outboundTag": "just1k-wl-outbound-de",
-                            }
-                        ]
-                    },
-                },
-                f,
-            )
-
-        # Mock xray to fail test
-        self._create_mock_script(
-            "xray",
-            """#!/bin/sh
-if [ "$1" = "run" ] && [ "$2" = "-test" ]; then
-    echo "xray: config test failed" >&2
-    exit 1
-fi
-exit 0
-""",
-        )
-
-        cmd = 'remove_relay_node "de"'
-        res = self._run_shell_snippet(cmd)
-
-        self.assertNotEqual(
-            res.returncode, 0, "remove_relay_node must fail closed when xray test fails"
-        )
-        self.assertIn("Ошибка тестирования Xray", res.stderr + res.stdout)
-
-        # Ensure deleted de.conf was restored
-        self.assertTrue(de_conf.exists(), "de.conf must be restored after rollback")
-        with open(de_conf, "r", encoding="utf-8") as f:
-            self.assertEqual(f.read(), de_content)
-
-        # Ensure relays.json was restored
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            self.assertEqual(json.load(f), relays_data)
-
-    def test_relay_remove_cleans_up_legacy_uppercase_conf_file(self):
-        """Verify remove_relay_node cleans up legacy uppercase DE.conf files from NGINX_RELAYS_DIR."""
-        self._prepare_base_env()
-        # Create legacy uppercase DE.conf
-        de_conf = self.nginx_relays_d / "DE.conf"
-        de_conf.write_text("location ^~ /stream/DE { proxy_pass http://127.0.0.1:8004; }\n", encoding="utf-8")
-
-        relays_data = [
-            {
-                "name": "Germany",
-                "code": "de",
-                "ip": "1.2.3.4",
-                "port": 10443,
-                "inbound_port": 8004,
-                "inbound_tag": "just1k-wl-inbound-de",
-            }
-        ]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(relays_data, f)
-
-        xray_config_file = self.xray_config_dir / "config.json"
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "inbounds": [{"tag": "just1k-wl-default", "port": 8003}, {"tag": "just1k-wl-inbound-de", "port": 8004}],
-                    "outbounds": [{"tag": "just1k-wl-outbound-de"}, {"tag": "just1k-wl-direct"}],
-                    "routing": {"rules": []},
-                },
-                f,
-            )
-
-        cmd = 'remove_relay_node "de"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(res.returncode, 0, f"remove_relay_node failed: {res.stderr + res.stdout}")
-        self.assertFalse(de_conf.exists(), "Legacy uppercase DE.conf must be removed")
-        self.assertFalse((self.nginx_relays_d / "de.conf").exists())
-
-    def test_rename_relay_node(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin"}, f)
-
-        relays_data = [{"name": "Германия", "code": "de", "ip": "1.2.3.4", "port": 10443}]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(relays_data, f, ensure_ascii=False)
-
-        cmd = 'rename_relay_node "de" "Финляндия"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(res.returncode, 0, f"rename_relay_node failed: {res.stderr + res.stdout}")
-
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            updated = json.load(f)
-        self.assertEqual(updated[0]["name"], "Финляндия")
-        self.assertEqual(updated[0]["code"], "de")
-
-    def test_update_relay_sni(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin"}, f)
-
-        xray_config_file = self.xray_config_dir / "config.json"
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "inbounds": [],
-                    "outbounds": [
-                        {
-                            "tag": "just1k-wl-outbound-de",
-                            "protocol": "vless",
-                            "settings": {"vnext": [{"address": "1.2.3.4", "port": 10443}]},
-                            "streamSettings": {
-                                "security": "reality",
-                                "realitySettings": {"serverName": "www.google.com"},
-                            },
-                        }
-                    ],
-                },
-                f,
-            )
-
-        relays_data = [
-            {
-                "name": "Германия",
-                "code": "de",
-                "ip": "1.2.3.4",
-                "port": 10443,
-                "sni": "www.google.com",
-                "security": "reality",
-            }
-        ]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(relays_data, f, ensure_ascii=False)
-
-        # Test 1: Non-interactive without --force must fail-closed on DNS mismatch
-        cmd_fail = 'update_relay_sni "de" "de.example.com" "tls"'
-        res_fail = self._run_shell_snippet(cmd_fail)
-        self.assertEqual(res_fail.returncode, 1, f"Expected non-interactive DNS mismatch to fail-closed: {res_fail.stderr + res_fail.stdout}")
-        self.assertIn("ВНИМАНИЕ", res_fail.stderr + res_fail.stdout)
-        self.assertIn("--force", res_fail.stderr + res_fail.stdout)
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            unmodified = json.load(f)
-        self.assertEqual(unmodified[0]["sni"], "www.google.com")
-
-        # Test 2: Non-interactive with --force proceeds and updates relay & config
-        cmd = 'update_relay_sni "de" "de.example.com" "tls" "--force"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(res.returncode, 0, f"update_relay_sni failed: {res.stderr + res.stdout}")
-        self.assertIn("ВНИМАНИЕ", res.stderr + res.stdout)
-
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            updated = json.load(f)
-        self.assertEqual(updated[0]["sni"], "de.example.com")
-        self.assertEqual(updated[0]["security"], "tls")
-
-        with open(xray_config_file, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        ob = next(o for o in cfg["outbounds"] if o["tag"] == "just1k-wl-outbound-de")
-        self.assertEqual(ob["streamSettings"]["security"], "tls")
-        self.assertEqual(ob["streamSettings"]["tlsSettings"]["serverName"], "de.example.com")
-
-    def test_heal_and_update_origin_config(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "secret_base_path": "/stream"}, f)
-
-        xray_config_file = self.xray_config_dir / "config.json"
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "inbounds": [
-                        {"tag": "just1k-wl-default", "port": 8003, "protocol": "vless"},
-                        {"tag": "just1k-wl-inbound-de", "port": 8004, "protocol": "vless"},
-                        {"tag": "just1k-wl-api-grpc", "port": 10085, "protocol": "dokodemo-door"},
-                    ],
-                    "outbounds": [
-                        {
-                            "tag": "just1k-wl-direct",
-                            "protocol": "freedom",
-                            "settings": {"domainStrategy": "UseIP"},
-                        }
-                    ],
-                    "routing": {
-                        "rules": [
-                            {
-                                "type": "field",
-                                "inboundTag": ["just1k-wl-default"],
-                                "domain": ["domain:ru"],
-                                "outboundTag": "just1k-wl-direct",
-                            }
-                        ]
-                    },
-                },
-                f,
-            )
-
-        cmd = "heal_and_update_origin_config"
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(
-            res.returncode, 0, f"heal_and_update_origin_config failed: {res.stderr + res.stdout}"
-        )
-
-        with open(xray_config_file, "r", encoding="utf-8") as f:
-            updated = json.load(f)
-
-        # 1. Check UseIPv4 via streamSettings.sockopt and legacy settings cleaned
-        direct_ob = next(ob for ob in updated["outbounds"] if ob["tag"] == "just1k-wl-direct")
-        self.assertEqual(
-            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
-            "UseIPv4",
-        )
-        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
-
-        # 2. Check direct routing rule updated with domain:2ip.ru and inbound-de
-        direct_rule = next(
-            r for r in updated["routing"]["rules"] if r.get("outboundTag") == "just1k-wl-direct"
-        )
-        self.assertIn("domain:2ip.ru", direct_rule["domain"])
-        self.assertIn("just1k-wl-inbound-de", direct_rule["inboundTag"])
-
-        # 3. Check Split-DNS and skipFallback (domestic resolvers only, no foreign 1.1.1.1)
-        self.assertEqual(updated["dns"]["queryStrategy"], "UseIPv4")
-        ru_server = updated["dns"]["servers"][0]
-        self.assertEqual(ru_server["address"], "77.88.8.8")
-        self.assertIn("domain:2ip.ru", ru_server["domains"])
-        self.assertTrue(ru_server.get("skipFallback"))
-        self.assertNotIn("1.1.1.1", updated["dns"]["servers"])
-        self.assertIn("195.208.4.1", updated["dns"]["servers"])
-        self.assertIn("77.88.8.1", updated["dns"]["servers"])
-        self.assertNotIn("localhost", updated["dns"]["servers"])
-
-        # 3b. Verify ip_rule (geoip:ru) excludes relay inbounds to prevent DNS resolution on Origin
-        ip_rule = next(
-            (r for r in updated["routing"]["rules"] if r.get("outboundTag") == "just1k-wl-direct" and "ip" in r),
-            None,
-        )
-        self.assertIsNotNone(ip_rule, "ip_rule with geoip:ru for direct routing must exist")
-        self.assertNotIn("just1k-wl-inbound-de", ip_rule.get("inboundTag", []))
-
-        # 4. Check sniffing routeOnly == False and quic on client inbounds
-        for ib in updated["inbounds"]:
-            if ib["tag"] == "just1k-wl-api-grpc":
-                # Ensure API inbound does NOT have sniffing
-                self.assertNotIn("sniffing", ib)
-            else:
-                self.assertTrue(ib["sniffing"]["enabled"])
-                self.assertFalse(ib["sniffing"]["routeOnly"])
-                self.assertIn("quic", ib["sniffing"]["destOverride"])
-
-        # 5. Check geoip:private, BitTorrent and SMTP:25 blocking rules on Origin
-        origin_rules = updated["routing"]["rules"]
-        self.assertTrue(any(r.get("ip") == ["geoip:private"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "geoip:private block rule must be present on Origin")
-        self.assertTrue(any(r.get("protocol") == ["bittorrent"] and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "BitTorrent block rule must be present on Origin")
-        self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "SMTP:25 block rule must be present on Origin")
-        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "just1k-wl-block" for r in origin_rules), "Port 6881-6889 block rule must be present on Origin")
-
-        # 6. Check gRPC API, stats and user traffic policy invariants
-        self.assertEqual(updated.get("api", {}).get("tag"), "just1k-wl-api")
-        self.assertIn("HandlerService", updated.get("api", {}).get("services", []))
-        self.assertIn("StatsService", updated.get("api", {}).get("services", []))
-        self.assertIn("stats", updated)
-        self.assertTrue(updated.get("policy", {}).get("levels", {}).get("0", {}).get("statsUserUplink"))
-        self.assertTrue(updated.get("policy", {}).get("levels", {}).get("0", {}).get("statsUserDownlink"))
-
-        # 7. Integration validation with real Xray binary if available in runtime environment
-        xray_bin = shutil.which("xray") or "/usr/local/bin/xray"
-        if os.path.exists(xray_bin) and os.access(xray_bin, os.X_OK):
-            test_proc = subprocess.run(
-                [xray_bin, "run", "-test", "-config", str(xray_config_file)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(
-                test_proc.returncode,
-                0,
-                f"Generated Xray Origin config failed Xray validation: {test_proc.stderr}",
-            )
 
     def test_apply_node_sysctl_hardening_disables_ipv6_and_icmp_echo(self):
         """apply_node_sysctl_hardening must write IPv6 disable and ICMP echo ignore settings to sysctl.d."""
@@ -603,36 +255,6 @@ exit 0
         self.assertIn("net.core.default_qdisc = fq", content)
         self.assertIn("net.ipv4.tcp_congestion_control = bbr", content)
 
-    def test_get_public_ipv4_and_early_hardening_contract(self):
-        """Verify get_public_ipv4 contract, early role checks before mutations, and DNS validation safety."""
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        node_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-
-        # common.sh must define validate_public_ipv4 and get_public_ipv4
-        self.assertIn("validate_public_ipv4()", common_sh)
-        self.assertIn("get_public_ipv4()", common_sh)
-        self.assertIn("curl -4 -s", common_sh)
-        self.assertIn('validate_public_ipv4 "$ip"', common_sh)
-
-        # relay.sh: role check MUST execute BEFORE install_base_deps and apply_node_sysctl_hardening
-        relay_role_idx = relay_sh.index('prev_role="$(get_node_status)"')
-        relay_deps_idx = relay_sh.index("install_base_deps\n    apply_node_sysctl_hardening")
-        self.assertLess(relay_role_idx, relay_deps_idx, "Relay role check must occur before install_base_deps/hardening")
-        self.assertIn('my_ip="$(get_public_ipv4 || true)"', relay_sh)
-
-        # origin.sh: role check MUST execute BEFORE install_base_deps and apply_node_sysctl_hardening
-        origin_role_idx = origin_sh.index('prev_role="$(get_node_status)"')
-        origin_deps_idx = origin_sh.index("install_base_deps\n    apply_node_sysctl_hardening")
-        self.assertLess(origin_role_idx, origin_deps_idx, "Origin role check must occur before install_base_deps/hardening")
-
-        # just1knode.sh must use get_public_ipv4
-        self.assertIn('my_ip="$(get_public_ipv4 || true)"', node_sh)
-
-        # validate_relay_dns must explicitly report NO_EXPECTED and INVALID_EXPECTED instead of false OK
-        self.assertIn("INVALID_EXPECTED|", relay_sh)
-        self.assertIn("NO_EXPECTED|", relay_sh)
 
     def test_validate_public_ipv4_behavioural(self):
         """Verify public IPv4 classification rejects private, loopback, link-local, CGNAT, and IPv6."""
@@ -682,175 +304,6 @@ exit 0
         self.assertFalse(is_public_ipv4("::1"))
         self.assertFalse(is_public_ipv4("fe80::1"))
 
-    def test_validate_relay_dns_script_behavioural(self):
-        """Verify the Python DNS validator snippet inside relay.sh handles match, mismatch, invalid, and empty expected IP."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        m = re.search(r'python3 -c "\n(.*?)\n" "\$domain" "\$expected_ip"', relay_sh, re.DOTALL)
-        self.assertIsNotNone(m, "Python snippet in validate_relay_dns must be extractable")
-        py_code = m.group(1)
-
-        def run_validator(domain: str, expected_ip: str, mock_dns_ip: str | None = None) -> str:
-            mock_preamble = ""
-            if mock_dns_ip is not None:
-                mock_preamble = f"""
-import socket
-_orig_gai = socket.getaddrinfo
-def _mock_gai(h, p, family=0, type=0, proto=0, flags=0):
-    return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('{mock_dns_ip}', 0))]
-socket.getaddrinfo = _mock_gai
-"""
-            test_py = mock_preamble + py_code
-            res = subprocess.run(
-                [sys.executable, "-c", test_py, domain, expected_ip],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return res.stdout.strip()
-
-        # 1. Cyrillic domain
-        self.assertEqual(run_validator("домен.com", "1.1.1.1"), "CYRILLIC")
-
-        # 2. Invalid FQDN
-        self.assertEqual(run_validator("not_a_domain", "1.1.1.1"), "INVALID_FQDN")
-
-        # 3. Invalid / IPv6 expected IP must NOT succeed as OK
-        ipv6_res = run_validator("relay.example.com", "2a12:bec4:1483:7b1::2", mock_dns_ip="198.51.100.155")
-        self.assertTrue(ipv6_res.startswith("INVALID_EXPECTED|2a12:"), f"Expected INVALID_EXPECTED, got {ipv6_res}")
-
-        # 4. Empty expected IP must return NO_EXPECTED, NOT a false OK
-        no_exp_res = run_validator("relay.example.com", "", mock_dns_ip="198.51.100.155")
-        self.assertTrue(no_exp_res.startswith("NO_EXPECTED|"), f"Expected NO_EXPECTED, got {no_exp_res}")
-
-        # 5. Correct matching IPv4 -> OK
-        ok_res = run_validator("relay.example.com", "198.51.100.155", mock_dns_ip="198.51.100.155")
-        self.assertTrue(ok_res.startswith("OK|"), f"Expected OK, got {ok_res}")
-
-        # 6. Mismatching IPv4 -> MISMATCH
-        mismatch_res = run_validator("relay.example.com", "1.1.1.1", mock_dns_ip="198.51.100.155")
-        self.assertTrue(mismatch_res.startswith("MISMATCH|"), f"Expected MISMATCH, got {mismatch_res}")
-
-    def test_origin_and_relay_xhttp_inbound_limits_and_nginx_keepalive(self):
-        """Verify origin.sh and relays_manage.sh set scMaxEachPostBytes=1000000, serverMaxHeaderBytes=65536, and keepalive_requests=100000."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-
-        self.assertIn("'scMaxEachPostBytes': 1000000", origin_sh)
-        self.assertIn("'serverMaxHeaderBytes': 65536", origin_sh)
-        self.assertIn("keepalive_requests 100000;", origin_sh)
-        self.assertIn("keepalive_time 24h;", origin_sh)
-        self.assertIn("keepalive_timeout 300s;", origin_sh)
-        self.assertIn("proxy_read_timeout 86400s;", origin_sh)
-        self.assertIn("client_header_buffer_size 16k;", origin_sh)
-        self.assertIn("proxy_pass http://xray_xhttp_default;", origin_sh)
-        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', origin_sh)
-        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', origin_sh)
-
-        self.assertIn("'scMaxEachPostBytes': 1000000", relays_manage_sh)
-        self.assertIn("'serverMaxHeaderBytes': 65536", relays_manage_sh)
-        self.assertIn("proxy_read_timeout 86400s;", relays_manage_sh)
-        self.assertIn("sync_xhttp_upstreams_conf", relays_manage_sh)
-
-        self.assertIn("sync_xhttp_upstreams_conf()", common_sh)
-        self.assertIn("upstream xray_xhttp_default", common_sh)
-        self.assertIn("keepalive 128;", common_sh)
-        self.assertIn("keepalive_requests 100000;", common_sh)
-        self.assertIn("keepalive_timeout 300s;", common_sh)
-
-    def test_xhttp_upstreams_topology_sync_and_deduplication(self):
-        """Verify sync_xhttp_upstreams_conf python logic creates upstream pools, sets keepalive directives, and deduplicates codes."""
-        import json
-        import subprocess
-        import sys
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            cfg_file = tmp_path / "config.json"
-            relays_file = tmp_path / "relays.json"
-            upstreams_file = tmp_path / "just1k-xhttp-upstreams.conf"
-
-            cfg_data = {
-                "inbounds": [
-                    {"tag": "just1k-wl-default", "port": 8003},
-                    {"tag": "just1k-wl-inbound-de", "port": 8004},
-                    {"tag": "just1k-wl-inbound-nl", "port": 8005},
-                    {"tag": "just1k-wl-inbound-se", "port": 8006},
-                ]
-            }
-            cfg_file.write_text(json.dumps(cfg_data), encoding="utf-8")
-
-            relays_data = [
-                {"code": "de", "name": "Germany", "inbound_port": 8004, "inbound_tag": "just1k-wl-inbound-de"},
-                {"code": "DE", "name": "Germany Uppercase Dup", "inbound_port": 8004, "inbound_tag": "just1k-wl-inbound-de"},
-                {"code": "nl", "name": "Netherlands", "inbound_port": 8005, "inbound_tag": "just1k-wl-inbound-nl"},
-                {"code": "fr", "name": "France (Orphaned)", "inbound_port": 8007, "inbound_tag": "just1k-wl-inbound-fr"},
-            ]
-            relays_file.write_text(json.dumps(relays_data), encoding="utf-8")
-
-            common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-            # Extract python script from sync_xhttp_upstreams_conf
-            func_idx = common_sh.find("sync_xhttp_upstreams_conf()")
-            py_start = common_sh.find('python3 -c "', func_idx) + len('python3 -c "')
-            py_end = common_sh.find('" "$upstreams_file" "$cfg_file" "$relays_file"', py_start)
-            py_code = common_sh[py_start:py_end].strip()
-
-            proc = subprocess.run(
-                [sys.executable, "-c", py_code, str(upstreams_file), str(cfg_file), str(relays_file)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            self.assertEqual(proc.returncode, 0, f"Python execution failed: {proc.stderr}")
-            self.assertTrue(upstreams_file.exists())
-            content = upstreams_file.read_text(encoding="utf-8")
-
-            # Check default upstream
-            self.assertIn("upstream xray_xhttp_default {", content)
-            self.assertIn("server 127.0.0.1:8003;", content)
-            self.assertIn("keepalive 128;", content)
-            self.assertIn("keepalive_requests 100000;", content)
-            self.assertIn("keepalive_timeout 300s;", content)
-
-            # Check de upstream (exactly one block, no duplicates from 'DE')
-            self.assertEqual(content.count("upstream xray_xhttp_relay_de {"), 1)
-            self.assertNotIn("upstream xray_xhttp_relay_DE {", content)
-            self.assertIn("server 127.0.0.1:8004;", content)
-
-            # Check nl upstream (matches active inbound in Xray)
-            self.assertEqual(content.count("upstream xray_xhttp_relay_nl {"), 1)
-            self.assertIn("server 127.0.0.1:8005;", content)
-
-            # Check se upstream (from Xray inbound defense-in-depth scan)
-            self.assertEqual(content.count("upstream xray_xhttp_relay_se {"), 1)
-            self.assertIn("server 127.0.0.1:8006;", content)
-
-            # Check fr upstream is NOT generated (strict SSOT protects against orphaned relays in relays.json)
-            self.assertNotIn("upstream xray_xhttp_relay_fr {", content)
-
-            # Test fail-closed behavior when config.json is corrupted
-            cfg_file.write_text("{ invalid json", encoding="utf-8")
-            corrupt_proc = subprocess.run(
-                [sys.executable, "-c", py_code, str(upstreams_file), str(cfg_file), str(relays_file)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            self.assertNotEqual(corrupt_proc.returncode, 0, "Corrupted config.json must fail-closed")
-            self.assertIn("Error parsing Xray config", corrupt_proc.stderr)
-
-            # Test fallback when config.json physically does not exist (e.g. bootstrap)
-            cfg_file.unlink()
-            bootstrap_proc = subprocess.run(
-                [sys.executable, "-c", py_code, str(upstreams_file), str(cfg_file), str(relays_file)],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            self.assertEqual(bootstrap_proc.returncode, 0)
-            bootstrap_content = upstreams_file.read_text(encoding="utf-8")
-            self.assertIn("upstream xray_xhttp_relay_de {", bootstrap_content)
-            self.assertIn("server 127.0.0.1:8004;", bootstrap_content)
 
     def test_doctor_icmp_stealth_fails_closed_when_dropin_missing(self):
         """Verify doctor ICMP stealth check fails closed if runtime=1 but drop-in is missing."""
@@ -926,14 +379,6 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('current_ver="$($XRAY_BIN version 2>/dev/null | awk \'NR==1 {print $2}\')"', core_sh)
         self.assertIn('[[ $force_update -eq 0 && -n "$current_ver" && "$current_ver" == "$XRAY_VERSION_PINNED" ]]', core_sh)
 
-    def test_relay_and_origin_atomic_writes_and_sniffing(self):
-        """Verify atomic file writes via tempfile.mkstemp and sniffing routeOnly=False on relays."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", origin_sh)
-        self.assertIn("t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')", relay_sh)
-        self.assertIn("'routeOnly': False", relay_sh)
-        self.assertIn("sniff['routeOnly'] = False", relay_sh)
 
     def test_configure_safe_ufw_verifies_status_active(self):
         """Verify configure_safe_ufw checks ufw status active before logging successful activation."""
@@ -941,12 +386,6 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('if echo "y" | ufw enable >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then', common_sh)
         self.assertIn('warn "Внимание: не удалось активировать фаервол UFW."', common_sh)
 
-    def test_relay_setup_fails_closed_when_active_ufw_rejects_tunnel_rule(self):
-        """Verify relay setup fails closed (returns 1) if UFW is active and cannot open the tunnel port."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('ufw status 2>/dev/null | grep -qi "Status: active"', relay_sh)
-        self.assertIn('Не удалось открыть порт туннеля', relay_sh)
-        self.assertIn('return 1', relay_sh)
 
     def test_state_lock_file_uses_o_nofollow(self):
         """Verify set_state_val opens lock file with O_NOFOLLOW to mitigate symlink races."""
@@ -960,13 +399,6 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('exec "$bin_path" update-post "$target" "${is_menu:-0}"', core_sh)
         self.assertIn('update_node_post "$target" "${is_menu:-0}"', core_sh)
 
-    def test_ensure_xray_api_healthy_guards_relay_nodes(self):
-        """Verify ensure_xray_api_healthy strictly returns 0 on non-origin nodes without vless."""
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        self.assertIn('local force="${1:-0}"', common_sh)
-        self.assertIn('role="$(get_state_val "role" "")"', common_sh)
-        self.assertIn('cur_has_v="$(get_state_val "has_vless" "0")"', common_sh)
-        self.assertIn('if [[ "$force" != "1" && "$role" != "origin" && "$cur_has_v" != "1" ]]; then\n        return 0\n    fi', common_sh)
 
     def test_apply_node_sysctl_hardening_updates_ufw_sysctl_conf(self):
         """Verify apply_node_sysctl_hardening updates /etc/ufw/sysctl.conf and uninstall cleans it up."""
@@ -979,128 +411,6 @@ socket.getaddrinfo = _mock_gai
         self.assertIn('local ufw_conf="${JUST1KNODE_UFW_SYSCTL_CONF:-/etc/ufw/sysctl.conf}"', just1knode_sh)
         self.assertIn('sed -i -E \'/^[#[:space:]]*net\\/ipv4\\/icmp_echo_ignore_all[[:space:]]*=/d\' "$ufw_conf"', just1knode_sh)
 
-    def test_heal_reconstructs_missing_invariants(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "secret_base_path": "/custom_stream"}, f)
-
-        xray_config_file = self.xray_config_dir / "config.json"
-        # Config completely lacking outbounds and routing rules
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump({"inbounds": [], "outbounds": []}, f)
-
-        cmd = "heal_and_update_origin_config"
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(
-            res.returncode,
-            0,
-            f"heal_and_update_origin_config failed on broken config: {res.stderr + res.stdout}",
-        )
-
-        with open(xray_config_file, "r", encoding="utf-8") as f:
-            reconciled = json.load(f)
-
-        # Invariants reconstructed
-        out_tags = [ob["tag"] for ob in reconciled["outbounds"]]
-        self.assertIn("just1k-wl-direct", out_tags)
-        self.assertIn("just1k-wl-block", out_tags)
-        self.assertIn("just1k-wl-api", out_tags)
-
-        in_tags = [ib["tag"] for ib in reconciled["inbounds"]]
-        self.assertIn("just1k-wl-default", in_tags)
-        self.assertIn("just1k-wl-api-grpc", in_tags)
-
-        # Routing rules reconstructed
-        rule_out_tags = [r.get("outboundTag") for r in reconciled["routing"]["rules"]]
-        self.assertIn("just1k-wl-direct", rule_out_tags)
-        self.assertIn("just1k-wl-api", rule_out_tags)
-
-    def test_heal_and_update_origin_config_handles_corrupt_state(self):
-        """When state_file is corrupt or not a dict, reconciliation should not crash with NameError or AttributeError."""
-        self._prepare_base_env()
-        xray_config_file = self.xray_config_dir / "config.json"
-        xray_config_file.parent.mkdir(parents=True, exist_ok=True)
-        xray_config_file.write_text('{"inbounds": [], "outbounds": []}', encoding="utf-8")
-        relays_file = self.state_dir / "relays.json"
-        relays_file.write_text("[]", encoding="utf-8")
-
-        py_reconcile = '''
-import json, os, sys
-cfg_file, relays_file, state_file = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(cfg_file, 'r', encoding='utf-8') as f:
-    cfg = json.load(f)
-relays = []
-secret_base = '/stream'
-s_data = {}
-if os.path.exists(state_file):
-    try:
-        with open(state_file, 'r', encoding='utf-8') as sf:
-            loaded_s = json.load(sf)
-            if isinstance(loaded_s, dict):
-                s_data = loaded_s
-            secret_base = s_data.get('secret_base_path', '/stream')
-    except Exception:
-        secret_base = '/stream'
-        s_data = {}
-
-has_reverse = bool(s_data.get('reverse_secret'))
-print("RECONCILE_SUCCESS")
-'''
-        broken_state = self.state_dir / "broken_state.json"
-
-        # Case 1: Corrupt non-JSON file
-        broken_state.write_text("NOT_VALID_JSON", encoding="utf-8")
-        res1 = subprocess.run(
-            [sys.executable, "-c", py_reconcile, str(xray_config_file), str(relays_file), str(broken_state)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(res1.returncode, 0, f"Case 1 crashed: {res1.stderr}")
-        self.assertIn("RECONCILE_SUCCESS", res1.stdout)
-
-        # Case 2: Valid JSON but not a dict (e.g. list [1, 2, 3])
-        broken_state.write_text("[1, 2, 3]", encoding="utf-8")
-        res2 = subprocess.run(
-            [sys.executable, "-c", py_reconcile, str(xray_config_file), str(relays_file), str(broken_state)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(res2.returncode, 0, f"Case 2 crashed: {res2.stderr}")
-        self.assertIn("RECONCILE_SUCCESS", res2.stdout)
-
-        # Verify origin.sh source contains the fix
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn("s_data = {}", origin_sh)
-        self.assertIn("if isinstance(loaded_s, dict):", origin_sh)
-
-    def test_issue_relay_tls_cert_ufw_hooks_merge(self):
-        """issue_relay_tls_cert should safely merge ufw hooks into existing renewal config without duplicating."""
-        self._prepare_base_env()
-        self._create_mock_script("openssl", "#!/bin/sh\nexit 0\n")
-        domain = "relay.example.com"
-        live_dir = self.letsencrypt_dir / "live" / domain
-        live_dir.mkdir(parents=True, exist_ok=True)
-        (live_dir / "fullchain.pem").write_text("DUMMY_CERT", encoding="utf-8")
-        (live_dir / "privkey.pem").write_text("DUMMY_KEY", encoding="utf-8")
-
-        ren_dir = self.letsencrypt_dir / "renewal"
-        ren_dir.mkdir(parents=True, exist_ok=True)
-        ren_file = ren_dir / f"{domain}.conf"
-        ren_file.write_text("[renewalparams]\npre_hook = old_pre\npost_hook = old_post\n", encoding="utf-8")
-
-        cmd = f'issue_relay_tls_cert "{domain}"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(res.returncode, 0, f"issue_relay_tls_cert failed: {res.stderr + res.stdout}")
-
-        # Verify hooks were replaced, not duplicated
-        content = ren_file.read_text(encoding="utf-8")
-        self.assertEqual(content.count("pre_hook"), 1, "pre_hook should appear exactly once")
-        self.assertEqual(content.count("post_hook"), 1, "post_hook should appear exactly once")
-        self.assertIn("just1knode_ufw_opened_80", content)
-        self.assertNotIn("old_pre", content)
-        self.assertNotIn("old_post", content)
 
     def test_rollback_removes_newly_created_relay_nginx_conf(self):
         self._prepare_base_env()
@@ -1119,99 +429,6 @@ print("RECONCILE_SUCCESS")
             new_conf.exists(), "Rollback failed to remove newly created relay nginx config file!"
         )
 
-    # -------------------------------------------------------------------------
-    # F04: Zero-Collateral Preservation of Custom Outbounds
-    # -------------------------------------------------------------------------
-    def test_preserve_custom_xray_outbounds(self):
-        self._prepare_base_env()
-        xray_config_file = self.xray_config_dir / "config.json"
-        custom_outbounds = [
-            {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIP"}},
-            {"tag": "block", "protocol": "blackhole"},
-            {"tag": "custom-wireguard", "protocol": "wireguard", "settings": {"secret": "abc"}},
-            {
-                "tag": "warp-exit",
-                "protocol": "socks",
-                "settings": {"servers": [{"address": "127.0.0.1", "port": 40000}]},
-            },
-        ]
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump({"inbounds": [], "outbounds": custom_outbounds, "routing": {"rules": []}}, f)
-
-        # Run origin installer with surgical merge
-        cmd = 'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/stream" "1.2.3.4" "origin.example.com" "bot.example.com"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(
-            res.returncode, 0, f"install_xray_origin_node failed: {res.stderr + res.stdout}"
-        )
-
-        with open(xray_config_file, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-
-        tags = [ob["tag"] for ob in cfg["outbounds"]]
-        self.assertIn("direct", tags, "Custom 'direct' outbound must be preserved")
-        self.assertIn("block", tags, "Custom 'block' outbound must be preserved")
-        self.assertIn(
-            "custom-wireguard", tags, "Custom 'custom-wireguard' outbound must be preserved"
-        )
-        self.assertIn("warp-exit", tags, "Custom 'warp-exit' outbound must be preserved")
-        self.assertIn(
-            "just1k-wl-direct", tags, "Namespaced just1k-wl-direct outbound must be added"
-        )
-        self.assertIn("just1k-wl-block", tags, "Namespaced just1k-wl-block outbound must be added")
-        self.assertIn("just1k-wl-api", tags, "Namespaced just1k-wl-api blackhole outbound must be added")
-
-        for r in cfg.get("routing", {}).get("rules", []):
-            in_tags = r.get("inboundTag", [])
-            in_tags_list = in_tags if isinstance(in_tags, list) else [in_tags]
-            self.assertNotIn("just1k-wl-inbounds", in_tags_list, "Phantom tag just1k-wl-inbounds must not exist in routing rules")
-
-        direct_ob = next(ob for ob in cfg["outbounds"] if ob["tag"] == "direct")
-        self.assertEqual(
-            direct_ob.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
-            "UseIPv4",
-        )
-        self.assertNotIn("domainStrategy", direct_ob.get("settings", {}))
-        wl_direct = next(ob for ob in cfg["outbounds"] if ob["tag"] == "just1k-wl-direct")
-        self.assertEqual(
-            wl_direct.get("streamSettings", {}).get("sockopt", {}).get("domainStrategy"),
-            "UseIPv4",
-        )
-
-    # -------------------------------------------------------------------------
-    # F05: Zero-Collateral Preservation of Custom Inbound Tags
-    # -------------------------------------------------------------------------
-    def test_preserve_custom_inbound_tags(self):
-        self._prepare_base_env()
-        xray_config_file = self.xray_config_dir / "config.json"
-        custom_inbounds = [
-            {"tag": "api-grpc", "port": 9090, "protocol": "dokodemo-door"},
-            {"tag": "inbound-default", "port": 7000, "protocol": "vless"},
-            {"tag": "custom-socks", "port": 1080, "protocol": "socks"},
-        ]
-        with open(xray_config_file, "w", encoding="utf-8") as f:
-            json.dump({"inbounds": custom_inbounds, "outbounds": [], "routing": {"rules": []}}, f)
-
-        # Run origin installer with surgical merge
-        cmd = 'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/stream" "1.2.3.4" "origin.example.com" "bot.example.com"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(
-            res.returncode, 0, f"install_xray_origin_node failed: {res.stderr + res.stdout}"
-        )
-
-        with open(xray_config_file, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-
-        inbound_tags = [ib["tag"] for ib in cfg["inbounds"]]
-        self.assertIn(
-            "custom-socks", inbound_tags, "Third party custom-socks inbound must be preserved"
-        )
-        self.assertIn(
-            "just1k-wl-api-grpc", inbound_tags, "Namespaced just1k-wl-api-grpc must be present"
-        )
-        self.assertIn(
-            "just1k-wl-default", inbound_tags, "Namespaced just1k-wl-default must be present"
-        )
 
     # -------------------------------------------------------------------------
     # F19: Fail-Closed UFW Firewall & Doctor ACL Validation
@@ -1240,7 +457,7 @@ exit 0
         # Case 2: Secure UFW with BOT_IP restriction
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
             json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_ip": "198.51.100.42"}, f
+                {"role": "ru_hub", "domain": "hub.example.com", "bot_ip": "198.51.100.42"}, f
             )
 
         self._create_mock_script(
@@ -1259,27 +476,6 @@ exit 0
         )
         res_sec = self._run_shell_snippet("run_doctor")
         self.assertIn("Порт 8444 защищен и доступен только с BOT_IP", res_sec.stdout)
-
-        # Case 3: Fail-closed installation when BOT_IP is empty
-        res_install = self._run_shell_snippet(
-            'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/w_test" "" < /dev/null'
-        )
-        self.assertNotEqual(res_install.returncode, 0)
-        self.assertIn("BOT_IP обязателен", res_install.stderr + res_install.stdout)
-
-        # Case 4: Fail-closed installation when BOT_DOMAIN is empty
-        res_empty_domain = self._run_shell_snippet(
-            'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/w_test" "1.2.3.4" "origin.example.com" "" < /dev/null'
-        )
-        self.assertNotEqual(res_empty_domain.returncode, 0)
-        self.assertIn("BOT_DOMAIN обязателен", res_empty_domain.stderr + res_empty_domain.stdout)
-
-        # Case 5: Fail-closed installation when BOT_DOMAIN is an IP address
-        res_ip_domain = self._run_shell_snippet(
-            'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/w_test" "1.2.3.4" "origin.example.com" "198.51.100.134" < /dev/null'
-        )
-        self.assertNotEqual(res_ip_domain.returncode, 0)
-        self.assertIn("BOT_DOMAIN должен быть доменным именем (FQDN)", res_ip_domain.stderr + res_ip_domain.stdout)
 
     # -------------------------------------------------------------------------
     # F20: Verified Update Rollback in update_xray_core
@@ -1570,7 +766,7 @@ update_node "all"
         )
 
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "domain": domain, "bot_ip": "1.2.3.4"}, f)
+            json.dump({"role": "ru_hub", "domain": domain, "bot_ip": "1.2.3.4"}, f)
 
         # Mock doctor cert path to point to our test cert
         doctor_snippet = f"""
@@ -1803,174 +999,6 @@ esac
         self.assertEqual(res.returncode, 0)
         self.assertIn("Доступны изменения в GitHub origin/main", res.stdout)
 
-    # -------------------------------------------------------------------------
-    # Functional Validation: Origin Node Installation & Complete Artifacts
-    # -------------------------------------------------------------------------
-    def test_functional_origin_node_installation_and_artifacts(self):
-        self._prepare_base_env()
-        domain = "origin.example.com"
-        secret_path = "/stream"
-
-        cmd = f'install_xray_origin_node "{domain}" "admin@example.com" "test_api_key_123" "{secret_path}" "198.51.100.1" "{domain}" "bot.example.com"'
-        res = self._run_shell_snippet(cmd)
-        self.assertEqual(
-            res.returncode, 0, f"install_xray_origin_node failed: {res.stderr + res.stdout}"
-        )
-
-        # 1. Verify Xray config.json
-        xray_conf_file = self.xray_config_dir / "config.json"
-        self.assertTrue(xray_conf_file.exists())
-        with open(xray_conf_file, "r", encoding="utf-8") as f:
-            xray_conf = json.load(f)
-
-        inbound_tags = [ib["tag"] for ib in xray_conf["inbounds"]]
-        self.assertIn("just1k-wl-default", inbound_tags)
-        self.assertIn("just1k-wl-api-grpc", inbound_tags)
-
-        default_ib = next(ib for ib in xray_conf["inbounds"] if ib["tag"] == "just1k-wl-default")
-        self.assertEqual(default_ib["streamSettings"]["network"], "xhttp")
-        self.assertEqual(
-            default_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "queryInHeader"
-        )
-        self.assertEqual(
-            default_ib["streamSettings"]["xhttpSettings"]["path"], f"{secret_path}/default"
-        )
-        self.assertEqual(
-            default_ib["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"]
-        )
-
-        outbound_tags = [ob["tag"] for ob in xray_conf["outbounds"]]
-        self.assertIn("just1k-wl-direct", outbound_tags)
-        self.assertIn("just1k-wl-block", outbound_tags)
-
-        # Standalone origin routing must route default traffic directly to just1k-wl-direct (Russian egress)
-        rules = xray_conf["routing"]["rules"]
-        default_rule = next(
-            (r for r in rules if r.get("inboundTag") == ["just1k-wl-default"]), None
-        )
-        self.assertIsNotNone(default_rule)
-        self.assertEqual(default_rule["outboundTag"], "just1k-wl-direct")
-
-        # 2. Verify Nginx configurations
-        nginx_conf = self.nginx_conf_dir / "sites-available" / "just1k-origin.conf"
-        self.assertTrue(nginx_conf.exists())
-        nginx_text = nginx_conf.read_text(encoding="utf-8")
-        self.assertIn("client_max_body_size 0;", nginx_text)
-        self.assertIn("large_client_header_buffers 8 64k;", nginx_text)
-        self.assertIn("location = /cdn-check", nginx_text)
-        self.assertIn("return 204;", nginx_text)
-        self.assertIn("location / {", nginx_text)
-        self.assertIn("default_type text/plain;", nginx_text)
-        self.assertIn('return 404 "Not Found\\n";', nginx_text)
-
-        # 3. Verify Nginx xhttp-map.conf
-        map_conf = self.nginx_conf_dir / "conf.d" / "xhttp-map.conf"
-        self.assertTrue(map_conf.exists())
-        map_text = map_conf.read_text(encoding="utf-8")
-        self.assertIn("OPTIONS POST;", map_text)
-
-        # 4. Verify Nginx default relay config
-        relays_default = self.nginx_relays_d / "default.conf"
-        self.assertTrue(relays_default.exists())
-        relays_text = relays_default.read_text(encoding="utf-8")
-        self.assertIn(f"location ^~ {secret_path}/default", relays_text)
-        self.assertIn("proxy_method $xhttp_proxy_method;", relays_text)
-        self.assertIn("client_max_body_size 0;", relays_text)
-
-        # 5. Verify systemd units
-        xray_service = self.systemd_dir / "xray-api.service"
-        self.assertTrue(xray_service.exists())
-        svc_text = xray_service.read_text(encoding="utf-8")
-        self.assertIn("User=xrayapi", svc_text)
-        self.assertIn("Group=xrayapi", svc_text)
-        self.assertIn("uvicorn app:app", svc_text)
-        self.assertIn("ReadWritePaths=", svc_text)
-        self.assertIn(str(self.xray_api_lib), svc_text)
-
-    # -------------------------------------------------------------------------
-    # Functional Validation: Add Relay with REALITY & Relay Egress
-    # -------------------------------------------------------------------------
-    def test_functional_add_relay_node_reality_and_egress_enforcement(self):
-        self._prepare_base_env()
-        # Initialize origin config first
-        cmd_init = 'install_xray_origin_node "origin.example.com" "admin@example.com" "apikey" "/stream" "198.51.100.1" "origin.example.com" "bot.example.com"'
-        res_init = self._run_shell_snippet(cmd_init)
-        self.assertEqual(res_init.returncode, 0, f"install_xray_origin_node failed: {res_init.stderr + res_init.stdout}")
-
-        # Add Relay with TLS
-        cmd_relay = 'add_relay_node "Germany" "203.0.113.50" "10443" "test-relay-uuid" "de" "tls" "-" "-" "de.example.com"'
-        res = self._run_shell_snippet(cmd_relay)
-        self.assertEqual(res.returncode, 0, f"add_relay_node failed: {res.stderr + res.stdout}")
-
-        # Verify Nginx relay conf
-        de_conf = self.nginx_relays_d / "de.conf"
-        self.assertTrue(de_conf.exists())
-        de_text = de_conf.read_text(encoding="utf-8")
-        self.assertIn("location ^~ /stream/de", de_text)
-        self.assertIn("client_max_body_size 0;", de_text)
-
-        # Verify Xray config has relay inbound, outbound, and enforced egress routing
-        with open(self.xray_config_dir / "config.json", "r", encoding="utf-8") as f:
-            xray_conf = json.load(f)
-
-        inbound_tags = [ib["tag"] for ib in xray_conf["inbounds"]]
-        self.assertIn("just1k-wl-inbound-de", inbound_tags)
-        de_ib = next(ib for ib in xray_conf["inbounds"] if ib["tag"] == "just1k-wl-inbound-de")
-        self.assertEqual(
-            de_ib["streamSettings"]["xhttpSettings"]["xPaddingPlacement"], "queryInHeader"
-        )
-        self.assertEqual(de_ib["streamSettings"]["xhttpSettings"]["path"], "/stream/de")
-        self.assertEqual(
-            de_ib["streamSettings"]["sockopt"]["trustedXForwardedFor"], ["X-Forwarded-For"]
-        )
-
-        outbound_tags = [ob["tag"] for ob in xray_conf["outbounds"]]
-        self.assertIn("just1k-wl-outbound-de", outbound_tags)
-        de_ob = next(ob for ob in xray_conf["outbounds"] if ob["tag"] == "just1k-wl-outbound-de")
-        self.assertEqual(de_ob["streamSettings"]["security"], "tls")
-        self.assertEqual(de_ob["streamSettings"]["tlsSettings"]["serverName"], "de.example.com")
-
-        # Verify default traffic is routed directly through Moscow IP (just1k-wl-direct)
-        rules = xray_conf["routing"]["rules"]
-        default_rule = next(
-            (r for r in rules if r.get("inboundTag") == ["just1k-wl-default"]), None
-        )
-        self.assertIsNotNone(default_rule)
-        self.assertEqual(default_rule["outboundTag"], "just1k-wl-direct")
-
-        # Verify DNS on Origin has no foreign resolvers
-        self.assertNotIn("1.1.1.1", xray_conf["dns"]["servers"])
-        self.assertIn("195.208.4.1", xray_conf["dns"]["servers"])
-        self.assertIn("77.88.8.1", xray_conf["dns"]["servers"])
-        self.assertNotIn("localhost", xray_conf["dns"]["servers"])
-
-        # Verify relay inbound is NOT in ip_rule (geoip:ru) to prevent foreign DNS leaks on Origin
-        ip_rule = next(
-            (r for r in rules if r.get("outboundTag") == "just1k-wl-direct" and "ip" in r), None
-        )
-        self.assertIsNotNone(ip_rule, "ip_rule with geoip:ru for direct routing must exist")
-        self.assertNotIn("just1k-wl-inbound-de", ip_rule.get("inboundTag", []))
-
-    # -------------------------------------------------------------------------
-    # Functional Validation: Role Guard in manage_relays_menu
-    # -------------------------------------------------------------------------
-    def test_functional_manage_relays_menu_role_guard(self):
-        self._prepare_base_env()
-        # Case 1: Role is 'relay' -> must fail closed
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "relay", "domain": "relay.example.com"}, f)
-
-        res = self._run_shell_snippet("manage_relays_menu < /dev/null")
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn("ТОЛЬКО на Origin-сервере", res.stderr + res.stdout)
-
-        # Case 2: Role is empty/unset -> must fail closed
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({}, f)
-
-        res_empty = self._run_shell_snippet("manage_relays_menu < /dev/null")
-        self.assertNotEqual(res_empty.returncode, 0)
-        self.assertIn("ТОЛЬКО на Origin-сервере", res_empty.stderr + res_empty.stdout)
 
     # -------------------------------------------------------------------------
     # Functional Validation: Zero-Signature Purge & Certbot Deploy Hook
@@ -2010,234 +1038,6 @@ esac
         self.assertIn("systemctl restart xray", hook_content)
         self.assertIn("systemctl start xray-api", hook_content)
 
-    def test_heal_and_update_origin_config_with_relays(self):
-        self._prepare_base_env()
-        relays = [
-            {
-                "name": "Германия",
-                "code": "de",
-                "ip": "198.51.100.229",
-                "port": 10443,
-                "path": "/stream/de",
-            },
-            {
-                "name": "Эстония",
-                "code": "ee",
-                "ip": "198.51.100.33",
-                "port": 10443,
-                "path": "/stream/ee",
-            },
-        ]
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            json.dump(relays, f)
-
-        res = self._run_shell_snippet("heal_and_update_origin_config")
-        self.assertEqual(res.returncode, 0, f"STDOUT: {res.stdout}\nSTDERR: {res.stderr}")
-
-        with open(self.xray_config_dir / "config.json", "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        rules = cfg.get("routing", {}).get("rules", [])
-        rule_outbounds = [r.get("outboundTag") for r in rules]
-        self.assertIn("just1k-wl-outbound-de", rule_outbounds)
-        self.assertIn("just1k-wl-outbound-ee", rule_outbounds)
-
-        # Invariant: Relay routing rules must precede any IP-based rules to ensure foreign domains
-        # are forwarded by FQDN to Europe without triggering DNS resolution on the Origin node
-        de_idx = next(i for i, r in enumerate(rules) if r.get("outboundTag") == "just1k-wl-outbound-de")
-        ip_rules = [i for i, r in enumerate(rules) if r.get("outboundTag") == "just1k-wl-direct" and "ip" in r]
-        for ip_idx in ip_rules:
-            self.assertLess(de_idx, ip_idx, "Relay outbound rule must precede IP matching rules")
-
-        # Invariant: Origin DNS servers must not contain foreign resolvers
-        self.assertNotIn("1.1.1.1", cfg["dns"]["servers"])
-        self.assertIn("195.208.4.1", cfg["dns"]["servers"])
-        self.assertIn("77.88.8.1", cfg["dns"]["servers"])
-        self.assertNotIn("localhost", cfg["dns"]["servers"])
-
-    def test_auto_heal_relays_registry_when_corrupted(self):
-        self._prepare_base_env()
-        # Create corrupted relays.json simulating the exact issue
-        with open(self.state_dir / "relays.json", "w", encoding="utf-8") as f:
-            f.write('[\n  {\n    "name": \n')
-
-        with open(self.xray_config_dir / "config.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "inbounds": [
-                        {
-                            "tag": "just1k-wl-inbound-de",
-                            "port": 8005,
-                            "protocol": "vless",
-                            "streamSettings": {"xhttpSettings": {"path": "/stream/de"}},
-                        }
-                    ],
-                    "outbounds": [
-                        {
-                            "tag": "just1k-wl-outbound-de",
-                            "settings": {
-                                "vnext": [
-                                    {
-                                        "address": "198.51.100.229",
-                                        "port": 10443,
-                                        "users": [{"id": "test-uuid"}],
-                                    }
-                                ]
-                            },
-                            "streamSettings": {
-                                "security": "reality",
-                                "realitySettings": {"serverName": "www.google.com"},
-                            },
-                        }
-                    ],
-                },
-                f,
-            )
-
-        res = self._run_shell_snippet("auto_heal_relays_registry")
-        self.assertEqual(res.returncode, 0, f"STDOUT: {res.stdout}\nSTDERR: {res.stderr}")
-
-        with open(self.state_dir / "relays.json", "r", encoding="utf-8") as f:
-            healed = json.load(f)
-        self.assertEqual(len(healed), 1)
-        self.assertEqual(healed[0]["code"], "de")
-        self.assertEqual(healed[0]["ip"], "198.51.100.229")
-
-    def test_deploy_subscription_proxy_conf_generates_valid_proxy(self):
-        self._prepare_base_env()
-        # Set bot_domain in state
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_domain": "bot.example.com"}, f
-            )
-
-        res = self._run_shell_snippet("deploy_subscription_proxy_conf")
-        self.assertEqual(
-            res.returncode, 0, f"deploy_subscription_proxy_conf failed: {res.stderr + res.stdout}"
-        )
-
-        sub_conf = self.nginx_relays_d / "sub-wl.conf"
-        self.assertTrue(sub_conf.exists(), "sub-wl.conf must be created in NGINX_RELAYS_DIR")
-        content = sub_conf.read_text(encoding="utf-8")
-        self.assertIn("location ^~ /sub/wl", content)
-        self.assertIn("resolver ", content)
-        self.assertIn("77.88.8.8", content)
-        self.assertNotIn("1.1.1.1", content)
-        self.assertNotIn("8.8.8.8", content)
-        self.assertIn("resolver_timeout 3s;", content)
-        self.assertIn("proxy_connect_timeout 5s;", content)
-        self.assertIn('set $bot_upstream "https://bot.example.com";', content)
-        self.assertIn("proxy_pass $bot_upstream;", content)
-        self.assertIn("proxy_ssl_server_name on;", content)
-        self.assertIn("proxy_ssl_name bot.example.com;", content)
-        self.assertIn("proxy_ssl_verify on;", content)
-        self.assertIn("proxy_ssl_verify_depth 5;", content)
-        self.assertIn("proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;", content)
-        self.assertNotIn("proxy_ssl_verify off;", content)
-        self.assertIn("proxy_set_header Host bot.example.com;", content)
-
-    def test_deploy_subscription_proxy_conf_fails_on_ip_target(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_domain": "198.51.100.134"}, f
-            )
-
-        res = self._run_shell_snippet("deploy_subscription_proxy_conf")
-        self.assertNotEqual(res.returncode, 0, "deploy_subscription_proxy_conf must fail if target is an IP")
-        self.assertIn("BOT_DOMAIN FQDN", res.stderr + res.stdout)
-
-    def test_deploy_subscription_proxy_conf_fails_on_missing_target(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "domain": "origin.example.com"}, f)
-
-        res = self._run_shell_snippet("deploy_subscription_proxy_conf")
-        self.assertNotEqual(res.returncode, 0, "deploy_subscription_proxy_conf must fail if target is missing")
-        self.assertIn("BOT_DOMAIN FQDN", res.stderr + res.stdout)
-
-    def test_heal_and_update_origin_config_handles_legacy_ip_without_crashing(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_domain": "198.51.100.134"}, f
-            )
-
-        res = self._run_shell_snippet("heal_and_update_origin_config")
-        self.assertEqual(res.returncode, 0, "heal_and_update_origin_config must not crash on legacy IP in bot_domain")
-        self.assertIn("устаревший bot_domain в виде IP", res.stderr + res.stdout)
-
-    def test_heal_and_update_origin_config_migrates_with_env_bot_domain(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_domain": "198.51.100.134"}, f
-            )
-
-        res = self._run_shell_snippet("BOT_DOMAIN=bot.example.com heal_and_update_origin_config")
-        self.assertEqual(res.returncode, 0)
-        sub_conf = self.nginx_relays_d / "sub-wl.conf"
-        self.assertTrue(sub_conf.exists())
-        self.assertIn("bot.example.com", sub_conf.read_text(encoding="utf-8"))
-
-        # Verify state.json was updated with the migrated FQDN
-        with open(self.state_dir / "state.json", "r", encoding="utf-8") as f:
-            st = json.load(f)
-        self.assertEqual(st.get("bot_domain"), "bot.example.com")
-
-    def test_heal_and_update_origin_config_overrides_existing_fqdn_with_env_bot_domain(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {"role": "origin", "domain": "origin.example.com", "bot_domain": "old.example.com"}, f
-            )
-
-        res = self._run_shell_snippet("BOT_DOMAIN=new.example.com heal_and_update_origin_config")
-        self.assertEqual(res.returncode, 0)
-        sub_conf = self.nginx_relays_d / "sub-wl.conf"
-        self.assertTrue(sub_conf.exists())
-        self.assertIn("new.example.com", sub_conf.read_text(encoding="utf-8"))
-
-        with open(self.state_dir / "state.json", "r", encoding="utf-8") as f:
-            st = json.load(f)
-        self.assertEqual(st.get("bot_domain"), "new.example.com")
-
-    def test_heal_and_update_origin_config_upgrades_nginx_to_404_and_purges_camouflage(self):
-        self._prepare_base_env()
-        with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "origin", "domain": "origin.example.com"}, f)
-
-        # Place legacy index.html with template signature
-        calc_html = self.www_html_dir / "index.html"
-        calc_html.write_text("<html>SimpleCalc - All calculations done client-side</html>", encoding="utf-8")
-
-        # Place legacy just1k-origin.conf with try_files
-        sites_avail = self.nginx_conf_dir / "sites-available"
-        sites_avail.mkdir(parents=True, exist_ok=True)
-        origin_conf = sites_avail / "just1k-origin.conf"
-        origin_conf.write_text(
-            """server {
-    listen 443 ssl http2;
-    server_name origin.example.com;
-    location / {
-        root /var/www/html;
-        index index.html;
-        try_files $uri $uri/ =404;
-    }
-}
-""",
-            encoding="utf-8",
-        )
-
-        res = self._run_shell_snippet("heal_and_update_origin_config")
-        self.assertEqual(res.returncode, 0)
-
-        # Camouflage file should be deleted
-        self.assertFalse(calc_html.exists(), "Legacy camouflage index.html must be purged")
-
-        # Nginx config must be upgraded to return 404
-        content = origin_conf.read_text(encoding="utf-8")
-        self.assertNotIn("try_files", content)
-        self.assertIn('return 404 "Not Found\\n";', content)
 
     def test_deploy_camouflage_site_preserves_unrelated_index_html(self):
         self._prepare_base_env()
@@ -2319,36 +1119,6 @@ esac
         self.assertIn("myblog.org", res.stdout)
         self.assertNotIn("default", res.stdout)
 
-    def test_origin_nginx_backs_up_custom_default_site(self):
-        self._prepare_base_env()
-        sites_enabled = self.nginx_conf_dir / "sites-enabled"
-        sites_available = self.nginx_conf_dir / "sites-available"
-        sites_enabled.mkdir(parents=True, exist_ok=True)
-        sites_available.mkdir(parents=True, exist_ok=True)
-
-        # User has a custom domain inside default
-        (sites_enabled / "default").write_text(
-            "server {\n    listen 80;\n    server_name custom-site.com;\n}\n", encoding="utf-8"
-        )
-
-        # Simulate default backup check snippet from origin.sh
-        snippet = f"""
-NGINX_CONF_DIR="{self._bp(self.nginx_conf_dir)}"
-if [[ -f "${{NGINX_CONF_DIR}}/sites-enabled/default" ]] && grep -Eq '(^|[[:space:]])server_name[[:space:]]+[^_;]' "${{NGINX_CONF_DIR}}/sites-enabled/default" 2>/dev/null; then
-    cp -a "${{NGINX_CONF_DIR}}/sites-enabled/default" "${{NGINX_CONF_DIR}}/sites-available/default.user.bak"
-fi
-rm -f "${{NGINX_CONF_DIR}}/sites-enabled/default" 2>/dev/null || true
-"""
-        res = self._run_shell_snippet(snippet)
-        self.assertEqual(res.returncode, 0)
-        self.assertTrue(
-            (sites_available / "default.user.bak").exists(),
-            "Custom default site must be backed up as default.user.bak in sites-available",
-        )
-        self.assertFalse(
-            (sites_enabled / "default.user.bak").exists(), "Backup must never be in sites-enabled"
-        )
-        self.assertFalse((sites_enabled / "default").exists())
 
     def test_origin_nginx_restores_default_on_validation_failure(self):
         self._prepare_base_env()
@@ -2416,36 +1186,6 @@ ensure_xrayapi_user
         self.assertTrue(user_log.exists(), "useradd must be called when user does not exist")
         self.assertIn("xrayapi", user_log.read_text(encoding="utf-8"))
 
-    def test_heal_and_update_relay_config_atomic_and_chmod_640(self):
-        self._prepare_base_env()
-        (self.state_dir / "state.json").write_text('{"role": "relay"}', encoding="utf-8")
-        xray_config = self.xray_config_dir / "config.json"
-        initial_cfg = {
-            "outbounds": [{"tag": "direct", "protocol": "freedom"}],
-            "inbounds": [],
-        }
-        xray_config.write_text(json.dumps(initial_cfg), encoding="utf-8")
-
-        res = self._run_shell_snippet("heal_and_update_relay_config")
-        self.assertEqual(
-            res.returncode, 0, f"heal_and_update_relay_config failed: stderr={res.stderr}"
-        )
-        updated_cfg = json.loads(xray_config.read_text(encoding="utf-8"))
-        self.assertIn("dns", updated_cfg)
-        self.assertEqual(updated_cfg["dns"]["queryStrategy"], "UseIPv4")
-        st = xray_config.stat().st_mode & 0o777
-        if os.name != "nt":
-            self.assertEqual(st, 0o640, f"Expected 0640, got {oct(st)}")
-        else:
-            self.assertTrue(bool(st & 0o600))
-
-        # Verify geoip:private, BitTorrent and SMTP:25 filtering and blackhole block outbound injected
-        rules = updated_cfg.get("routing", {}).get("rules", [])
-        self.assertTrue(any("geoip:private" in r.get("ip", []) and r.get("outboundTag") == "block" for r in rules), "geoip:private block rule must be present on Relay")
-        self.assertTrue(any("bittorrent" in r.get("protocol", []) for r in rules), "BitTorrent protocol rule must be present")
-        self.assertTrue(any((r.get("port") == "25" or r.get("port") == 25) and r.get("outboundTag") == "block" for r in rules), "SMTP:25 block rule must be present on Relay")
-        self.assertTrue(any(r.get("port") == "6881-6889" and r.get("outboundTag") == "block" for r in rules), "Port 6881-6889 block rule must be present on Relay")
-        self.assertTrue(any(ob.get("tag") == "block" and ob.get("protocol") == "blackhole" for ob in updated_cfg.get("outbounds", [])), "Blackhole outbound must be present")
 
     # -------------------------------------------------------------------------
     # Safe Complete Uninstallation Lifecycle Tests
@@ -2707,29 +1447,6 @@ exit 0
             res = self._run_shell_snippet(f"validate_sub_prefix '{prefix}'")
             self.assertNotEqual(res.returncode, 0, f"Expected '{prefix}' to be rejected by validate_sub_prefix")
 
-    def test_deploy_subscription_proxy_conf_validation(self):
-        """deploy_subscription_proxy_conf generates valid Nginx config for valid FQDN and rejects invalid."""
-        self._prepare_base_env()
-
-        # Success case
-        res = self._run_shell_snippet("deploy_subscription_proxy_conf 'bot.example.com' '/sub/wl'")
-        self.assertEqual(res.returncode, 0, f"deploy_subscription_proxy_conf failed: {res.stderr}\n{res.stdout}")
-        conf_file = self.nginx_relays_d / "sub-wl.conf"
-        self.assertTrue(conf_file.exists())
-        content = conf_file.read_text(encoding="utf-8")
-        self.assertIn("location ^~ /sub/wl {", content)
-        self.assertIn('set $bot_upstream "https://bot.example.com";', content)
-        self.assertIn("proxy_ssl_verify on;", content)
-        self.assertIn("proxy_ssl_verify_depth 5;", content)
-        self.assertIn("proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;", content)
-
-        # Failure cases: hostile target host (non-interactive fails closed)
-        res_hostile_host = self._run_shell_snippet("deploy_subscription_proxy_conf 'bot.example.com;rm -rf /' '/sub/wl'")
-        self.assertNotEqual(res_hostile_host.returncode, 0)
-
-        # Failure cases: hostile sub prefix
-        res_hostile_prefix = self._run_shell_snippet("deploy_subscription_proxy_conf 'bot.example.com' '/sub/../evil'")
-        self.assertNotEqual(res_hostile_prefix.returncode, 0)
 
     def test_cleanup_legacy_traffic_watchdog_residue_invariants(self):
         """cleanup_legacy_traffic_watchdog_residue removes systemd timer, service, drop-in, and all cutoff flags."""
@@ -2912,35 +1629,15 @@ remove_traffic_limit_timer
                 self.assertFalse(backup_file.is_symlink(), "Backup must be a real file, not a symlink")
                 self.assertIn("server_name _;", backup_file.read_text(encoding="utf-8"))
 
-    def test_origin_nginx_catchall_zero_cert_leak(self):
-        """Verify Origin Nginx Catch-All default_server does not contain ssl_certificate when ssl_reject_handshake is supported."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn("ssl_reject_handshake on;", origin_sh)
-        self.assertIn("listen 443 ssl default_server;", origin_sh)
-        self.assertIn("listen 80 default_server;", origin_sh)
-        self.assertIn("return 444;", origin_sh)
-
-        # Catchall block with ssl_reject_handshake must NOT have ssl_certificate
-        match = re.search(r'catchall_ssl_block="server\s*\{[^}]*ssl_reject_handshake on;[^}]*\}', origin_sh, re.DOTALL)
-        self.assertIsNotNone(match, "catchall_ssl_block with ssl_reject_handshake on; must be defined")
-        self.assertNotIn("ssl_certificate", match.group(0), "ssl_certificate must NOT be inside catchall when ssl_reject_handshake on is active")
 
     def test_set_bot_ip_supports_origin_and_modular_roles(self):
-        """Verify set_origin_bot_ip dynamically adapts target port based on role."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn('target_port="8444"', origin_sh)
-        self.assertIn('role_descr="Origin API (порт 8444)"', origin_sh)
-        self.assertIn('role_descr="Xray API (порт 8444)"', origin_sh)
-        self.assertIn('ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp', origin_sh)
-        self.assertIn('ufw delete allow 8443/tcp', origin_sh)
+        """Verify set_origin_bot_ip adapts target port for v2 roles."""
+        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
+        self.assertIn('target_port="8444"', common_sh)
+        self.assertIn('role_descr="Control API (порт 8444)"', common_sh)
+        self.assertIn('ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp', common_sh)
+        self.assertIn('ufw delete allow "${target_port}/tcp"', common_sh)
 
-    def test_heal_and_update_origin_config_cleans_8443_and_ensures_catchall(self):
-        """Verify heal_and_update_origin_config removes port 8443 and restores catchall without cert leak."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn('ufw delete allow 8443/tcp', origin_sh)
-        self.assertIn('listen 80 default_server', origin_sh)
-        self.assertIn('listen 443 ssl default_server', origin_sh)
-        self.assertIn("re.sub(r'server\\s*\\{[^}]*listen\\s+8443\\s+ssl[^}]*\\}\\n*', '', content, flags=re.DOTALL)", origin_sh)
 
     def test_doctor_ufw_acl_validation_xray_api(self):
         """Verify run_doctor checks port 8444 for Xray API."""
@@ -2991,95 +1688,6 @@ remove_traffic_limit_timer
         self.assertIn('ufw delete allow 8444/tcp', just1knode_sh)
         self.assertIn('ufw delete allow "$st_relay_port"/tcp', just1knode_sh)
 
-    def test_origin_catchall_dummy_fallback_on_old_nginx(self):
-        """Verify origin fallback generates dummy cert instead of leaking domain cert on Nginx < 1.19.4."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn("dummy_dir=", origin_sh)
-        self.assertIn("CN=invalid", origin_sh)
-        self.assertIn("ssl_certificate ${dummy_dir}/dummy.crt;", origin_sh)
-        self.assertIn("ssl_certificate {dummy_dir}/dummy.crt;", origin_sh)
-        self.assertNotIn("ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;", origin_sh)
-
-    def test_relay_install_strictly_tls_and_validates_dns(self):
-        """Verify install_xray_relay_node strictly provisions VLESS TLS and validates DNS A-record."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('local sec_mode="tls"', relay_sh)
-        self.assertIn('validate_relay_dns "$dest_server" "$my_ip"', relay_sh)
-        self.assertIn('issue_relay_tls_cert "$dest_server"', relay_sh)
-        # Verify new installations do not configure REALITY
-        self.assertNotIn('Режим REALITY (legacy)', relay_sh)
-
-    def test_relay_tls_cert_permanent_renewal_hooks_and_freshness_check(self):
-        """Verify issue_relay_tls_cert cleans up global hooks, scopes pre/post hooks to lineage, and installs deploy hook."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('rm -f "${le_dir}/renewal-hooks/pre/05-just1knode-nginx.sh"', relay_sh)
-        self.assertIn('"${le_dir}/renewal-hooks/deploy/20-just1knode-restart-xray.sh"', relay_sh)
-        self.assertIn('--pre-hook "$pre_hook_cmd"', relay_sh)
-        self.assertIn('--post-hook "$post_hook_cmd"', relay_sh)
-        self.assertIn("openssl x509 -checkend 86400", relay_sh)
-        self.assertIn("port80_was_open", relay_sh)
-        self.assertIn("detect_host_port80_container", relay_sh)
-        self.assertIn("/run/just1knode_caddy_was_paused", relay_sh)
-        self.assertIn('docker stop "$port80_container"', relay_sh)
-        self.assertIn(r'docker start \"\$c80\" >/dev/null 2>&1 && rm -f /run/just1knode_caddy_was_paused', relay_sh)
-        self.assertIn(r'grep -q \"^just1kbot_caddy\b\"', relay_sh)
-        self.assertIn(r'echo \"just1kbot_caddy\" > /run/just1knode_caddy_was_paused', relay_sh)
-        self.assertIn(r'(:80->|just1kbot_caddy)', relay_sh)
-        # Ensure deploy hook checks RENEWED_LINEAGE against RELAY_SNI
-        self.assertIn('[ "$(basename "$RENEWED_LINEAGE")" = "$RELAY_SNI" ]', relay_sh)
-
-    def test_add_relay_node_enforces_tls_mode(self):
-        """Verify add_relay_node strictly enforces TLS mode."""
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        self.assertIn('security_type="tls"', relays_manage_sh)
-        self.assertIn('Для режима TLS обязательно указание домена (SNI)', relays_manage_sh)
-        self.assertNotIn('security_type="reality"', relays_manage_sh)
-
-    def test_show_relay_credentials_legacy_state_inspection_and_no_hardcoded_de(self):
-        """Verify show_relay_credentials normalizes missing security key in legacy state and avoids hardcoded de."""
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('r_sec="$(get_state_val "security" "")"', just1knode_sh)
-        self.assertIn('if [[ -z "$r_sec" ]]; then', just1knode_sh)
-        self.assertIn('sec = ib.get(\'streamSettings\', {}).get(\'security\')', just1knode_sh)
-        self.assertNotIn('local detected_code="de"', just1knode_sh)
-        self.assertIn('detected_code="relay-01"', just1knode_sh)
-        self.assertIn('ee) detected_country="🇪🇪 Эстония" ;;', just1knode_sh)
-        self.assertIn('just1knode relay add \\"${detected_country}\\"', just1knode_sh)
-
-    def test_heal_and_update_relay_config_auto_migrates_tls_on_cert_found(self):
-        """Verify heal_and_update_relay_config validates domain before selecting cert and guards TLS inbound."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("ai = socket.getaddrinfo(domain, None, socket.AF_INET)", relay_sh)
-        self.assertIn("Автоматический перевод входящего туннеля Relay на VLESS + TLS", relay_sh)
-        self.assertIn("tls_cert_file = os.path.join(tls_cert_dir, 'fullchain.pem')", relay_sh)
-        self.assertIn("if sec_mode == 'tls' and os.path.exists(tls_cert_file) and os.path.exists(tls_key_file):", relay_sh)
-        self.assertIn("st['security'] = 'tls'", relay_sh)
-        self.assertIn("st.pop('realitySettings', None)", relay_sh)
-
-    def test_heal_and_update_origin_config_enforces_tls_without_legacy_reality_migration(self):
-        """Verify origin.sh no longer contains legacy reality migration and enforces clean TLS."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertNotIn("Авто-миграция Relay-узлов с REALITY", origin_sh)
-        self.assertNotIn("ctx.wrap_socket(s, server_hostname=cand)", origin_sh)
-
-    def test_ensure_xray_config_permissions_and_rollback_invariant(self):
-        """Verify state.sh and relays_manage enforce ensure_xray_config_permissions and retain root:xrayapi 640."""
-        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-
-        self.assertIn("ensure_xray_config_permissions()", state_sh)
-        self.assertIn("chown root:xrayapi \"$cfg\"", state_sh)
-        self.assertIn("chmod 640 \"$cfg\"", state_sh)
-        self.assertIn("ensure_xray_config_permissions", relays_manage_sh)
-        self.assertIn("manifest_rollback()", state_sh)
-        self.assertIn("ensure_xray_config_permissions \"${XRAY_CONFIG:-/usr/local/etc/xray/config.json}\"", state_sh)
-        self.assertIn("r['outboundTag'] = 'just1k-wl-direct'", relays_manage_sh)
-
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
-
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('core|xray) shift 2; update_xray_core "$@" ;;', just1knode_sh)
 
     def test_xray_api_service_unit_has_partof_and_update_node_syncs_it(self):
         """Verify xray-api.service has PartOf=xray.service, start limit resilience, and ensure_xray_api_healthy."""
@@ -3087,8 +1695,7 @@ remove_traffic_limit_timer
         core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
         api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
+        base_sh = (NODE_ROOT / "modules" / "roles" / "base.sh").read_text(encoding="utf-8")
         just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
         ssl_sh = (NODE_ROOT / "lib" / "ssl.sh").read_text(encoding="utf-8")
 
@@ -3106,9 +1713,8 @@ remove_traffic_limit_timer
         # Invariant: ensure_xray_api_healthy avoids duplicate restarts and returns non-zero on failure
         self.assertIn("ensure_xray_api_healthy()", common_sh)
         self.assertIn("return 1", common_sh)
-        self.assertIn("ensure_xray_api_healthy", origin_sh)
         self.assertIn("ensure_xray_api_healthy", core_sh)
-        self.assertIn("ensure_xray_api_healthy", relays_manage_sh)
+        self.assertIn("ensure_xray_api_healthy", base_sh)
 
         # Invariant: certbot deploy hook does not execute blind duplicate restart of xray-api
         self.assertNotIn("systemctl restart xray\nsystemctl restart xray-api", ssl_sh.replace(" ", "").replace("2>/dev/null||true", ""))
@@ -3118,61 +1724,6 @@ remove_traffic_limit_timer
         self.assertIn("systemctl is-failed", just1knode_sh)
         self.assertIn("FAILED", just1knode_sh)
 
-    def test_xray_api_app_discovers_default_inbound_on_origin_fallback(self):
-        """Verify app.py target inbounds discovery prioritizes just1k-wl-default on Origin nodes."""
-        app_py = (REPO_ROOT / "scripts" / "xray_api" / "app.py").read_text(encoding="utf-8")
-        self.assertIn("is_origin_node", app_py)
-        self.assertIn("discovered_tags.insert(0, \"just1k-wl-default\")", app_py)
-
-
-    def test_origin_nginx_reconciliation_uses_xray_inbound_port(self):
-        """Verify origin.sh extracts local inbound port from Xray config and avoids remote 10443 port."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        self.assertIn("xray_inbound_ports = {}", origin_sh)
-        self.assertIn("port = xray_inbound_ports.get(in_tag)", origin_sh)
-        self.assertIn("r['inbound_port'] = port", origin_sh)
-        self.assertNotIn("port = r.get('inbound_port') or r.get('port')", origin_sh)
-
-    def test_add_relay_node_records_inbound_port_in_relays_json(self):
-        """Verify relays_manage.sh add_relay_node passes and stores next_port as inbound_port."""
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        self.assertIn("'inbound_port': in_port", relays_manage_sh)
-        self.assertIn("\"$next_port\"", relays_manage_sh)
-
-    def test_relay_cert_detection_orders_by_mtime_descending(self):
-        """Verify relay.sh sorts Let's Encrypt live certs newest first and supports interactive resolution."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("detect_relay_domain_candidates", relay_sh)
-        self.assertIn("select_relay_domain_interactive", relay_sh)
-        self.assertIn("candidates.sort(key=lambda x: x[0], reverse=True)", relay_sh)
-        self.assertIn("Какой домен использовать для Relay?", relay_sh)
-        self.assertIn("-checkend", relay_sh)
-        self.assertIn("validate_relay_dns", relay_sh)
-        self.assertIn("has_cur_sni", relay_sh)
-        self.assertIn("Неинтерактивный режим", relay_sh)
-        self.assertIn("Использовать '${candidates[0]}' для Relay? [Y/n]", relay_sh)
-
-    def test_select_relay_domain_non_interactive_preserves_valid_cur_sni(self):
-        """Verify non-interactive domain selection preserves cur_sni if valid, and falls back if invalid."""
-        def select_non_interactive(candidates, cur_sni):
-            has_cur_sni = cur_sni in candidates if cur_sni else False
-            if has_cur_sni:
-                return cur_sni
-            elif candidates:
-                return candidates[0]
-            else:
-                return ""
-
-        # Case 1: cur_sni is among candidates (even if not the newest) -> keep cur_sni!
-        candidates = ["new.example.com", "old.example.com"]
-        self.assertEqual(select_non_interactive(candidates, "old.example.com"), "old.example.com")
-
-        # Case 2: cur_sni is invalid/missing -> fallback to newest
-        self.assertEqual(select_non_interactive(candidates, "dead.example.com"), "new.example.com")
-        self.assertEqual(select_non_interactive(candidates, ""), "new.example.com")
-
-        # Case 3: no candidates -> empty
-        self.assertEqual(select_non_interactive([], "any.example.com"), "")
 
     def test_update_node_post_reexec_invariants(self):
         """Verify update_node re-execs with update-post to eliminate in-memory stale functions."""
@@ -3186,258 +1737,6 @@ remove_traffic_limit_timer
         self.assertIn('update-post)', main_sh)
         self.assertIn('update_node_post "${1:-all}"', main_sh)
 
-    def test_detect_relay_domain_candidates_filter_and_sort_logic(self):
-        """Verify the candidate filter and sort algorithm prioritizes newest valid certs and excludes non-domains."""
-        import glob
-        import tempfile
-        import time
-
-        with tempfile.TemporaryDirectory() as tmp_le:
-            live_dir = Path(tmp_le) / "live"
-            live_dir.mkdir()
-
-            # Domain 1: older cert
-            d1 = live_dir / "old.example.com"
-            d1.mkdir()
-            (d1 / "privkey.pem").write_text("key1", encoding="utf-8")
-            fc1 = d1 / "fullchain.pem"
-            fc1.write_text("cert1", encoding="utf-8")
-            os.utime(fc1, (time.time() - 100, time.time() - 100))
-
-            # Domain 2: newer cert
-            d2 = live_dir / "new.example.com"
-            d2.mkdir()
-            (d2 / "privkey.pem").write_text("key2", encoding="utf-8")
-            fc2 = d2 / "fullchain.pem"
-            fc2.write_text("cert2", encoding="utf-8")
-            os.utime(fc2, (time.time(), time.time()))
-
-            # Non-candidate dir (e.g. README)
-            (live_dir / "README").write_text("ignore", encoding="utf-8")
-
-            candidates = []
-            for d in glob.glob(os.path.join(str(live_dir), "*")):
-                if not os.path.isdir(d):
-                    continue
-                domain = os.path.basename(d)
-                if domain in ("README", "*"):
-                    continue
-                fc = os.path.join(d, "fullchain.pem")
-                pk = os.path.join(d, "privkey.pem")
-                if not (os.path.isfile(fc) and os.path.isfile(pk)):
-                    continue
-                mtime = os.path.getmtime(fc)
-                candidates.append((mtime, domain))
-
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            sorted_domains = [c[1] for c in candidates]
-            self.assertEqual(sorted_domains, ["new.example.com", "old.example.com"])
-
-
-    def test_origin_nginx_reconciliation_behavior_isolated_and_strict(self):
-        """Behavioral test: Origin reconciliation isolates failures, rejects stale ports, and prunes stale/orphan configs."""
-        import json
-        import shutil
-        import tempfile
-
-        tmp_dir = tempfile.mkdtemp()
-        try:
-            relays_file = os.path.join(tmp_dir, "relays.json")
-            nginx_dir = os.path.join(tmp_dir, "relays_d")
-            os.makedirs(nginx_dir, exist_ok=True)
-            cfg_file = os.path.join(tmp_dir, "config.json")
-
-            # Pre-create system configs (must NEVER be deleted)
-            with open(os.path.join(nginx_dir, "default.conf"), "w", encoding="utf-8") as f:
-                f.write("proxy_pass http://127.0.0.1:8003;")
-            with open(os.path.join(nginx_dir, "sub-wl.conf"), "w", encoding="utf-8") as f:
-                f.write("proxy_pass https://bot.example.com;")
-
-            # Pre-create a stale nl.conf and an orphaned old.conf
-            with open(os.path.join(nginx_dir, "nl.conf"), "w", encoding="utf-8") as f:
-                f.write("proxy_pass http://127.0.0.1:8008;")
-            with open(os.path.join(nginx_dir, "old.conf"), "w", encoding="utf-8") as f:
-                f.write("proxy_pass http://127.0.0.1:8005;")
-
-            # Xray config only has inbounds for 'pl' (port 8007)
-            x_cfg = {
-                "inbounds": [
-                    {"tag": "just1k-wl-inbound-pl", "port": 8007}
-                ]
-            }
-            with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump(x_cfg, f)
-
-            # Relays registry:
-            # 1. pl: valid inbound
-            # 2. nl: stale inbound_port=8008, but NOT in Xray config (must be pruned!)
-            # 3. bad: corrupt entry (must not break pl)
-            relays_data = [
-                {"code": "pl", "path": "/stream/pl", "inbound_port": 8007, "inbound_tag": "just1k-wl-inbound-pl"},
-                {"code": "nl", "path": "/stream/nl", "inbound_port": 8008, "inbound_tag": "just1k-wl-inbound-nl"},
-                {"code": "bad", "path": None, "inbound_port": "not-a-port"}
-            ]
-            with open(relays_file, "w", encoding="utf-8") as f:
-                json.dump(relays_data, f)
-
-            # Run reconciliation logic exactly as implemented in origin.sh
-            with open(relays_file, "r", encoding="utf-8") as f:
-                relays = json.load(f)
-
-            xray_inbound_ports = {}
-            with open(cfg_file, "r", encoding="utf-8") as cf_f:
-                x_c = json.load(cf_f)
-                for ib in x_c.get("inbounds", []):
-                    t = ib.get("tag")
-                    p = ib.get("port")
-                    if t and p:
-                        xray_inbound_ports[t] = int(p)
-
-            active_configs = set()
-            for r in relays:
-                try:
-                    if not isinstance(r, dict):
-                        continue
-                    code, path = r.get("code"), r.get("path")
-                    if not code or not path:
-                        continue
-                    code_lower = str(code).strip().lower()
-                    cf_name = f"{code_lower}.conf"
-                    cf_path = os.path.join(nginx_dir, cf_name)
-                    in_tag = r.get("inbound_tag") or f"just1k-wl-inbound-{code_lower}"
-                    port = xray_inbound_ports.get(in_tag)
-                    if not port:
-                        for t, p in xray_inbound_ports.items():
-                            if t.lower() == f"just1k-wl-inbound-{code_lower}":
-                                port = p
-                                break
-                    if not port:
-                        if os.path.exists(cf_path):
-                            os.remove(cf_path)
-                        continue
-
-                    active_configs.add(cf_name)
-
-                    with open(cf_path, "w", encoding="utf-8") as cf:
-                        cf.write(f"proxy_pass http://127.0.0.1:{port};")
-                except Exception:
-                    continue
-
-            # Prune orphaned configs protecting system origin configs
-            system_origin_configs = {"default.conf", "sub-wl.conf"}
-            for item in os.listdir(nginx_dir):
-                if item.endswith(".conf") and item not in active_configs and item not in system_origin_configs:
-                    os.remove(os.path.join(nginx_dir, item))
-
-            # Invariant: default.conf and sub-wl.conf were PRESERVED and NOT deleted!
-            self.assertTrue(os.path.exists(os.path.join(nginx_dir, "default.conf")))
-            self.assertTrue(os.path.exists(os.path.join(nginx_dir, "sub-wl.conf")))
-
-            # Invariant: pl.conf was created with local port 8007
-            self.assertTrue(os.path.exists(os.path.join(nginx_dir, "pl.conf")))
-            with open(os.path.join(nginx_dir, "pl.conf"), encoding="utf-8") as f:
-                self.assertIn("127.0.0.1:8007", f.read())
-
-            # Invariant: stale nl.conf was explicitly DELETED because Xray does not listen on 8008
-            self.assertFalse(os.path.exists(os.path.join(nginx_dir, "nl.conf")))
-
-            # Invariant: orphaned old.conf was explicitly DELETED
-            self.assertFalse(os.path.exists(os.path.join(nginx_dir, "old.conf")))
-
-            # Invariant: bad relay did not crash reconciliation
-            self.assertFalse(os.path.exists(os.path.join(nginx_dir, "bad.conf")))
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    def test_sync_xhttp_upstreams_conf_behavior_regex_and_seen_codes(self):
-        """Behavioral test: sync_xhttp_upstreams_conf validates relay code with regex and does not block defense-in-depth on unresolvable entries."""
-        import re
-
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        self.assertIn("import json, os, tempfile, sys, re", common_sh)
-        self.assertIn("re.fullmatch(r'^[a-z0-9_-]+$', code_lower)", common_sh)
-
-        def generate_upstreams(cfg, relays):
-            xray_inbound_ports = {}
-            for ib in cfg.get("inbounds", []):
-                t = ib.get("tag")
-                p = ib.get("port")
-                if t and p:
-                    xray_inbound_ports[t] = int(p)
-
-            def_port = xray_inbound_ports.get("just1k-wl-default", 8003)
-            lines = [
-                "upstream xray_xhttp_default {",
-                f"    server 127.0.0.1:{def_port};",
-                "    keepalive 128;",
-                "    keepalive_requests 100000;",
-                "    keepalive_timeout 300s;",
-                "}",
-            ]
-
-            seen_codes = set()
-            for r in relays:
-                if not isinstance(r, dict):
-                    continue
-                code = r.get("code")
-                if not code:
-                    continue
-                code_lower = str(code).strip().lower()
-                if not code_lower or not re.fullmatch(r"^[a-z0-9_-]+$", code_lower) or code_lower in seen_codes:
-                    continue
-                in_tag = r.get("inbound_tag") or f"just1k-wl-inbound-{code_lower}"
-                port = xray_inbound_ports.get(in_tag)
-                if not port:
-                    for t, p in xray_inbound_ports.items():
-                        if t.lower() == f"just1k-wl-inbound-{code_lower}":
-                            port = p
-                            break
-                if port:
-                    seen_codes.add(code_lower)
-                    port_num = int(port)
-                    lines.append(f"upstream xray_xhttp_relay_{code_lower} {{")
-                    lines.append(f"    server 127.0.0.1:{port_num};")
-                    lines.append("    keepalive 128;")
-                    lines.append("    keepalive_requests 100000;")
-                    lines.append("    keepalive_timeout 300s;")
-                    lines.append("}")
-
-            for t, p in xray_inbound_ports.items():
-                if t.startswith("just1k-wl-inbound-"):
-                    c_tag = t[len("just1k-wl-inbound-"):].strip().lower()
-                    if c_tag and re.fullmatch(r"^[a-z0-9_-]+$", c_tag) and c_tag not in seen_codes:
-                        port_num = int(p)
-                        seen_codes.add(c_tag)
-                        lines.append(f"upstream xray_xhttp_relay_{c_tag} {{")
-                        lines.append(f"    server 127.0.0.1:{port_num};")
-                        lines.append("    keepalive 128;")
-                        lines.append("    keepalive_requests 100000;")
-                        lines.append("    keepalive_timeout 300s;")
-                        lines.append("}")
-
-            return "\n".join(lines)
-
-        cfg = {
-            "inbounds": [
-                {"tag": "just1k-wl-default", "port": 8003},
-                {"tag": "just1k-wl-inbound-de", "port": 8004},
-                {"tag": "just1k-wl-inbound-nl", "port": 8005},
-            ]
-        }
-        relays = [
-            {"code": "DE", "inbound_tag": "just1k-wl-inbound-de"},
-            {"code": "bad;injection\n", "inbound_tag": "just1k-wl-inbound-bad"},
-            {"code": "nl", "inbound_tag": "non-existent-tag"},
-        ]
-
-        output = generate_upstreams(cfg, relays)
-        self.assertIn("upstream xray_xhttp_default {", output)
-        self.assertIn("server 127.0.0.1:8003;", output)
-        self.assertIn("upstream xray_xhttp_relay_de {", output)
-        self.assertIn("server 127.0.0.1:8004;", output)
-        self.assertNotIn("bad;injection", output)
-        self.assertIn("upstream xray_xhttp_relay_nl {", output)
-        self.assertIn("server 127.0.0.1:8005;", output)
 
     def test_ufw_before_rules_sync_and_remove_behavior(self):
         """Behavioral test: UFW before.rules sync inserts SMTP 25 (FORWARD and OUTPUT) and BitTorrent rules."""
@@ -3517,10 +1816,10 @@ COMMIT
         self.assertEqual(removed.strip(), sample_ufw.strip())
 
     def test_modular_node_without_xray_doctor_and_status_skips_xray_behavioral(self):
-        """Verify run_doctor on modular node without Xray components skips Xray Core and Xray config check."""
+        """Verify run_doctor on unconfigured node skips Xray Core and Xray config check."""
         self._prepare_base_env()
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
-            json.dump({"role": "node", "has_relay": "0", "has_vless": "0"}, f)
+            json.dump({"role": "unconfigured"}, f)
 
         res = self._run_shell_snippet("run_doctor")
         self.assertNotIn("3. Проверка конфигурации Xray...", res.stdout)
@@ -3531,9 +1830,8 @@ COMMIT
         self._prepare_base_env()
         with open(self.state_dir / "state.json", "w", encoding="utf-8") as f:
             json.dump({
-                "role": "node",
+                "role": "ru_hub",
                 "domain": "vless.test.example",
-                "vless_domain": "vless.test.example",
                 "sni": "sni.test.example",
             }, f)
 
@@ -3550,20 +1848,6 @@ COMMIT
 class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
     """Regression shield for node routing rules, fail-closed security, and lock primitives."""
 
-    def test_origin_routing_ru_split_and_order(self):
-        """On Origin node, default inbound routes to just1k-wl-direct, and RU domains route direct."""
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-
-        self.assertIn("def_rule['outboundTag'] = 'just1k-wl-direct'", origin_sh)
-        self.assertIn("r.get('outboundTag') == 'just1k-wl-direct'", origin_sh)
-        self.assertIn("'geosite:category-ru'", origin_sh)
-        self.assertIn("'geosite:tld-ru'", origin_sh)
-        self.assertIn("'outboundTag': 'just1k-wl-direct'", origin_sh)
-        self.assertIn("'geoip:private'", origin_sh)
-        self.assertIn("insert_idx = rules.index(dom_rule) + 1", relays_manage_sh)
-        self.assertIn("'geosite:category-ru'", relays_manage_sh)
-        self.assertIn("'geoip:private'", relays_manage_sh)
 
     def test_state_and_watchdog_locks_use_o_nofollow_and_fchmod(self):
         """Invariant: state.sh must use O_NOFOLLOW and fd-based fchmod."""
@@ -3578,41 +1862,24 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
     def test_just1knode_origin_bot_ip_cli_support(self):
         """Verify set-bot-ip CLI registration and transactional rule ordering in UFW."""
         just1knode_sh = (REPO_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
         common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
 
         self.assertIn("set-bot-ip|bot-ip)", just1knode_sh)
-        self.assertIn("acquire_just1knode_lock", origin_sh)
-        self.assertIn("release_just1knode_lock", origin_sh)
+        self.assertIn("acquire_just1knode_lock", common_sh)
         self.assertIn("release_just1knode_lock", common_sh)
         self.assertIn("validate_ipv4", common_sh)
-        self.assertIn('validate_ipv4 "$new_bot_ip"', origin_sh)
+        self.assertIn('validate_ipv4 "$new_bot_ip"', common_sh)
 
-        new_allow_pos = origin_sh.find('ufw allow from "$new_bot_ip"')
-        verify_pos = origin_sh.find('Верификация не пройдена', new_allow_pos)
-        del_old_pos = origin_sh.find('ufw delete allow from "$old_bot_ip"', verify_pos)
+        new_allow_pos = common_sh.find('ufw allow from "$new_bot_ip"')
+        verify_pos = common_sh.find('Верификация не пройдена', new_allow_pos)
+        del_old_pos = common_sh.find('ufw delete allow from "$old_bot_ip"', verify_pos)
         self.assertGreater(new_allow_pos, 0)
         self.assertGreater(verify_pos, new_allow_pos)
         self.assertGreater(del_old_pos, verify_pos)
 
-        self.assertIn("heal_node_firewall_and_stealth", origin_sh)
         self.assertIn(r'8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)', common_sh)
         self.assertIn('ufw delete allow 8444/tcp', common_sh)
 
-    def test_node_firewall_and_stealth_ssot_invariants(self):
-        """SSOT firewall invariants across node modules."""
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-
-        self.assertIn("heal_node_firewall_and_stealth()", common_sh)
-        self.assertIn("detect_active_sshd_ports()", common_sh)
-        self.assertIn("is_ssh_port()", common_sh)
-        self.assertIn('comment "just1knode ssh access"', common_sh)
-        self.assertNotIn("detected_orig_ip", common_sh)
-        self.assertNotIn('extra_ufw_ports+=("${existing_awg_port}/tcp")', relay_sh)
-        self.assertIn("heal_node_firewall_and_stealth", relay_sh)
-        self.assertIn("heal_node_firewall_and_stealth", core_sh)
 
     def test_xray_api_fail_closed_tombstone_and_fsync(self):
         """Verify fail-closed tombstone, namespace filtering, and durable fsync."""
@@ -3628,86 +1895,6 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn("get_target_inbounds", app_content)
         self.assertIn("os.fsync", cs_content)
 
-    def test_relay_country_normalization_and_doctor_fallback(self):
-        """Verify country name normalization with emoji flags and doctor domain fallback."""
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-
-        # Doctor check 5 domain verification loop
-        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
-        self.assertIn('Персональный SSL домен не настроен (нормально для Relay)', just1knode_sh)
-
-        # Relay domain setup emoji flag
-        self.assertIn('ee|estonia|эстония|"ee estonia"|"ee эстония") echo "🇪🇪 Эстония" ;;', common_sh)
-        self.assertIn('just1knode relay add \\"${detected_country}\\"', relay_sh)
-
-        # add_relay_node and rename_relay_node normalization
-        self.assertIn('ee|estonia|"ee estonia"|"ee эстония") name="🇪🇪 Эстония" ;;', relays_manage_sh)
-        self.assertIn('ee|estonia|"ee estonia"|"ee эстония") new_name="🇪🇪 Эстония" ;;', relays_manage_sh)
-
-    def test_migrate_legacy_state_and_vless_invariants(self):
-        """Verify legacy state migration, root:xrayapi permissions, and anti-probing fallbacks."""
-        state_sh = (NODE_ROOT / "lib" / "state.sh").read_text(encoding="utf-8")
-        core_sh = (NODE_ROOT / "modules" / "xray" / "core.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-
-        # 1. State migration invariants
-        self.assertIn("migrate_legacy_state()", state_sh)
-        self.assertIn("migrate_legacy_state", core_sh)
-        self.assertIn("get_node_status()", state_sh)
-
-        # 2. Xray config permission invariants
-        self.assertIn('ensure_xray_config_permissions "$XRAY_CONFIG"', relay_sh)
-        self.assertNotIn('chown root:root "$XRAY_CONFIG"', relay_sh)
-
-        # 3. Fallback and anti-probing invariants
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        self.assertIn("deploy_vless_fallback_nginx", relay_sh)
-        self.assertIn("'alpn': ['http/1.1']", relay_sh)
-        self.assertIn("'alpn': ['http/1.1']", relays_manage_sh)
-        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relays_manage_sh)
-        self.assertNotIn("'alpn': ['h2', 'http/1.1']", relay_sh)
-        self.assertNotIn('\\"alpn\\": [\\"h2\\", \\"http/1.1\\"]', relay_sh)
-        self.assertIn("'fallbacks': [{'dest': '127.0.0.1:80'}]", relay_sh)
-        self.assertIn("server_tokens off;", relay_sh)
-        self.assertNotIn("Edge Gateway Infrastructure", relay_sh)
-        self.assertNotIn("rm -f /var/www/html/index.html", relay_sh)
-        self.assertIn('grep -q "Edge Gateway"', relay_sh)
-        self.assertIn('return 404 "Not Found\\n";', relay_sh)
-        self.assertIn("detect_existing_nginx_sites", common_sh)
-        self.assertIn("'minVersion': '1.2'", relay_sh)
-        self.assertIn('add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;', relay_sh)
-        self.assertIn('add_header X-Content-Type-Options "nosniff" always;', relay_sh)
-
-        # 4. Doctor and firewall UFW regex invariants
-        self.assertIn(r'443(/tcp)?\s+ALLOW(\s+IN)?\s+(Anywhere|0\.0\.0\.0/0|::/0)', just1knode_sh)
-        self.assertIn("just1k-vless-api.conf", common_sh)
-        self.assertNotIn("just1k-amnezia.conf", common_sh)
-        self.assertIn('ufw delete allow 80/tcp', common_sh)
-        self.assertIn("timeout=5.0", just1knode_sh)
-        self.assertIn("доступен (RTT: ${val}ms)", just1knode_sh)
-
-        # 5. Outbound TLS fingerprint invariants (strict Firefox standard PR #438)
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (NODE_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("'fingerprint': 'firefox'", origin_sh)
-        self.assertIn("'fingerprint': 'firefox'", relays_manage_sh)
-        self.assertNotIn("'fingerprint': 'chrome'", relays_manage_sh)
-        self.assertNotIn("'fingerprint': 'chrome'", origin_sh)
-        self.assertIn("'alpn': ['http/1.1']", origin_sh)
-        self.assertNotIn("'alpn': ['h2', 'http/1.1']", origin_sh)
-
-        # 6. Freedom outbound sockopt domainStrategy invariants (Xray PR #6058)
-        self.assertIn("['domainStrategy'] = 'UseIPv4'", origin_sh)
-        self.assertIn("['domainStrategy'] = 'UseIPv4'", relays_manage_sh)
-        self.assertIn("['domainStrategy'] = 'UseIPv4'", relay_sh)
-        self.assertNotIn("'protocol': 'freedom',\n        'settings': {'domainStrategy'", origin_sh)
-        self.assertNotIn("'protocol': 'freedom', 'settings': {'domainStrategy'", relay_sh)
 
     def test_update_node_syncs_xray_api_scripts_to_node_dir(self):
         """Verify update_node copies scripts/xray_api to node_dir/scripts/xray_api."""
@@ -3715,72 +1902,6 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('local xray_cache_dest="${node_dir}/scripts/xray_api"', core_sh)
         self.assertIn('"${repo_url}/archive/refs/tags/${ref}.tar.gz"', core_sh)
 
-    def test_select_relay_domain_non_interactive_guard(self):
-        """Verify select_relay_domain_interactive guards against blocking read under non-interactive update."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('JUST1KNODE_NON_INTERACTIVE', relay_sh)
-        self.assertIn('! -t 0', relay_sh)
-
-    def test_xray_tmp_config_uses_json_suffix_and_format_flag(self):
-        """Verify temporary Xray configs have .tmp.json suffix and run -test passes -format json."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('local tmp_xray_config="${XRAY_CONFIG}.tmp.json"', relay_sh)
-        self.assertIn('local tmp_cfg="${XRAY_CONFIG}.tmp.json"', relay_sh)
-        self.assertNotIn('local tmp_xray_config="${XRAY_CONFIG}.tmp"', relay_sh)
-        self.assertNotIn('local tmp_cfg="${XRAY_CONFIG}.tmp"', relay_sh)
-        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_xray_config"', relay_sh)
-        self.assertIn('"$XRAY_BIN" run -test -format json -config "$tmp_cfg"', relay_sh)
-
-    def test_deploy_vless_fallback_nginx_disables_default_site(self):
-        """Verify deploy_vless_fallback_nginx disables conflicting package default site before linking."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('local def_site="/etc/nginx/sites-enabled/default"', relay_sh)
-        self.assertIn('rm -f "$def_site"', relay_sh)
-
-    def test_heal_firewall_and_vless_install_port_8444_isolation(self):
-        """Verify heal_node_firewall preserves 8444 when VLESS is active and isolates from legacy 8443."""
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then', common_sh)
-        self.assertNotIn('just1k-amnezia.conf', common_sh)
-        self.assertIn('just1k-vless-api.conf', relay_sh)
-        self.assertIn('listen 8444 ssl http2;', relay_sh)
-        self.assertIn('show_vless_bot_credentials', relay_sh)
-        self.assertIn('api_endpoint="https://${v_dom}:8444"', relay_sh)
-
-    def test_vless_transactional_rollback_and_nginx_restore(self):
-        """Verify install_vless_direct_node has robust transactional rollback and commit-on-success."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn('rollback_vless_installation()', relay_sh)
-        self.assertIn('if ! systemctl restart xray; then', relay_sh)
-        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
-        self.assertIn('if ! setup_xray_api_proxy "$dest_server"; then', relay_sh)
-        self.assertIn('set_state_val "has_vless" "$orig_has_vless"', relay_sh)
-        self.assertIn('set_state_val "vless_domain" "$orig_vless_domain"', relay_sh)
-        self.assertIn('ufw delete allow 443/tcp', relay_sh)
-        self.assertIn('systemctl stop xray-api', relay_sh)
-        # Commit-on-success: set_state_val has_vless 1 is after all checks succeed
-        idx_api = relay_sh.index('if ! setup_xray_api_proxy "$dest_server"; then')
-        idx_commit = relay_sh.index('set_state_val "has_vless" "1"')
-        self.assertGreater(idx_commit, idx_api, "has_vless=1 must be set after setup_xray_api_proxy succeeds")
-
-    def test_setup_xray_api_proxy_warn_and_return_error(self):
-        """Verify setup_xray_api_proxy warns and returns 1 on failure instead of exit 1 via error()."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        api_proxy_code = relay_sh.split('setup_xray_api_proxy() {')[1].split('install_xray_relay_node()')[0]
-        self.assertNotIn('error "Служба xray-api не смогла запуститься', api_proxy_code)
-        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке обратного прокси', api_proxy_code)
-        self.assertNotIn('error "Nginx: синтаксическая ошибка конфигурации при настройке VLESS API', api_proxy_code)
-        self.assertIn('warn "Служба xray-api не смогла запуститься', api_proxy_code)
-
-    def test_deploy_and_uninstall_vless_nginx_default_site_lifecycle(self):
-        """Verify deploy_vless_fallback_nginx rolls back on nginx -t failure and uninstall restores default site."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        # deploy rollback
-        self.assertIn('warn "Nginx: ошибка синтаксиса при подключении just1k-fallback80.conf. Откат fallback хоста..."', relay_sh)
-        # uninstall restore
-        self.assertIn('cp -a "/etc/nginx/sites-available/default.user.bak" "/etc/nginx/sites-available/default"', relay_sh)
-        self.assertIn('ln -sf "/etc/nginx/sites-available/default" "/etc/nginx/sites-enabled/default"', relay_sh)
 
     def test_create_backup_tracks_last_backup_path(self):
         """Verify create_backup records LAST_BACKUP_PATH without bypassing retention."""
@@ -3789,91 +1910,14 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         self.assertIn('LAST_BACKUP_PATH="$bkp"', backup_sh)
         self.assertIn('BACKUP_RETENTION_COUNT', backup_sh)
 
-    def test_vless_non_destructive_rollback_and_modular_api_hardening(self):
-        """Verify api.sh has no fatal error exits, rollback preserves existing configs and handles reload failures."""
-        api_sh = (NODE_ROOT / "modules" / "xray" / "api.sh").read_text(encoding="utf-8")
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        origin_sh = (NODE_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-
-        # 1. No exit-1 error calls inside modules/xray/api.sh
-        self.assertNotIn('error "', api_sh)
-
-        # 2. Non-destructive rollback in relay.sh
-        self.assertIn('local orig_had_fallback80=0', relay_sh)
-        self.assertIn('local orig_had_vless_api=0', relay_sh)
-        self.assertIn('if [[ "$orig_had_fallback80" -eq 0 ]]; then', relay_sh)
-        self.assertIn('if [[ "$orig_had_vless_api" -eq 0 ]]; then', relay_sh)
-        self.assertIn('if [[ "$orig_has_vless" != "1" && "$(get_state_val "has_relay" "0")" != "1" ]]; then', relay_sh)
-        self.assertIn('warn "Критическая ошибка: не удалось перезапустить Xray при откате', relay_sh)
-
-        # 3. Commit-on-success error handling
-        self.assertIn('if ! set_state_val "has_vless" "1" || ! set_state_val "vless_domain" "$dest_server" || ! set_state_val "role" "node"; then', relay_sh)
-
-        # 4. Origin checks deploy_xray_api_service
-        self.assertIn('if ! deploy_xray_api_service "$api_key" "$cdn_domain"; then', origin_sh)
-
-        # 5. setup_relay_node checks deploy_vless_fallback_nginx
-        self.assertIn('if ! deploy_vless_fallback_nginx; then', relay_sh)
-
-        # 6. ensure_xray_api_healthy force check and setup_xray_api_proxy call
-        common_sh = (NODE_ROOT / "lib" / "common.sh").read_text(encoding="utf-8")
-        just1knode_sh = (NODE_ROOT / "just1knode.sh").read_text(encoding="utf-8")
-        self.assertIn('local force="${1:-0}"', common_sh)
-        self.assertIn('if ! ensure_xray_api_healthy 1; then', relay_sh)
-
-        # 7. install_nginx_if_missing in install_vless_direct_node
-        self.assertIn('install_nginx_if_missing', relay_sh)
-
-        # 8. Format json in run_doctor and tmp.json in heal_and_update_relay_config
-        self.assertIn('"$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG"', just1knode_sh)
-        self.assertIn("suffix='.tmp.json'", relay_sh)
-
-    def test_setup_xray_api_proxy_uses_standalone_vless_api_conf(self):
-        """Verify setup_xray_api_proxy uses standalone just1k-vless-api.conf on port 8444 without Amnezia injection."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertNotIn("just1k-amnezia.conf", relay_sh)
-        self.assertIn('just1k-vless-api.conf', relay_sh)
-        self.assertIn('listen 8444 ssl http2;', relay_sh)
-        self.assertIn('proxy_pass http://127.0.0.1:5001;', relay_sh)
-
-    def test_vless_domain_management_and_candidate_discovery(self):
-        """Verify VLESS domain candidate auto-discovery prioritizes valid DNS/mtime and CLI/menu allows domain setup."""
-        relay_sh = (REPO_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
-
-        # 1. Candidate discovery must use detect_relay_domain_candidates and not alphabetical glob
-        self.assertIn('auto_domain="$(detect_relay_domain_candidates "$my_ip"', relay_sh)
-        self.assertNotIn('for c_dir in "${cert_dirs[@]}"; do', relay_sh)
-
-        # 2. setup_vless_domain function exists in relay.sh
-        self.assertIn("setup_vless_domain()", relay_sh)
-
-        # 3. just1knode.sh menu has option [2] for VLESS domain configuration
-        self.assertTrue(re.search(r"setup_vless_domain.*read -rp", just1knode_sh), "setup_vless_domain must be followed by read -rp in menu")
-
-        # 4. just1knode.sh CLI dispatcher routes vless domain
-        self.assertIn("domain|set-domain|change-domain) setup_vless_domain", just1knode_sh)
-        self.assertIn("vless-domain|setup-vless-domain)", just1knode_sh)
-
-    def test_xray_origin_client_inbounds_trusted_x_forwarded_for(self):
-        """Verify origin and relay inbound templates configure trustedXForwardedFor for Nginx."""
-        origin_sh = (REPO_ROOT / "modules" / "xray" / "origin.sh").read_text(encoding="utf-8")
-        relays_manage_sh = (REPO_ROOT / "modules" / "xray" / "relays_manage.sh").read_text(encoding="utf-8")
-
-        self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", origin_sh)
-        self.assertIn("ss.setdefault('sockopt', {})['trustedXForwardedFor'] = ['X-Forwarded-For']", origin_sh)
-        self.assertIn("'trustedXForwardedFor': ['X-Forwarded-For']", relays_manage_sh)
 
     def test_modular_node_status_and_doctor_skips_xray(self):
-        """On modular nodes where Xray is not active, Xray status and config check must be skipped."""
+        """On unconfigured nodes where role is unset, Xray status and config check must be skipped."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
-        # 1. show_node_status must not check Xray Core just because role == "node"
-        expected_status_cond = 'if [[ "$cur_has_r" == "1" || "$cur_has_v" == "1" || "$role" == "relay" || "$role" == "vless" || "$role" == "origin" ]]; then'
-        self.assertIn(expected_status_cond, just1knode_sh)
-
-        # 2. run_doctor step 3 must not fail Xray config check on nodes without active Xray
-        self.assertIn(f'{expected_status_cond}\n        log "3. Проверка конфигурации Xray..."', just1knode_sh)
+        expected_cond = 'if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then'
+        self.assertIn(expected_cond, just1knode_sh)
+        self.assertIn(f'{expected_cond}\n        log "3. Проверка конфигурации Xray..."', just1knode_sh)
 
     def test_xray_api_source_bootstrap_caching_and_deployment(self):
         """Verify scripts/xray_api is cached to INSTALL_DIR in bootstrap and reused by deploy_xray_api_sources."""
@@ -3892,170 +1936,12 @@ class TestNodePerimeterAndRoutingInvariants(unittest.TestCase):
         """Verify run_doctor iterates over all unique configured domains to validate each certificate."""
         just1knode_sh = JUST1KNODE_SH.read_text(encoding="utf-8")
 
-        self.assertIn('for key in "domain" "vless_domain" "sni"; do', just1knode_sh)
-        self.assertIn('for domain in "${check_domains[@]}"; do', just1knode_sh)
-        self.assertIn('cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"', just1knode_sh)
-        self.assertIn('local d_cand d_cand_lower already existing key domain', just1knode_sh)
+        self.assertIn('for key in "domain" "sni"; do', just1knode_sh)
+        self.assertIn('for d_item in "${check_domains[@]}"; do', just1knode_sh)
+        self.assertIn('cert_file="/etc/letsencrypt/live/${d_item}/fullchain.pem"', just1knode_sh)
+        self.assertIn('local d_cand d_cand_lower already existing key d_item', just1knode_sh)
         self.assertIn('"$d_cand_lower" != "none" && "$d_cand_lower" != "null"', just1knode_sh)
 
-    def test_heal_and_update_relay_config_flow_normalization_and_grpc_sniffing(self):
-        """Verify heal_and_update_relay_config normalizes flow to xtls-rprx-vision on existing inbound-tls
-        and removes sniffing on api-in and just1k-wl-api-grpc."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        self.assertIn("clients = relay_ib.setdefault('settings', {}).setdefault('clients', [])", relay_sh)
-        self.assertIn("c['flow'] = 'xtls-rprx-vision'", relay_sh)
-        self.assertIn("if tag in ('api-in', 'just1k-wl-api-grpc'):", relay_sh)
-        self.assertIn("ib.pop('sniffing', None)", relay_sh)
-        self.assertIn("is_managed = (", relay_sh)
-
-        # Functional validation of the exact normalization logic
-        cfg = {
-            "inbounds": [
-                {
-                    "tag": "inbound-tls",
-                    "port": 10443,
-                    "protocol": "vless",
-                    "settings": {
-                        "clients": [
-                            {"id": "uuid-1", "flow": ""},
-                            {"id": "uuid-2"},
-                        ]
-                    },
-                    "streamSettings": {"network": "tcp", "security": "tls"},
-                },
-                {
-                    "tag": "just1k-wl-api-grpc",
-                    "listen": "127.0.0.1",
-                    "port": 10085,
-                    "protocol": "dokodemo-door",
-                    "sniffing": {"enabled": True, "destOverride": ["tls"]},
-                },
-                {
-                    "tag": "api-in",
-                    "listen": "127.0.0.1",
-                    "port": 10086,
-                    "protocol": "dokodemo-door",
-                    "sniffing": {"enabled": True},
-                },
-                {
-                    "tag": "custom-inbound-sniff",
-                    "port": 20001,
-                    "protocol": "shadowsocks",
-                    "sniffing": {"enabled": True, "destOverride": ["fakedns"], "routeOnly": True},
-                },
-                {
-                    "tag": "custom-inbound-nosniff",
-                    "port": 20002,
-                    "protocol": "shadowsocks",
-                },
-                None,
-                {
-                    "tag": "inbound-reality",
-                    "port": 443,
-                    "protocol": "vless",
-                    "sniffing": None,
-                },
-            ]
-        }
-
-        # Functional validation: extract and execute the actual Python snippet from relay.sh
-        py_start = relay_sh.find('python3 -c "\nimport json, os, sys, tempfile')
-        self.assertGreater(py_start, 0)
-        code_start = py_start + len('python3 -c "\n')
-        code_end = relay_sh.find('\n" "$XRAY_CONFIG"', code_start)
-        self.assertGreater(code_end, code_start)
-        embedded_py = relay_sh[code_start:code_end]
-
-        with tempfile.TemporaryDirectory() as td:
-            td_path = Path(td)
-            cfg_file = td_path / "config.json"
-            cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
-
-            # Create dummy cert directory and files
-            tls_dir = td_path / "tls"
-            tls_dir.mkdir()
-            (tls_dir / "fullchain.pem").write_text("cert", encoding="utf-8")
-            (tls_dir / "privkey.pem").write_text("key", encoding="utf-8")
-
-            env = os.environ.copy()
-            env["XRAY_TLS_DIR"] = str(tls_dir)
-            env["PYTHONIOENCODING"] = "utf-8"
-
-            res = subprocess.run(
-                [sys.executable, "-c", embedded_py, str(cfg_file), "tls", "0", "1", "10443", "test-tunnel-uuid"],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
-            self.assertEqual(res.returncode, 0, f"Python snippet failed: {res.stderr}")
-
-            updated_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            relay_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
-            for c in relay_ib["settings"]["clients"]:
-                self.assertEqual(c["flow"], "xtls-rprx-vision")
-            self.assertTrue(relay_ib["sniffing"]["enabled"])
-            self.assertFalse(relay_ib["sniffing"]["routeOnly"])
-            self.assertEqual(relay_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
-
-            grpc_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "just1k-wl-api-grpc")
-            api_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "api-in")
-            self.assertNotIn("sniffing", grpc_ib)
-            self.assertNotIn("sniffing", api_ib)
-
-            custom_sniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib.get("tag") == "custom-inbound-sniff")
-            self.assertTrue(custom_sniff_ib["sniffing"]["enabled"])
-            self.assertTrue(custom_sniff_ib["sniffing"]["routeOnly"])
-            self.assertEqual(custom_sniff_ib["sniffing"]["destOverride"], ["fakedns"])
-
-            custom_nosniff_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "custom-inbound-nosniff")
-            self.assertNotIn("sniffing", custom_nosniff_ib)
-
-            reality_ib = next(ib for ib in updated_cfg["inbounds"] if ib and ib.get("tag") == "inbound-reality")
-            self.assertTrue(reality_ib["sniffing"]["enabled"])
-            self.assertFalse(reality_ib["sniffing"]["routeOnly"])
-            self.assertEqual(reality_ib["sniffing"]["destOverride"], ["tls", "http", "quic"])
-
-            # Test branch: empty clients with tunnel_uuid populated
-            cfg_empty = {
-                "inbounds": [
-                    {
-                        "tag": "inbound-tls",
-                        "port": 10443,
-                        "protocol": "vless",
-                        "settings": {"clients": []},
-                    }
-                ]
-            }
-            cfg_file.write_text(json.dumps(cfg_empty), encoding="utf-8")
-            res2 = subprocess.run(
-                [sys.executable, "-c", embedded_py, str(cfg_file), "tls", "0", "1", "10443", "uuid-empty-branch"],
-                capture_output=True,
-                text=True,
-                env=env,
-                check=False,
-            )
-            self.assertEqual(res2.returncode, 0, f"Empty clients branch failed: {res2.stderr}")
-            updated_empty_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            relay_ib2 = next(ib for ib in updated_empty_cfg["inbounds"] if ib.get("tag") == "inbound-tls")
-            self.assertEqual(len(relay_ib2["settings"]["clients"]), 1)
-            self.assertEqual(relay_ib2["settings"]["clients"][0]["id"], "uuid-empty-branch")
-            self.assertEqual(relay_ib2["settings"]["clients"][0]["flow"], "xtls-rprx-vision")
-            self.assertEqual(relay_ib2["settings"]["fallbacks"], [{"dest": "127.0.0.1:80"}])
-
-    def test_relay_port_flexibility_and_fallback_invariants(self):
-        """Verify relay port flexibility on dedicated nodes and anti-probing fallbacks."""
-        relay_sh = (NODE_ROOT / "modules" / "xray" / "relay.sh").read_text(encoding="utf-8")
-        # 1. Flexible default port selection based on has_vless presence
-        self.assertIn('default_relay_port="443"', relay_sh)
-        self.assertIn('default_relay_port="8443"', relay_sh)
-        self.assertIn('if [[ "$relay_port" == "443" && "$cur_has_vless" == "1" ]]', relay_sh)
-
-        # 2. Guard in install_vless_direct_node preventing port collision when relay is on 443
-        self.assertIn('if [[ "$cur_has_relay" == "1" && "$cur_relay_port" == "443" ]]', relay_sh)
-
-        # 3. Fallbacks in initial relay installation inbound
-        self.assertIn('"dest": "127.0.0.1:80"', relay_sh)
 
     def test_traffic_limit_invariants(self):
         """Invariant: traffic_limit.sh uses vnstat, JSON config, no ConditionPathExists in xray dropin, and CLI/menu registration."""

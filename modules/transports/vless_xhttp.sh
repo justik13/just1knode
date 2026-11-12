@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
 # =============================================================================
-# JUST1KNODE v2 - Транспортный модуль VLESS XHTTP и реестр CDN-провайдеров
+# JUST1KNODE v2 - Базовый транспортный модуль VLESS XHTTP
 # =============================================================================
 
+vless_xhttp_meta() {
+    cat <<'EOF'
+{
+  "id": "vless_xhttp",
+  "kind": "transport",
+  "parent": "",
+  "label": "VLESS XHTTP (Базовый)",
+  "roles": ["ru_hub"],
+  "order": 20
+}
+EOF
+}
+
 vless_xhttp_status_label() {
-    if is_module_enabled "vless_xhttp"; then
+    if is_module_broken "vless_xhttp"; then
+        echo -e "${RED}🔴 Ошибка модуля (изолирован)${NC}"
+    elif is_module_enabled "vless_xhttp"; then
         echo -e "${GREEN}🟢 Установлен (Nginx + /sub/ + 404)${NC}"
     else
         echo -e "${YELLOW}⚪ Не установлен${NC}"
     fi
 }
 
-cdn_module_status_label() {
-    local mod_key="$1"
-    if is_module_enabled "$mod_key"; then
-        local c_dom
-        c_dom="$(get_module_val "$mod_key" "cdn_domain" "")"
-        [[ -n "$c_dom" ]] && echo -e "${GREEN}🟢 Активен (${c_dom})${NC}" || echo -e "${GREEN}🟢 Активен${NC}"
-    else
-        echo -e "${YELLOW}⚪ Не установлен${NC}"
-    fi
-}
-
 vless_xhttp_has_child_cdns() {
-    if is_module_enabled "cdn_yandex" || is_module_enabled "cdn_turboflare"; then
-        return 0
-    fi
-    return 1
+    is_any_child_module_enabled "vless_xhttp"
 }
 
 vless_xhttp_install() {
@@ -79,6 +80,19 @@ vless_xhttp_install() {
     sub_prefix="$(get_state_val "sub_path_prefix" "/sub/wl")"
     [[ -z "$sub_prefix" || "$sub_prefix" == "-" ]] && sub_prefix="/sub/wl"
 
+    local prev_json prev_had_mod prev_has_wl
+    prev_had_mod="0"
+    is_module_enabled "vless_xhttp" && prev_had_mod="1"
+    prev_has_wl="$(get_state_val "has_wl" "0")"
+    prev_json="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        print(json.dumps(json.load(f).get("modules", {}).get("vless_xhttp", {})))
+except Exception:
+    print("{}")
+' "$STATE_FILE" 2>/dev/null || echo "{}")"
+
     local mod_json
     mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "bot_domain": sys.argv[1], "sub_path_prefix": sys.argv[2]}))' "$input_bot_dom" "$sub_prefix")"
     set_module_config "vless_xhttp" "$mod_json"
@@ -91,13 +105,17 @@ vless_xhttp_install() {
     fi
 
     if ! apply_v2_hub_configuration; then
-        remove_module_config "vless_xhttp"
-        set_state_val "has_wl" "0"
+        if [[ "$prev_had_mod" == "1" ]]; then
+            set_module_config "vless_xhttp" "$prev_json"
+        else
+            remove_module_config "vless_xhttp"
+        fi
+        set_state_val "has_wl" "$prev_has_wl"
         warn "Не удалось применить базовый модуль VLESS XHTTP. Выполнен откат."
         return 1
     fi
 
-    log "✔ Базовый модуль VLESS XHTTP установлен! Теперь доступны субмодули [2.1] и [2.2]."
+    log "✔ Базовый модуль VLESS XHTTP установлен! Теперь доступны дочерние CDN-модули."
     return 0
 }
 
@@ -110,8 +128,8 @@ vless_xhttp_uninstall() {
     fi
 
     if vless_xhttp_has_child_cdns; then
-        warn "Невозможно удалить VLESS XHTTP (Базовый), пока активны дочерние CDN-модули (Yandex CDN / TurboFlare)!"
-        echo -e "  ${YELLOW}Сначала удалите [2.1] Yandex CDN и/или [2.2] TurboFlare.${NC}"
+        warn "Невозможно удалить VLESS XHTTP (Базовый), пока активны дочерние CDN-модули!"
+        echo -e "  ${YELLOW}Сначала удалите активные дочерние CDN-модули.${NC}"
         return 1
     fi
 
@@ -145,103 +163,5 @@ except Exception:
     fi
 
     log "✔ Базовый модуль VLESS XHTTP удален."
-    return 0
-}
-
-# Единый обработчик установки CDN-субмодулей (без дублирования по провайдерам)
-cdn_provider_install() {
-    local mod_key="$1"
-    check_root
-    init_state_dir
-
-    if ! is_module_enabled "vless_xhttp"; then
-        warn "Сначала установите [2] VLESS XHTTP (Базовый)!"
-        return 1
-    fi
-
-    local label port tag def_cdn_dom input_cdn_dom=""
-    case "$mod_key" in
-        cdn_yandex)
-            label="Yandex CDN"
-            port="8003"
-            tag="just1k-wl-default"
-            ;;
-        cdn_turboflare)
-            label="TurboFlare"
-            port="8004"
-            tag="just1k-wl-turboflare"
-            ;;
-        *)
-            warn "Неизвестный CDN-модуль: $mod_key"
-            return 1
-            ;;
-    esac
-
-    def_cdn_dom="$(get_module_val "$mod_key" "cdn_domain" "")"
-    [[ -z "$def_cdn_dom" ]] && def_cdn_dom="$(get_state_val "cdn_domain" "")"
-    [[ -z "$def_cdn_dom" || "$def_cdn_dom" == "-" ]] && def_cdn_dom="$(get_state_val "domain" "")"
-
-    if [[ -t 0 ]]; then
-        read -rp "CDN-домен для ${label} [по умолчанию: ${def_cdn_dom}]: " input_cdn_dom || true
-        input_cdn_dom="${input_cdn_dom:-$def_cdn_dom}"
-        input_cdn_dom="$(normalize_domain "$input_cdn_dom" 2>/dev/null || echo "$input_cdn_dom")"
-    else
-        input_cdn_dom="$def_cdn_dom"
-    fi
-
-    if [[ -z "$input_cdn_dom" ]] || ! validate_fqdn "$input_cdn_dom" 2>/dev/null; then
-        warn "Укажите корректный FQDN домен для ${label}."
-        return 1
-    fi
-
-    local mod_json
-    mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "provider": sys.argv[1], "port": int(sys.argv[2]), "tag": sys.argv[3], "cdn_domain": sys.argv[4]}))' "$mod_key" "$port" "$tag" "$input_cdn_dom")"
-    set_module_config "$mod_key" "$mod_json"
-
-    # Обновляем корневой cdn_domain, если это Yandex CDN или cdn_domain еще не был задан
-    local cur_root_cdn
-    cur_root_cdn="$(get_state_val "cdn_domain" "")"
-    if [[ "$mod_key" == "cdn_yandex" || -z "$cur_root_cdn" || "$cur_root_cdn" == "-" ]]; then
-        set_state_val "cdn_domain" "$input_cdn_dom"
-    fi
-
-    if ! apply_v2_hub_configuration; then
-        remove_module_config "$mod_key"
-        warn "Не удалось применить конфигурацию ${label}. Откат выполнен."
-        return 1
-    fi
-
-    log "✔ Субмодуль ${label} (порт ${port}) успешно активирован."
-    return 0
-}
-
-cdn_provider_uninstall() {
-    local mod_key="$1"
-    check_root
-    init_state_dir
-    if ! is_module_enabled "$mod_key"; then
-        info "Субмодуль ${mod_key} не установлен."
-        return 0
-    fi
-
-    local prev_json
-    prev_json="$(python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as f:
-        print(json.dumps(json.load(f).get("modules", {}).get(sys.argv[2], {})))
-except Exception:
-    print("{}")
-' "$STATE_FILE" "$mod_key" 2>/dev/null || echo "{}")"
-
-    remove_module_config "$mod_key"
-
-    if ! apply_v2_hub_configuration; then
-        set_module_config "$mod_key" "$prev_json"
-        warn "Ошибка пересборки после удаления ${mod_key}. Откат."
-        return 1
-    fi
-
-    log "✔ Субмодуль ${mod_key} успешно удален."
     return 0
 }

@@ -203,6 +203,47 @@ setup_xray_api_venv() {
     chmod -R 755 "${venv_dir}" 2>/dev/null || true
 }
 
+deploy_apply_trigger_units() {
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    local src_dir="${SCRIPT_DIR:-${INSTALL_DIR:-/opt/just1knode}}/scripts/systemd"
+    local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+    mkdir -p "$systemd_dir" 2>/dev/null || true
+
+    if [[ -f "${src_dir}/just1knode-apply.path" && -f "${src_dir}/just1knode-apply.service" ]]; then
+        cp -f "${src_dir}/just1knode-apply.path" "${systemd_dir}/just1knode-apply.path"
+        sed "s|/usr/local/bin/just1knode|${global_bin}|g; s|/etc/just1knode|${STATE_DIR}|g" \
+            "${src_dir}/just1knode-apply.service" > "${systemd_dir}/just1knode-apply.service"
+        sed -i "s|/etc/just1knode|${STATE_DIR}|g" "${systemd_dir}/just1knode-apply.path" 2>/dev/null || true
+    else
+        cat > "${systemd_dir}/just1knode-apply.path" <<EOF
+[Unit]
+Description=Just1kNode Pending Configuration Trigger Path
+
+[Path]
+PathExists=${STATE_DIR}/.apply_pending
+Unit=just1knode-apply.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        cat > "${systemd_dir}/just1knode-apply.service" <<EOF
+[Unit]
+Description=Just1kNode Apply Pending Configuration Changes
+After=network.target xray.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=${global_bin} apply-pending
+TimeoutStartSec=90
+EOF
+    fi
+    chmod 644 "${systemd_dir}/just1knode-apply.path" "${systemd_dir}/just1knode-apply.service" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now just1knode-apply.path >/dev/null 2>&1 || true
+    fi
+}
+
 deploy_xray_api_service() {
     local api_key="$1"
     local cdn_domain="${2:-}"
@@ -224,6 +265,9 @@ XRAY_GRPC_HOST=127.0.0.1
 XRAY_GRPC_PORT=10085
 CLIENTS_FILE_PATH=${STATE_DIR}/clients.json
 RELAYS_FILE_PATH=${STATE_DIR}/relays.json
+LINKS_FILE_PATH=${STATE_DIR}/links.json
+APPLY_PENDING_PATH=${STATE_DIR}/.apply_pending
+MODULE_ERRORS_PATH=${STATE_DIR}/module_errors.json
 EPOCH_FILE_PATH=${XRAY_API_LIB}/epoch.json
 STATE_FILE_PATH=${STATE_FILE}
 CDN_DOMAIN=${cdn_domain}
@@ -246,6 +290,7 @@ EOF
     [[ -f "${CLIENTS_FILE}" ]] && { chown root:xrayapi "${CLIENTS_FILE}" 2>/dev/null || true; chmod 660 "${CLIENTS_FILE}"; }
     [[ -f "${RELAYS_FILE}" ]] && { chown root:xrayapi "${RELAYS_FILE}" 2>/dev/null || true; chmod 660 "${RELAYS_FILE}"; }
     [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 660 "${STATE_FILE}"; }
+    [[ -f "${LINKS_FILE:-${STATE_DIR}/links.json}" ]] && { chown root:xrayapi "${LINKS_FILE:-${STATE_DIR}/links.json}" 2>/dev/null || true; chmod 660 "${LINKS_FILE:-${STATE_DIR}/links.json}"; }
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "${STATE_DIR}" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -290,4 +335,5 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now xray-api
+    deploy_apply_trigger_units
 }
