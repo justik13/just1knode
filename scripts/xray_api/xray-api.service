@@ -23,7 +23,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/xray-api /etc/just1knode /var/lib/xray-api
+ReadWritePaths=/opt/xray-api /etc/just1knode /var/lib/xray-api -/etc/letsencrypt -/usr/local/etc/xray
 
 [Install]
 WantedBy=multi-user.target

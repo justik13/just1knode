@@ -211,19 +211,29 @@ update_node() {
             node_src_dir="${tmp_dir}"
         fi
 
-        # Валидация синтаксиса shell-скриптов перед установкой (Pre-Deploy Syntax Check)
+        # Валидация синтаксиса shell-скриптов перед установкой (с изоляцией независимых модулей transports/)
+        local broken_transport_names=()
         if [[ -n "$node_src_dir" ]]; then
             local syntax_err=0
             while IFS= read -r -d '' sh_file; do
-                if ! bash -n "$sh_file"; then
-                    warn "Синтаксическая ошибка в обновлении: $sh_file"
-                    syntax_err=1
+                if [[ "$sh_file" == *"/modules/transports/"* ]]; then
+                    if ! bash -n "$sh_file"; then
+                        local b_name
+                        b_name="$(basename "$sh_file")"
+                        broken_transport_names+=("$b_name")
+                        warn "Модуль '${b_name}' содержит синтаксическую ошибку и изолирован от обновления (остальные компоненты обновятся)."
+                    fi
+                else
+                    if ! bash -n "$sh_file"; then
+                        warn "Критическая синтаксическая ошибка в ядре обновления: $sh_file"
+                        syntax_err=1
+                    fi
                 fi
-            done < <(find "$node_src_dir" -maxdepth 3 -type f -name "*.sh" -print0 2>/dev/null)
+            done < <(find "$node_src_dir" -maxdepth 4 -type f -name "*.sh" -print0 2>/dev/null)
 
             if [[ $syntax_err -ne 0 ]]; then
                 rm -rf "$tmp_tar" "$tmp_dir"
-                error "Обновление прервано: обнаружены синтаксические ошибки в загруженном релизе."
+                error "Обновление прервано: обнаружены синтаксические ошибки в базовых файлах релиза."
             fi
         fi
 
@@ -356,6 +366,21 @@ update_node() {
                     rm -rf "$tmp_tar" "$tmp_dir"
                     error "Не удалось скопировать модули в ${node_dir}. Обновление прервано."
                 fi
+                # Изоляция повреждённых транспортных модулей: не ломаем работающий узел, откатываем только проблемный модуль
+                if [[ ${#broken_transport_names[@]} -gt 0 ]]; then
+                    local bn
+                    for bn in "${broken_transport_names[@]}"; do
+                        rm -f "${node_dir}/modules/transports/${bn}" 2>/dev/null || true
+                        if [[ -n "$node_backup" && -f "${node_backup}/modules/transports/${bn}" ]] && bash -n "${node_backup}/modules/transports/${bn}" 2>/dev/null; then
+                            cp -a "${node_backup}/modules/transports/${bn}" "${node_dir}/modules/transports/${bn}" 2>/dev/null || true
+                            warn "Модуль '${bn}': оставлена предыдущая рабочая версия."
+                        fi
+                    done
+                fi
+                if [[ -d "${node_src_dir}/scripts/systemd" ]]; then
+                    mkdir -p "${node_dir}/scripts/systemd"
+                    cp -a "${node_src_dir}/scripts/systemd/." "${node_dir}/scripts/systemd/" 2>/dev/null || true
+                fi
                 local fetched_sha=""
                 if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
                     fetched_sha="$(timeout 5s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)"
@@ -452,21 +477,16 @@ update_node() {
     # Защитный fallback (если exec недоступен): повторная загрузка модулей с диска
     if [[ -d "$node_dir" ]]; then
         source "${node_dir}/lib/common.sh" 2>/dev/null || true
+        source "${node_dir}/lib/module_loader.sh" 2>/dev/null || true
+        source "${node_dir}/lib/builder.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/core.sh" 2>/dev/null || true
-        source "${node_dir}/modules/xray/origin.sh" 2>/dev/null || true
-        source "${node_dir}/modules/xray/relay.sh" 2>/dev/null || true
-        # shellcheck source=modules/roles/common_xray.sh
-        [[ -f "${node_dir}/modules/roles/common_xray.sh" ]] && { source "${node_dir}/modules/roles/common_xray.sh" 2>/dev/null || true; }
-        # shellcheck source=modules/transports/vless_tls.sh
-        [[ -f "${node_dir}/modules/transports/vless_tls.sh" ]] && { source "${node_dir}/modules/transports/vless_tls.sh" 2>/dev/null || true; }
-        # shellcheck source=modules/transports/vless_xhttp.sh
-        [[ -f "${node_dir}/modules/transports/vless_xhttp.sh" ]] && { source "${node_dir}/modules/transports/vless_xhttp.sh" 2>/dev/null || true; }
-        # shellcheck source=modules/roles/ru_hub.sh
-        [[ -f "${node_dir}/modules/roles/ru_hub.sh" ]] && { source "${node_dir}/modules/roles/ru_hub.sh" 2>/dev/null || true; }
-        # shellcheck source=modules/roles/eu_hub.sh
-        [[ -f "${node_dir}/modules/roles/eu_hub.sh" ]] && { source "${node_dir}/modules/roles/eu_hub.sh" 2>/dev/null || true; }
-        # shellcheck source=modules/roles/exit_node.sh
-        [[ -f "${node_dir}/modules/roles/exit_node.sh" ]] && { source "${node_dir}/modules/roles/exit_node.sh" 2>/dev/null || true; }
+        source "${node_dir}/modules/roles/base.sh" 2>/dev/null || true
+        source "${node_dir}/modules/roles/ru_hub.sh" 2>/dev/null || true
+        source "${node_dir}/modules/roles/eu_hub.sh" 2>/dev/null || true
+        source "${node_dir}/modules/roles/exit_node.sh" 2>/dev/null || true
+        if declare -F load_all_transport_modules >/dev/null 2>&1; then
+            load_all_transport_modules || true
+        fi
     fi
 
     update_node_post "$target" "${is_menu:-0}"
@@ -481,39 +501,36 @@ update_node_post() {
     trap release_just1knode_lock RETURN EXIT
 
     info "4/4. Самодиагностика, авто-конфигурация и проверка сетевых политик..."
-    migrate_legacy_state
+    if declare -F load_all_transport_modules >/dev/null 2>&1; then
+        load_all_transport_modules || true
+    fi
     heal_node_firewall_and_stealth
     cleanup_legacy_traffic_watchdog_residue
     if declare -f reconcile_traffic_limit_on_update >/dev/null 2>&1; then
         reconcile_traffic_limit_on_update
     fi
 
-    # Автоматическая оптимизация конфигурации в зависимости от роли сервера
     local role
-    role="$(get_state_val "role")"
-
-    local cur_r cur_v
-    cur_r="$(get_state_val "has_relay" "0")"
-    cur_v="$(get_state_val "has_vless" "0")"
+    role="$(get_state_val "role" "unconfigured")"
 
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
-        if declare -f heal_v2_role_config >/dev/null 2>&1; then
+        if declare -F heal_v2_role_config >/dev/null 2>&1; then
             heal_v2_role_config
         fi
-    elif [[ "$role" == "origin" ]]; then
-        heal_and_update_origin_config
-    elif [[ "$role" == "node" ]]; then
-        if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
-            heal_and_update_relay_config
-        fi
-    elif [[ "$role" == "relay" || "$role" == "vless" ]]; then
-        heal_and_update_relay_config
     else
-        warn "Узел не настроен (роль не определена). Автоматическая оптимизация конфига пропущена."
+        if declare -F setup_base_api_nginx >/dev/null 2>&1 && [[ -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+            setup_base_api_nginx || true
+        fi
+        warn "Узел не настроен (роль не определена). Автоматическая оптимизация Xray пропущена."
+    fi
+
+    # Обновляем systemd trigger (just1knode-apply.path / service) при наличии xray-api
+    if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]] && declare -F deploy_apply_trigger_units >/dev/null 2>&1; then
+        deploy_apply_trigger_units || true
     fi
 
     local has_xray="0"
-    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]] || [[ -x "${XRAY_BIN:-/usr/local/bin/xray}" && -f "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]] || [[ -x "${XRAY_BIN:-/usr/local/bin/xray}" && -f "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" ]]; then
         has_xray="1"
     fi
 

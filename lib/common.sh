@@ -99,10 +99,11 @@ install_base_deps() {
 
 install_nginx_if_missing() {
     if ! command -v nginx >/dev/null 2>&1; then
-        log "Установка Nginx и Certbot..."
+        log "Установка Nginx, mod-stream и Certbot..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
+        apt-get install -y -qq nginx libnginx-mod-stream certbot python3-certbot-nginx ca-certificates || \
+            apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
         # Отключаем дефолтный сайт сразу после установки пакета для предотвращения конфликта портов
         local def_site="${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/default"
         if [[ -f "$def_site" || -L "$def_site" ]]; then
@@ -112,6 +113,24 @@ install_nginx_if_missing() {
         systemctl enable nginx 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
     fi
+}
+
+ensure_nginx_stream_module() {
+    install_nginx_if_missing
+    command -v nginx >/dev/null 2>&1 || return 1
+    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
+        return 0
+    fi
+    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|$)'; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        log "Доустановка модуля Nginx Stream (libnginx-mod-stream) для SNI-маршрутизации..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 || true
+    fi
+    compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1
 }
 
 # Обнаружение Docker-контейнера, слушающего хостовый TCP-порт 80
@@ -381,11 +400,10 @@ ensure_xray_api_healthy() {
         return 0
     fi
 
-    # На узлах Relay без VLESS служба xray-api не используется и не должна запускаться
-    local role cur_has_v
-    role="$(get_state_val "role" "")"
-    cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$force" != "1" && "$role" != "origin" && "$cur_has_v" != "1" ]]; then
+    # В v2 агент xray-api работает на всех управляемых узлах (при наличии установленного конфига/роли)
+    local role
+    role="$(get_state_val "role" "unconfigured")"
+    if [[ "$force" != "1" && "$role" != "ru_hub" && "$role" != "eu_hub" && "$role" != "exit_node" && ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
         return 0
     fi
 
@@ -550,7 +568,6 @@ heal_node_firewall_and_stealth() {
         return 0
     fi
 
-    migrate_legacy_state
     local role
     role="$(get_state_val "role" "")"
 
@@ -587,161 +604,180 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 4. Origin / Hub / Node API (8444/tcp строго по BOT_IP — Fail-Closed)
-    if [[ "$role" == "origin" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]] || [[ "$role" == "unconfigured" && -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
-        local origin_bot_ip
-        origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    # 4. Панель API узла (8444/tcp строго по BOT_IP — Fail-Closed)
+    local origin_bot_ip
+    origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
-        # Zero-Lockout: не удаляем 8444, если на нем слушает SSH
-        if ! is_ssh_port "8444"; then
-            if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8444 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
-            fi
-        fi
-
-        # Проверка доверенного BOT_IP из state.json (Fail-Closed)
-        if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
-            if ! ufw status 2>/dev/null | grep -F "$origin_bot_ip" | grep -q "8444"; then
-                if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
-                    log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
-                fi
-            fi
-        else
-            warn "BOT_IP не задан в state.json. Порт API (8444) закрыт от мира (Fail-Closed)."
+    if ! is_ssh_port "8444"; then
+        if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8444 >/dev/null 2>&1 || true
+            warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
         fi
     fi
 
-    # 4b. Роли v2 периметра (ru_hub / eu_hub / exit_node)
+    if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
+        local bot_ip_re="${origin_bot_ip//./\\.}"
+        if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${bot_ip_re}(/32)?([[:space:]]|$)" | grep -q "8444"; then
+            if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
+                log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
+            fi
+        fi
+    else
+        warn "BOT_IP не задан в state.json. Порт API (8444) закрыт от мира (Fail-Closed)."
+    fi
+
+    # 5. Роли v2 периметра (Zero-Trust: 443 для мира открыт ТОЛЬКО на ru_hub с включённым транспортом)
+    local links_file="${LINKS_FILE:-${STATE_DIR:-/etc/just1knode}/links.json}"
+    local state_file="${STATE_FILE:-/etc/just1knode/state.json}"
+
+    _ufw_sync_whitelist_port() {
+        local wl_port="$1"
+        local wl_comment="$2"
+        local mode="$3" # eu_hub | exit_node
+        if ! is_ssh_port "$wl_port"; then
+            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])${wl_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw delete allow "${wl_port}/tcp" >/dev/null 2>&1 || true
+                ufw delete allow "${wl_port}" >/dev/null 2>&1 || true
+                warn "Фаервол UFW: устранена уязвимость — удалён публичный доступ к порту ${wl_port} (${mode})."
+            fi
+        fi
+
+        local allowed_ips=()
+        local ip_cand
+        while IFS= read -r ip_cand; do
+            [[ -n "$ip_cand" ]] && allowed_ips+=("$ip_cand")
+        done < <(python3 -c '
+import json, sys
+
+state_path, links_path, mode = sys.argv[1:4]
+def load_d(p):
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+st = load_d(state_path)
+lk = load_d(links_path)
+seen = []
+
+def add_ip(v):
+    s = str(v or "").strip()
+    if s and s != "-" and s not in seen:
+        seen.append(s)
+
+keys = ("allowed_ru_ips",) if mode == "eu_hub" else ("allowed_hub_ips", "allowed_ru_ips", "eu_hub_ips")
+for src in (lk, st):
+    for k in keys:
+        vals = src.get(k)
+        if isinstance(vals, list):
+            for x in vals:
+                if isinstance(x, dict):
+                    add_ip(x.get("ip"))
+                else:
+                    add_ip(x)
+
+if mode == "eu_hub":
+    for arr_k in ("incoming_ru_hubs", "incoming_hubs"):
+        for item in (lk.get(arr_k) or []):
+            if isinstance(item, dict):
+                add_ip(item.get("ip"))
+else:
+    for arr_k in ("incoming_hubs", "incoming_eu_hubs"):
+        for item in (lk.get(arr_k) or []):
+            if isinstance(item, dict):
+                add_ip(item.get("ip"))
+
+for ip in seen:
+    print(ip)
+' "$state_file" "$links_file" "$mode" 2>/dev/null || true)
+
+        # Отзыв устаревших правил UFW этого типа, которых больше нет в белом списке
+        local stale_nums=()
+        local rule_line r_n r_body
+        while IFS= read -r rule_line; do
+            [[ -z "$rule_line" ]] && continue
+            if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+                r_n="${BASH_REMATCH[1]}"
+                r_body="${BASH_REMATCH[2]}"
+                if echo "$r_body" | grep -Fq "$wl_comment"; then
+                    local keep=0 a_ip
+                    for a_ip in "${allowed_ips[@]}"; do
+                        local a_ip_re="${a_ip//./\\.}"
+                        if echo "$r_body" | grep -Eq "(^|[[:space:]])${a_ip_re}(/32)?([[:space:]]|$)"; then
+                            keep=1
+                            break
+                        fi
+                    done
+                    [[ "$keep" -eq 0 ]] && stale_nums+=("$r_n")
+                fi
+            fi
+        done < <(ufw status numbered 2>/dev/null || true)
+
+        if [[ ${#stale_nums[@]} -gt 0 ]]; then
+            local rn_s
+            for rn_s in $(printf "%s\n" "${stale_nums[@]}" | sort -rn -u); do
+                [[ -n "$rn_s" ]] && echo "y" | ufw delete "$rn_s" >/dev/null 2>&1 || true
+            done
+        fi
+
+        local aip aip_re
+        for aip in "${allowed_ips[@]}"; do
+            if validate_ipv4 "$aip" || validate_ip "$aip"; then
+                aip_re="${aip//./\\.}"
+                if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${aip_re}(/32)?([[:space:]]|$)" | grep -q "$wl_port"; then
+                    ufw allow from "$aip" to any port "$wl_port" proto tcp comment "$wl_comment" >/dev/null 2>&1 || true
+                fi
+            fi
+        done
+    }
+
     if [[ "$role" == "ru_hub" ]]; then
         if is_module_enabled "vless_tls" 2>/dev/null || is_module_enabled "vless_xhttp" 2>/dev/null; then
             if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
                 ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
             fi
-        fi
-    elif [[ "$role" == "exit_node" ]]; then
-        if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-            ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+        elif ! is_ssh_port "443"; then
+            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])443(/tcp)?[[:space:]]+ALLOW" -q; then
+                ufw delete allow 443/tcp >/dev/null 2>&1 || true
+                ufw delete allow 443 >/dev/null 2>&1 || true
+            fi
         fi
     elif [[ "$role" == "eu_hub" ]]; then
         local bridge_port
         bridge_port="$(get_state_val "relay_port" "443")"
         [[ "$bridge_port" =~ ^[0-9]+$ ]] || bridge_port="443"
-        if ! is_ssh_port "$bridge_port"; then
-            if ufw status 2>/dev/null | grep -E "${bridge_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow "${bridge_port}/tcp" >/dev/null 2>&1 || true
-                ufw delete allow "${bridge_port}" >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — закрыт публичный доступ к порту моста ${bridge_port} на Зарубежном ХАБе."
-            fi
-        fi
-        local ru_ips=()
-        while IFS= read -r rip; do
-            [[ -n "$rip" ]] && ru_ips+=("$rip")
-        done < <(python3 -c "
-import json, sys
-try:
-    with open(sys.argv[1], 'r', encoding='utf-8') as f:
-        d = json.load(f)
-    seen = set()
-    for k in ('origin_ip',):
-        v = str(d.get(k, '')).strip()
-        if v and v != '-' and v not in seen:
-            seen.add(v); print(v)
-    for item in (d.get('allowed_ru_ips') or []):
-        v = str(item).strip()
-        if v and v not in seen:
-            seen.add(v); print(v)
-except Exception:
-    pass
-" "${STATE_FILE:-/etc/just1knode/state.json}" 2>/dev/null || true)
-        local rip
-        for rip in "${ru_ips[@]}"; do
-            if validate_ipv4 "$rip" || validate_ip "$rip"; then
-                if ! ufw status 2>/dev/null | grep -F "$rip" | grep -q "$bridge_port"; then
-                    ufw allow from "$rip" to any port "$bridge_port" proto tcp comment "just1knode eu_hub bridge" >/dev/null 2>&1 || true
-                fi
-            fi
-        done
-    fi
-
-    # 5. Relay туннель (роль relay либо has_relay)
-    local cur_has_relay
-    cur_has_relay="$(get_state_val "has_relay" "0")"
-    if [[ "$role" == "relay" || "$cur_has_relay" == "1" ]]; then
-        local relay_port origin_ip
-        relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
-        origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
-
-        if [[ -n "$relay_port" && "$relay_port" =~ ^[0-9]+$ ]]; then
-            # Zero-Lockout: не удаляем правило, если на нем слушает SSH
-            if ! is_ssh_port "$relay_port"; then
-                if ufw status 2>/dev/null | grep -E "${relay_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    ufw delete allow "${relay_port}/tcp" >/dev/null 2>&1 || true
-                    ufw delete allow "${relay_port}" >/dev/null 2>&1 || true
-                    warn "Фаервол UFW: устранена уязвимость — удалено публичное правило на порт Relay туннеля (${relay_port})."
-                fi
-            fi
-
-            if [[ -n "$origin_ip" ]] && validate_ipv4 "$origin_ip"; then
-                if ! ufw status 2>/dev/null | grep -F "$origin_ip" | grep -q "$relay_port"; then
-                    if ufw allow from "$origin_ip" to any port "$relay_port" proto tcp comment "just1knode relay tunnel" >/dev/null 2>&1; then
-                        log "Фаервол UFW: подтвержден доступ к Relay порту ${relay_port} строго для ORIGIN_IP (${origin_ip})"
-                    fi
-                fi
+        _ufw_sync_whitelist_port "$bridge_port" "just1knode eu_hub bridge" "eu_hub"
+    elif [[ "$role" == "exit_node" ]]; then
+        _ufw_sync_whitelist_port "443" "just1knode exit ingress" "exit_node"
+    else
+        # Не сконфигурирован: держим 443 закрытым (Fail-Closed Stealth)
+        if ! is_ssh_port "443"; then
+            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])443(/tcp)?[[:space:]]+ALLOW" -q; then
+                ufw delete allow 443/tcp >/dev/null 2>&1 || true
+                ufw delete allow 443 >/dev/null 2>&1 || true
             fi
         fi
     fi
 
-    # 6. VLESS Direct и API (роль vless либо has_vless)
-    local cur_has_vless
-    cur_has_vless="$(get_state_val "has_vless" "0")"
-    if [[ "$role" == "vless" || "$cur_has_vless" == "1" || -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" ]]; then
-        # Клиентский вход VLESS TLS на порту 443
-        if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW" -q; then
-            ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
-        fi
-
-        # Защита xray-api (порт 8444)
-        if ! is_ssh_port "8444"; then
-            if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8444 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено публичное правило на порт 8444."
-            fi
-        fi
-
-        local v_bot_ip
-        v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then
-            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && (validate_ip "$v_bot_ip" || validate_ipv4 "$v_bot_ip"); then
-                if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
-                    ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
-                fi
-            fi
+    # 6. Защита веб-периметра: закрытие публичного порта 80 (Zero-Signature)
+    local has_external_sites=0
+    if command -v nginx >/dev/null 2>&1; then
+        if [[ -n "$(detect_existing_nginx_sites 2>/dev/null || true)" ]]; then
+            has_external_sites=1
         fi
     fi
-
-    # 7. Защита веб-периметра: закрытие порта 80 на узлах без внешних веб-сервисов
-    # На нодах без роли Origin и без локального контейнера (Caddy) порт 80 не должен быть открыт наружу.
-    # Фолбэк Nginx слушает строго на 127.0.0.1:80 (локальный fallback ядра Xray).
-    if [[ "$role" != "origin" ]]; then
-        local has_external_sites=0
-        if command -v nginx >/dev/null 2>&1; then
-            if [[ -n "$(detect_existing_nginx_sites 2>/dev/null || true)" ]]; then
-                has_external_sites=1
-            fi
-        fi
-        if [[ "$has_external_sites" == "0" ]] && \
-           [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
-           [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
-           ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
-            if ! is_ssh_port "80"; then
-                if ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
-                    ufw delete allow 80/tcp >/dev/null 2>&1 || true
-                    ufw delete allow 80 >/dev/null 2>&1 || true
-                    log "Фаервол UFW: закрыт неиспользуемый публичный порт 80 (маскировка Zero-Signature)."
-                fi
+    if [[ "$has_external_sites" == "0" ]] && \
+       [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
+       [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
+       ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
+        if ! is_ssh_port "80"; then
+            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
+                ufw delete allow 80/tcp >/dev/null 2>&1 || true
+                ufw delete allow 80 >/dev/null 2>&1 || true
+                log "Фаервол UFW: закрыт неиспользуемый публичный порт 80 (маскировка Zero-Signature)."
             fi
         fi
     fi
@@ -751,7 +787,6 @@ sync_xhttp_upstreams_conf() {
     local conf_d="${NGINX_CONF_DIR:-/etc/nginx}/conf.d"
     local upstreams_file="${conf_d}/just1k-xhttp-upstreams.conf"
     local cfg_file="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-    local relays_file="${RELAYS_FILE:-${STATE_DIR:-/etc/just1knode}/relays.json}"
 
     mkdir -p "$conf_d" 2>/dev/null || true
     manifest_track_file "$upstreams_file" 2>/dev/null || true
@@ -762,7 +797,6 @@ import json, os, tempfile, sys, re
 
 upstreams_file = sys.argv[1]
 cfg_file = sys.argv[2]
-relays_file = sys.argv[3]
 
 xray_inbound_ports = {}
 if os.path.exists(cfg_file):
@@ -777,16 +811,6 @@ if os.path.exists(cfg_file):
     except Exception as e:
         sys.stderr.write('Error parsing Xray config: ' + str(e) + '\\n')
         sys.exit(1)
-
-relays = []
-if os.path.exists(relays_file):
-    try:
-        with open(relays_file, 'r', encoding='utf-8') as f:
-            relays = json.load(f)
-            if not isinstance(relays, list):
-                relays = []
-    except Exception:
-        relays = []
 
 def_port = xray_inbound_ports.get('just1k-wl-default', 8003)
 lines = [
@@ -803,42 +827,6 @@ lines = [
 ]
 
 seen_codes = set()
-for r in relays:
-    if not isinstance(r, dict):
-        continue
-    code = r.get('code')
-    if not code:
-        continue
-    code_lower = str(code).strip().lower()
-    if not code_lower or not re.fullmatch(r'^[a-z0-9_-]+$', code_lower) or code_lower in seen_codes:
-        continue
-    in_tag = r.get('inbound_tag') or f'just1k-wl-inbound-{code_lower}'
-    port = xray_inbound_ports.get(in_tag)
-    if not port:
-        for t, p in xray_inbound_ports.items():
-            if t.lower() == f'just1k-wl-inbound-{code_lower}':
-                port = p
-                break
-    # Источник истины — секция inbounds в config.json (Desired-State).
-    # Релеи, отсутствующие в Xray, не получают upstream (защита от устаревших записей в relays.json).
-    if not port and not os.path.exists(cfg_file):
-        port = r.get('inbound_port')
-    if port:
-        seen_codes.add(code_lower)
-        try:
-            port_num = int(port)
-            lines.append(f'upstream xray_xhttp_relay_{code_lower} {{')
-            lines.append(f'    server 127.0.0.1:{port_num};')
-            lines.append('    keepalive 128;')
-            lines.append('    keepalive_requests 100000;')
-            lines.append('    keepalive_timeout 300s;')
-            lines.append('}')
-            lines.append('')
-        except Exception:
-            continue
-
-# Защита в глубину: если релеи или модульные XHTTP-провайдеры есть в Xray inbounds,
-# генерируем keepalive upstream pools динамически (без хардкода провайдеров)
 for t, p in xray_inbound_ports.items():
     if t.startswith('just1k-wl-inbound-'):
         c_tag = t[len('just1k-wl-inbound-'):].strip().lower()
@@ -883,7 +871,7 @@ try:
     os.chmod(upstreams_file, 0o644)
 except Exception:
     pass
-" "$upstreams_file" "$cfg_file" "$relays_file"; then
+" "$upstreams_file" "$cfg_file"; then
         warn "Не удалось сгенерировать Nginx upstreams для XHTTP ($upstreams_file)"
         return 1
     fi
@@ -1512,6 +1500,155 @@ safe_restart_xray() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart xray
     fi
+}
+
+normalize_domain() {
+    local raw="${1:-}"
+    raw="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|^https\?://||' -e 's|/.*$||')"
+    echo "$raw"
+}
+
+validate_fqdn() {
+    local host="${1:-}"
+    [[ -z "$host" ]] && return 1
+    if [[ "$host" =~ [[:space:]\;\"\'\$\`\{\}\\\<\>\?\&\*\/] ]]; then
+        return 1
+    fi
+    if [[ "$host" == "localhost" || "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        return 1
+    fi
+    if [[ ! "$host" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+validate_sub_prefix() {
+    local prefix="${1:-}"
+    [[ -z "$prefix" ]] && return 1
+    if [[ "$prefix" =~ [[:space:]\;\"\'\$\`\{\}\\\<\>\?\&\*] || "$prefix" =~ \.\. ]]; then
+        return 1
+    fi
+    if [[ ! "$prefix" =~ ^/[a-zA-Z0-9_/-]+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+set_origin_bot_ip() {
+    title "ОБНОВЛЕНИЕ IP-АДРЕСА TELEGRAM-БОТА (BOT_IP ДЛЯ ЗАЩИТЫ API)"
+    check_root
+    init_state_dir
+    acquire_just1knode_lock
+
+    local role
+    role="$(get_state_val "role" "unconfigured")"
+    local target_port="8444"
+    local role_descr="Control API (порт 8444)"
+
+    if [[ "$role" != "ru_hub" && "$role" != "eu_hub" && "$role" != "exit_node" && ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+        release_just1knode_lock
+        error "Функция доступна только при установленном xray-api или настроенной роли узла."
+        return 1
+    fi
+
+    local new_bot_ip="${1:-}"
+    if [[ -z "$new_bot_ip" && -t 0 ]]; then
+        while true; do
+            local input_bip=""
+            if ! read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip; then
+                release_just1knode_lock
+                warn "Ввод прерван."
+                return 0
+            fi
+            input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
+            if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
+                release_just1knode_lock
+                warn "Настройка IP-адреса Telegram-бота отменена."
+                return 0
+            fi
+            if [[ -z "$input_bip" ]]; then
+                warn "IP-адрес не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            if ! validate_ipv4 "$input_bip"; then
+                warn "Недопустимый формат IP-адреса: '$input_bip' (ожидается валидный IPv4 адрес). Попробуйте еще раз."
+                continue
+            fi
+            new_bot_ip="$input_bip"
+            break
+        done
+    fi
+
+    new_bot_ip="$(echo "$new_bot_ip" | tr -d '[:space:]')"
+    if [[ -z "$new_bot_ip" ]]; then
+        release_just1knode_lock
+        error "IP-адрес не может быть пустым."
+        return 1
+    fi
+
+    if ! validate_ipv4 "$new_bot_ip"; then
+        release_just1knode_lock
+        error "Недопустимый формат IP-адреса: '$new_bot_ip' (ожидается валидный IPv4 адрес)."
+        return 1
+    fi
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        release_just1knode_lock
+        error "Утилита UFW не найдена в системе. Настройка фаервола невозможна."
+        return 1
+    fi
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        release_just1knode_lock
+        error "Фаервол UFW не активен (Status: inactive). Для безопасного обновления порта ${target_port} UFW должен быть включен."
+        return 1
+    fi
+
+    local old_bot_ip new_bot_ip_re
+    old_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    new_bot_ip_re="${new_bot_ip//./\\.}"
+
+    if [[ "$new_bot_ip" == "$old_bot_ip" ]] && ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
+        if ! is_ssh_port "${target_port}"; then
+            ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+            ufw delete allow "${target_port}" >/dev/null 2>&1 || true
+        fi
+        log "BOT_IP ($new_bot_ip) уже установлен и подтвержден в UFW. Изменений не требуется."
+        release_just1knode_lock
+        return 0
+    fi
+
+    log "Применение нового правила фаервола UFW для ${role_descr} ($new_bot_ip)..."
+    if ! ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp comment "just1knode api"; then
+        release_just1knode_lock
+        error "Сбой выполнения команды 'ufw allow' для IP $new_bot_ip. Предыдущие правила сохранены."
+        return 1
+    fi
+
+    if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        release_just1knode_lock
+        error "Верификация не пройдена: правило для $new_bot_ip на порт $target_port отсутствует в UFW. Изменение откатано."
+        return 1
+    fi
+
+    if ! set_state_val "bot_ip" "$new_bot_ip"; then
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        release_just1knode_lock
+        error "Сбой сохранения bot_ip в state.json. Новое правило для $new_bot_ip откатано, старый доступ сохранен."
+        return 1
+    fi
+
+    if ! is_ssh_port "${target_port}"; then
+        if [[ -n "$old_bot_ip" && "$old_bot_ip" != "$new_bot_ip" && "$old_bot_ip" != "any" && "$old_bot_ip" != "-" ]]; then
+            ufw delete allow from "$old_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        fi
+        ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+        ufw delete allow "${target_port}" >/dev/null 2>&1 || true
+    fi
+
+    log "BOT_IP успешно обновлен и зафиксирован в state.json: ${old_bot_ip:-не был задан} -> ${new_bot_ip}"
+    release_just1knode_lock
 }
 
 

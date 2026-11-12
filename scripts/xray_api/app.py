@@ -1,17 +1,19 @@
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import tempfile
 import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 import sqlite3
@@ -254,10 +256,106 @@ if os.path.exists(CONFIG_ENV_FILE):
 API_KEY = os.getenv("XRAY_API_KEY", "")
 GRPC_HOST = os.getenv("XRAY_GRPC_HOST", "127.0.0.1")
 GRPC_PORT = int(os.getenv("XRAY_GRPC_PORT", "10085"))
-RELAYS_FILE_PATH = Path(os.getenv("RELAYS_FILE_PATH", "/etc/just1knode/relays.json"))
 XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json"))
 CLIENTS_FILE_PATH = Path(os.getenv("CLIENTS_FILE_PATH", "/etc/just1knode/clients.json"))
 STATE_FILE_PATH = Path(os.getenv("STATE_FILE_PATH", "/etc/just1knode/state.json"))
+
+
+def _links_file_path() -> Path:
+    env_p = os.getenv("LINKS_FILE_PATH")
+    if env_p:
+        return Path(env_p)
+    return STATE_FILE_PATH.parent / "links.json"
+
+
+def _apply_pending_path() -> Path:
+    env_p = os.getenv("APPLY_PENDING_PATH")
+    if env_p:
+        return Path(env_p)
+    return STATE_FILE_PATH.parent / ".apply_pending"
+
+
+def _module_errors_path() -> Path:
+    env_p = os.getenv("MODULE_ERRORS_PATH")
+    if env_p:
+        return Path(env_p)
+    return STATE_FILE_PATH.parent / "module_errors.json"
+
+
+def _atomic_write_json(path: Path, payload: Any, mode: int = 0o660) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    tmp_path = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2, ensure_ascii=False)
+            fp.write("\n")
+            fp.flush()
+        try:
+            os.chmod(tmp_path, mode)
+        except Exception:
+            pass
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _load_links_data() -> Dict[str, Any]:
+    lp = _links_file_path()
+    if lp.exists():
+        try:
+            data = json.loads(lp.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            logger.warning("Could not read links.json at %s: %s", lp, e)
+    return {}
+
+
+def _load_module_errors() -> Dict[str, str]:
+    mp = _module_errors_path()
+    if mp.exists():
+        try:
+            data = json.loads(mp.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            logger.debug("Could not read module_errors.json: %s", e)
+    return {}
+
+
+def _load_traffic_limit_summary() -> Optional[Dict[str, Any]]:
+    tl_cfg = STATE_FILE_PATH.parent / "traffic_limit.json"
+    if not tl_cfg.exists():
+        return None
+    try:
+        data = json.loads(tl_cfg.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {
+                "enabled": True,
+                "limit_gb": data.get("limit_gb"),
+                "reset_day": data.get("reset_day", 1),
+                "exceeded": (STATE_FILE_PATH.parent / "traffic_limit_exceeded").exists(),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _write_apply_pending(reason: str) -> bool:
+    ap = _apply_pending_path()
+    if not ap.parent.exists():
+        return False
+    try:
+        _atomic_write_json(ap, {"reason": reason, "ts": int(time.time())}, mode=0o660)
+        return True
+    except Exception as e:
+        logger.warning("Could not write apply pending trigger %s: %s", ap, e)
+        return False
 
 BOT_STATUS_WRITE_INTERVAL = 30.0
 _last_bot_status_ts = 0.0
@@ -341,9 +439,9 @@ def _mask_uuid(val: str) -> str:
 
 
 def get_secret_base_path() -> str:
-    """Discovers canonical secret XHTTP base path configured for this Origin node.
+    """Discovers canonical secret XHTTP base path configured for this RU hub node.
 
-    Strictly matches managed tags ('just1k-wl-*' or legacy 'inbound-default').
+    Strictly matches managed tags ('just1k-wl-*').
     """
     if STATE_FILE_PATH.exists():
         try:
@@ -360,10 +458,10 @@ def get_secret_base_path() -> str:
             with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
                 inbounds = cfg.get("inbounds", [])
-                # Priority 1: tags matching just1k-wl-default or legacy inbound-default
+                # Priority 1: tags matching just1k-wl-default
                 for ib in inbounds:
                     tag = ib.get("tag", "")
-                    if tag in ("just1k-wl-default", "inbound-default"):
+                    if tag == "just1k-wl-default":
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
                         if not path:
                             path = (
@@ -412,10 +510,11 @@ def get_cdn_domain() -> Optional[str]:
                         return str(st["cdn_domain"]).strip()
                     modules = st.get("modules")
                     if isinstance(modules, dict):
-                        for m_key in ("cdn_yandex", "cdn_turboflare"):
-                            m_cfg = modules.get(m_key)
-                            if isinstance(m_cfg, dict) and m_cfg.get("enabled") and m_cfg.get("domain"):
-                                return str(m_cfg["domain"]).strip()
+                        for m_key, m_cfg in modules.items():
+                            if str(m_key).startswith("cdn_") and isinstance(m_cfg, dict) and m_cfg.get("enabled"):
+                                cand = m_cfg.get("cdn_domain") or m_cfg.get("domain")
+                                if cand:
+                                    return str(cand).strip()
         except Exception as e:
             logger.warning("Could not read cdn_domain from %s: %s", STATE_FILE_PATH, e)
 
@@ -452,24 +551,15 @@ def get_sub_path_prefix() -> Optional[str]:
 
 
 def get_all_managed_inbounds() -> List[str]:
-    """Dynamically discover all configured Just1k inbounds across all services without filtering."""
+    """Dynamically discover all configured Just1k user inbounds without mixing tunnel roles."""
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        return []
+
     discovered_tags: List[str] = []
 
-    # 1. Read from relays.json if available
-    relay_tags: List[str] = []
-    if RELAYS_FILE_PATH.exists():
-        try:
-            with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    for r in data:
-                        t = r.get("inbound_tag")
-                        if t and (t.startswith("just1k-wl-") or t.startswith("just1k-vless-")):
-                            relay_tags.append(t)
-        except Exception as e:
-            logger.warning("Could not load relays from %s: %s", RELAYS_FILE_PATH, e)
-
-    # 2. Read from Xray config.json if available
+    # 1. Read from Xray config.json if available
     config_tags: List[str] = []
     config_read_ok = False
     if XRAY_CONFIG_PATH.exists():
@@ -479,11 +569,11 @@ def get_all_managed_inbounds() -> List[str]:
                 for ib in cfg.get("inbounds", []):
                     protocol = ib.get("protocol", "").lower()
                     tag = ib.get("tag", "")
-                    # Match managed VLESS/VMESS inbounds strictly by just1k-wl- and just1k-vless- namespaces
+                    # Match managed VLESS inbounds strictly by just1k-wl- and just1k-vless- namespaces
                     if protocol in ("vless", "vmess") and (
                         tag.startswith("just1k-wl-")
                         or tag.startswith("just1k-vless-")
-                        or tag in ("just1k-wl-default", "inbound-default", "just1k-vless-direct")
+                        or tag in ("just1k-wl-default", "just1k-vless-direct")
                     ):
                         config_tags.append(tag)
                 config_read_ok = True
@@ -491,46 +581,39 @@ def get_all_managed_inbounds() -> List[str]:
             logger.warning("Could not load inbounds from %s: %s", XRAY_CONFIG_PATH, e)
 
     # Prioritize default tag if present
-    all_candidate_tags = config_tags + relay_tags
-    for tag in all_candidate_tags:
-        if tag in ("just1k-wl-default", "inbound-default") and tag not in discovered_tags:
+    for tag in config_tags:
+        if tag == "just1k-wl-default" and tag not in discovered_tags:
             discovered_tags.insert(0, tag)
         elif tag not in discovered_tags:
             discovered_tags.append(tag)
 
-    if not discovered_tags and relay_tags:
-        discovered_tags = list(relay_tags)
-
-    # Invariant: Origin / RU-Hub(XHTTP) nodes only use fallback just1k-wl-default
-    # if config.json was unreadable or completely missing managed inbounds.
-    is_origin_node = bool(relay_tags)
-    turboflare_enabled = False
-    if not is_origin_node and STATE_FILE_PATH.exists():
+    is_ru_xhttp_hub = False
+    extra_cdn_tags: List[str] = []
+    if STATE_FILE_PATH.exists():
         try:
             with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
                 sdata = json.load(f)
                 if isinstance(sdata, dict):
-                    role = sdata.get("role")
+                    r_val = sdata.get("role")
                     modules = sdata.get("modules") if isinstance(sdata.get("modules"), dict) else {}
-                    has_xhttp_mod = any(
-                        isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
-                        for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
-                    )
-                    turboflare_enabled = (
-                        isinstance(modules.get("cdn_turboflare"), dict)
-                        and bool(modules["cdn_turboflare"].get("enabled"))
-                    )
-                    if role == "origin" or (role == "ru_hub" and has_xhttp_mod):
-                        is_origin_node = True
+                    for m_key, m_cfg in modules.items():
+                        if not (isinstance(m_cfg, dict) and m_cfg.get("enabled")):
+                            continue
+                        if m_key == "vless_xhttp" or str(m_key).startswith("cdn_"):
+                            if r_val == "ru_hub":
+                                is_ru_xhttp_hub = True
+                            if str(m_key).startswith("cdn_") and m_cfg.get("tag"):
+                                extra_cdn_tags.append(str(m_cfg["tag"]))
         except Exception:
             pass
-    if is_origin_node and (not config_read_ok or not config_tags):
+    if is_ru_xhttp_hub and (not config_read_ok or not config_tags):
         if "just1k-wl-default" not in discovered_tags:
             discovered_tags.insert(0, "just1k-wl-default")
-        if turboflare_enabled and "just1k-wl-turboflare" not in discovered_tags:
-            discovered_tags.append("just1k-wl-turboflare")
+        for ct in extra_cdn_tags:
+            if ct not in discovered_tags:
+                discovered_tags.append(ct)
 
-    # 3. Fallback to environment override (for mock/test environments without real config files)
+    # 2. Fallback to environment override
     if not discovered_tags:
         raw = os.getenv("XRAY_INBOUND_TAGS")
         if raw:
@@ -541,11 +624,66 @@ def get_all_managed_inbounds() -> List[str]:
     return discovered_tags
 
 
+def _get_xhttp_location_routes() -> List[Dict[str, Any]]:
+    """Return concrete active XHTTP inbound paths/ports for multi-CDN and multi-hub bot discovery."""
+    routes: List[Dict[str, Any]] = []
+    if not XRAY_CONFIG_PATH.exists():
+        return routes
+
+    node_meta = get_node_state_metadata()
+    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
+    enabled_cdns = [
+        k for k, v in modules.items()
+        if str(k).startswith("cdn_") and isinstance(v, dict) and v.get("enabled") is True
+    ]
+
+    try:
+        with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return routes
+
+    for ib in cfg.get("inbounds", []):
+        if not isinstance(ib, dict):
+            continue
+        tag = str(ib.get("tag") or "")
+        if not tag.startswith("just1k-wl-"):
+            continue
+        ss = ib.get("streamSettings") if isinstance(ib.get("streamSettings"), dict) else {}
+        if ss.get("network") != "xhttp":
+            continue
+        xs = ss.get("xhttpSettings") if isinstance(ss.get("xhttpSettings"), dict) else {}
+        path = str(xs.get("path") or "")
+        if not path:
+            continue
+        loc_code = None
+        cdn_hint = None
+        if tag.startswith("just1k-wl-inbound-"):
+            raw_suffix = tag[len("just1k-wl-inbound-"):]
+            if "__" in raw_suffix:
+                loc_code, cdn_hint = raw_suffix.split("__", 1)
+            else:
+                loc_code = raw_suffix
+                cdn_hint = enabled_cdns[0] if enabled_cdns else None
+        elif tag == "just1k-wl-default":
+            cdn_hint = "cdn_yandex"
+        elif tag == "just1k-wl-turboflare":
+            cdn_hint = "cdn_turboflare"
+        routes.append({
+            "inbound_tag": tag,
+            "port": ib.get("port"),
+            "path": path,
+            "location_code": loc_code,
+            "cdn": cdn_hint,
+            "uplink_http_method": xs.get("uplinkHTTPMethod"),
+            "uplink_data_placement": xs.get("uplinkDataPlacement"),
+        })
+    return routes
+
+
 def is_wl_inbound_tag(t: str) -> bool:
     """Check if tag belongs to white_internet, strictly excluding internal relay tunnels."""
-    if t in ("inbound-tls", "inbound-reality", "from-origin"):
-        return False
-    return t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default") or t.startswith("inbound-")
+    return t.startswith("just1k-wl-") or t == "just1k-wl-default"
 
 
 def resolve_effective_service(service: Optional[str] = None) -> str:
@@ -584,27 +722,6 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
         return vless_inbounds
 
     return discovered_tags
-
-
-def get_active_relays() -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return active relay configurations from relays.json and optional error message."""
-    if RELAYS_FILE_PATH.exists():
-        try:
-            with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    invalid_count = sum(1 for r in data if not isinstance(r, dict))
-                    if invalid_count > 0:
-                        return (
-                            [],
-                            f"Expected list of objects in {RELAYS_FILE_PATH.name}, found {invalid_count} invalid entries",
-                        )
-                    return data, None
-                return [], f"Expected list in {RELAYS_FILE_PATH.name}, got {type(data).__name__}"
-        except Exception as e:
-            logger.warning("Failed to load relays from %s: %s", RELAYS_FILE_PATH, e)
-            return [], f"Corrupted {RELAYS_FILE_PATH.name}: {e}"
-    return [], None
 
 
 grpc_client = XrayGrpcClient(host=GRPC_HOST, port=GRPC_PORT)
@@ -908,48 +1025,41 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         store_corrupted = True
 
     target_inbounds = get_all_managed_inbounds()
-    relays, relays_err = get_active_relays()
     secret_path = get_secret_base_path()
 
     node_meta = get_node_state_metadata()
-    vless_domain = node_meta.get("vless_domain") or node_meta.get("domain") or node_meta.get("sni") or ""
+    domain = str(node_meta.get("domain") or "")
     role = str(node_meta.get("role") or "")
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
     has_wl_module = any(
         isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
-        for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
+        for k in modules
+        if k == "vless_xhttp" or str(k).startswith("cdn_")
     )
     has_vless_module = isinstance(modules.get("vless_tls"), dict) and bool(
         modules["vless_tls"].get("enabled")
     )
     detected_services: List[str] = []
     if (
-        any(
-            t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")
-            for t in target_inbounds
-        )
-        or role in ("origin", "eu_hub")
+        any(t.startswith("just1k-wl-") for t in target_inbounds)
         or (role == "ru_hub" and has_wl_module)
     ):
         detected_services.append("white_internet")
     if (
         any(t.startswith("just1k-vless-") or t == "just1k-vless-direct" for t in target_inbounds)
-        or str(node_meta.get("has_vless", "")) == "1"
-        or role == "exit_node"
         or (role == "ru_hub" and has_vless_module)
     ):
         detected_services.append("vless")
-    if str(node_meta.get("has_relay", "")) == "1" or role in ("relay", "eu_hub"):
-        detected_services.append("relay")
+    if role == "eu_hub":
+        detected_services.append("bridge_hub")
+    elif role == "exit_node":
+        detected_services.append("exit_node")
 
     capabilities: List[str] = []
     if "vless" in detected_services:
         capabilities.extend(["vless", "xray_vless"])
     if "white_internet" in detected_services:
         capabilities.append("white_internet")
-    if "relay" in detected_services:
-        capabilities.append("relay")
 
     pid, starttime, boot_id, running_epoch = (
         epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
@@ -983,6 +1093,9 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         logger.debug("Failed to read disk usage: %s", e)
 
     bot_status = get_bot_status()
+    module_errors = _load_module_errors()
+    links_data = _load_links_data()
+    traffic_limit = _load_traffic_limit_summary()
 
     return {
         "status": "ok" if is_running else "error",
@@ -993,13 +1106,15 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "services": detected_services,
         "capabilities": capabilities,
         "role": role,
+        "domain": domain,
+        "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
-        "peers": peers,
+        "module_errors": module_errors,
+        "links": links_data,
+        "xhttp_locations": _get_xhttp_location_routes(),
+        "traffic_limit": traffic_limit,
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
-        "vless_domain": vless_domain,
-        "relays": relays if not relays_err else [],
-        "relays_error": relays_err,
         "secret_base_path": secret_path,
         "cdn_domain": get_cdn_domain(),
         "sub_path_prefix": get_sub_path_prefix(),
@@ -1013,153 +1128,169 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     }
 
 
+def _validate_fqdn_strict(value: str) -> str:
+    dom = str(value or "").strip().lower().rstrip(".")
+    if not dom or len(dom) > 253:
+        raise ValueError("SNI domain must be non-empty FQDN")
+    try:
+        ipaddress.IPv4Address(dom)
+        raise ValueError("Bare IP address is forbidden as SNI (Zero-Signature requires FQDN)")
+    except ValueError as e:
+        if "forbidden as SNI" in str(e):
+            raise
+    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", dom):
+        raise ValueError(f"Invalid FQDN format for SNI: {dom}")
+    return dom
+
+
+def _validate_ipv4_strict(value: str) -> str:
+    raw = str(value or "").strip()
+    ipaddress.IPv4Address(raw)
+    return raw
+
+
+def _validate_uuid_strict(value: str) -> str:
+    return str(uuid_lib.UUID(str(value or "").strip())).lower()
+
+
+class BridgePeerSpec(BaseModel):
+    id: Optional[str] = Field(default=None, max_length=64)
+    tag: Optional[str] = Field(default=None, max_length=64)
+    code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    name: Optional[str] = None
+    ip: str
+    port: int = Field(default=443, ge=1, le=65535)
+    sni: str
+    uuid: str
+    is_default: bool = False
+    route_user: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_peer(self) -> "BridgePeerSpec":
+        self.ip = _validate_ipv4_strict(self.ip)
+        self.sni = _validate_fqdn_strict(self.sni)
+        self.uuid = _validate_uuid_strict(self.uuid)
+        self.code = self.code.strip().lower()
+        return self
+
+
+class SniRouteSpec(BaseModel):
+    sni: str
+    bridge_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+
+    @model_validator(mode="after")
+    def validate_route(self) -> "SniRouteSpec":
+        self.sni = _validate_fqdn_strict(self.sni)
+        self.bridge_code = self.bridge_code.strip().lower()
+        return self
+
+
+class IncomingPeerSpec(BaseModel):
+    code: Optional[str] = Field(default=None, max_length=32)
+    ip: Optional[str] = None
+    uuid: Optional[str] = None
+    route_user: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_incoming(self) -> "IncomingPeerSpec":
+        if self.ip is not None and self.ip.strip():
+            self.ip = _validate_ipv4_strict(self.ip)
+        if self.uuid is not None and self.uuid.strip():
+            self.uuid = _validate_uuid_strict(self.uuid)
+        return self
+
+
+class HubRouteSpec(BaseModel):
+    code: Optional[str] = Field(default=None, max_length=32)
+    ingress_uuid: Optional[str] = None
+    route_user: str = Field(..., min_length=1, max_length=128)
+    exit_id: Optional[str] = Field(default=None, max_length=64)
+    exit_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+
+    @model_validator(mode="after")
+    def validate_hub_route(self) -> "HubRouteSpec":
+        if self.ingress_uuid is not None and self.ingress_uuid.strip():
+            self.ingress_uuid = _validate_uuid_strict(self.ingress_uuid)
+        self.exit_code = self.exit_code.strip().lower()
+        return self
+
+
+class NodeLinksSectionSpec(BaseModel):
+    bridges: List[BridgePeerSpec] = Field(default_factory=list)
+    sni_routes: List[SniRouteSpec] = Field(default_factory=list)
+    locations: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class NodeLinksUpdateRequest(BaseModel):
+    standard: Optional[NodeLinksSectionSpec] = None
+    bi: Optional[NodeLinksSectionSpec] = None
+    exit_nodes: Optional[List[BridgePeerSpec]] = None
+    allowed_ru_ips: Optional[List[str]] = None
+    allowed_hub_ips: Optional[List[str]] = None
+    incoming_ru_hubs: Optional[List[IncomingPeerSpec]] = None
+    incoming_hubs: Optional[List[IncomingPeerSpec]] = None
+    routes: Optional[List[HubRouteSpec]] = None
+
+    @model_validator(mode="after")
+    def validate_ip_lists(self) -> "NodeLinksUpdateRequest":
+        if self.allowed_ru_ips is not None:
+            self.allowed_ru_ips = [_validate_ipv4_strict(x) for x in self.allowed_ru_ips]
+        if self.allowed_hub_ips is not None:
+            self.allowed_hub_ips = [_validate_ipv4_strict(x) for x in self.allowed_hub_ips]
+        return self
+
+
 @app.get("/v1/node/status")
 def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
-    """Read-only v2 hub metadata summary (role, modules, peers, bot connection)."""
+    """Read-only v2 hub auto-discovery metadata (role, modules, errors, links, bot)."""
     node_meta = get_node_state_metadata()
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
     bot_status = get_bot_status()
     return {
         "status": "ok",
-        "role": str(node_meta.get("role") or ""),
+        "role": str(node_meta.get("role") or "unconfigured"),
         "domain": str(node_meta.get("domain") or ""),
         "cdn_domain": get_cdn_domain(),
-        "vless_domain": node_meta.get("vless_domain") or node_meta.get("domain") or "",
         "sub_path_prefix": get_sub_path_prefix(),
+        "secret_base_path": get_secret_base_path(),
+        "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
-        "peers": peers,
+        "module_errors": _load_module_errors(),
+        "links": _load_links_data(),
+        "xhttp_locations": _get_xhttp_location_routes(),
         "inbounds": get_all_managed_inbounds(),
+        "traffic_limit": _load_traffic_limit_summary(),
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
     }
 
 
-@app.get("/v1/relays")
-def list_relays(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
-    """Returns list of active relays configured on the node."""
-    relays, err = get_active_relays()
-    if err:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Relays configuration error: {err}",
-        )
-    return {
-        "status": "ok",
-        "count": len(relays),
-        "relays": relays,
-    }
-
-
-async def _probe_single_relay(
-    relay: Dict[str, Any],
-    timeout: float = 5.0,
-    retries: int = 2,
-    retry_delay: float = 0.5,
-) -> Dict[str, Any]:
-    if not isinstance(relay, dict):
-        return {
-            "name": "",
-            "code": "",
-            "ip": "",
-            "port": 0,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": "Invalid relay config entry (expected dict)",
-        }
-    ip = relay.get("ip")
-    port = relay.get("port")
-    code = relay.get("code", "")
-    name = relay.get("name", "")
-
-    if not ip or not port:
-        return {
-            "name": name,
-            "code": code,
-            "ip": ip,
-            "port": port,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": "Missing IP or port",
-        }
-
-    last_error: Optional[str] = None
-    total_attempts = max(0, retries) + 1
-    for attempt in range(total_attempts):
-        t0 = time.perf_counter()
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(str(ip), int(port)),
-                timeout=timeout,
-            )
-            rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-            return {
-                "name": name,
-                "code": code,
-                "ip": ip,
-                "port": port,
-                "healthy": True,
-                "rtt_ms": rtt_ms,
-                "error": None,
-            }
-        except asyncio.TimeoutError:
-            last_error = f"Timeout ({timeout}s)"
-        except Exception as exc:
-            last_error = str(exc)
-
-        if attempt < retries:
-            await asyncio.sleep(retry_delay)
-
-    return {
-        "name": name,
-        "code": code,
-        "ip": ip,
-        "port": port,
-        "healthy": False,
-        "rtt_ms": None,
-        "error": last_error or f"Timeout ({timeout}s)",
-    }
-
-
-@app.get("/v1/relays/health")
-async def check_relays_health(
-    timeout: float = Query(5.0, ge=0.5, le=30.0, description="TCP connect timeout per attempt in seconds"),
-    retries: int = Query(2, ge=0, le=5, description="Number of retry attempts before reporting failure"),
+@app.put("/v1/node/links")
+def update_node_links(
+    req: NodeLinksUpdateRequest,
     _: bool = Depends(verify_api_key),
 ) -> Dict[str, Any]:
-    """Probes all configured relay nodes from this Origin node via TCP connection.
+    """Atomically saves Admin-defined node topology links and queues root config apply."""
+    node_meta = get_node_state_metadata()
+    role = str(node_meta.get("role") or "unconfigured")
+    payload = req.model_dump(exclude_none=True)
 
-    Measures RTT and connectivity with configurable retry resilience. Returns status 'ok' if all
-    relays are healthy, 'degraded' if some are unreachable, 'error' if relays config is invalid,
-    or 'empty' if no relays configured.
-    """
-    relays, err = get_active_relays()
-    if err:
+    lp = _links_file_path()
+    try:
+        _atomic_write_json(lp, payload, mode=0o660)
+    except Exception as exc:
+        logger.error("Failed to write links.json at %s: %s", lp, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load relays config: {err}",
-        )
-    if not relays:
-        return {
-            "status": "empty",
-            "count": 0,
-            "all_healthy": True,
-            "relays": [],
-        }
+            detail=f"Failed to save links: {exc}",
+        ) from exc
 
-    tasks = [_probe_single_relay(r, timeout=timeout, retries=retries) for r in relays]
-    results = await asyncio.gather(*tasks)
-    all_healthy = all(r["healthy"] for r in results)
+    queued = _write_apply_pending("links_updated")
     return {
-        "status": "ok" if all_healthy else "degraded",
-        "count": len(results),
-        "all_healthy": all_healthy,
-        "relays": list(results),
+        "status": "ok",
+        "role": role,
+        "apply_queued": queued,
+        "links": payload,
     }
 
 
@@ -1927,7 +2058,7 @@ def _sync_write_certificates(
         tmp_privkey.write_text(privkey_pem.strip() + "\n", encoding="utf-8")
         try:
             tmp_fullchain.chmod(0o644)
-            tmp_privkey.chmod(0o600)
+            tmp_privkey.chmod(0o640)
         except Exception:
             pass
 
@@ -1935,7 +2066,7 @@ def _sync_write_certificates(
         tmp_privkey.replace(privkey_file)
         try:
             fullchain_file.chmod(0o644)
-            privkey_file.chmod(0o600)
+            privkey_file.chmod(0o640)
         except Exception:
             pass
     except Exception:
@@ -1952,12 +2083,12 @@ def _sync_write_certificates(
             shutil.copy2(str(fullchain_file), str(xray_tls_dir / "fullchain.pem"))
             shutil.copy2(str(privkey_file), str(xray_tls_dir / "privkey.pem"))
             (xray_tls_dir / "fullchain.pem").chmod(0o644)
-            (xray_tls_dir / "privkey.pem").chmod(0o600)
+            (xray_tls_dir / "privkey.pem").chmod(0o640)
             if (xray_tls_dir / "vless_fullchain.pem").exists():
                 shutil.copy2(str(fullchain_file), str(xray_tls_dir / "vless_fullchain.pem"))
                 shutil.copy2(str(privkey_file), str(xray_tls_dir / "vless_privkey.pem"))
                 (xray_tls_dir / "vless_fullchain.pem").chmod(0o644)
-                (xray_tls_dir / "vless_privkey.pem").chmod(0o600)
+                (xray_tls_dir / "vless_privkey.pem").chmod(0o640)
         except Exception as e:
             logger.warning("Could not sync to %s: %s", xray_tls_dir, e)
 
@@ -1987,6 +2118,9 @@ async def deploy_certificate(
         ) from exc
 
     actions = []
+    if _write_apply_pending("certificate_updated"):
+        actions.append("apply_queued")
+
     if shutil.which("nginx"):
         try:
             res = await asyncio.create_subprocess_exec(
@@ -2000,7 +2134,7 @@ async def deploy_certificate(
             if res.returncode == 0:
                 actions.append("nginx_reloaded")
         except Exception as e:
-            logger.warning("Nginx reload failed: %s", e)
+            logger.debug("Direct nginx reload skipped (root apply_pending handles it): %s", e)
 
     if shutil.which("systemctl"):
         if (STATE_FILE_PATH.parent / "traffic_limit_exceeded").exists():
@@ -2019,7 +2153,7 @@ async def deploy_certificate(
                 if res.returncode == 0:
                     actions.append("xray_restarted")
             except Exception as e:
-                logger.warning("Xray restart failed: %s", e)
+                logger.debug("Direct xray restart skipped (root apply_pending handles it): %s", e)
 
     logger.info("TLS certificate updated for %s. Actions: %s", clean_domain, actions)
     return {
