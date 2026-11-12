@@ -21,8 +21,8 @@ _is_self_signed_cert() {
     local cert_path="$1"
     [[ -f "$cert_path" ]] || return 1
     local issuer subject
-    issuer="$(openssl x509 -noout -issuer -in "$cert_path" 2>/dev/null | sed 's/^issuer=//' | xargs || true)"
-    subject="$(openssl x509 -noout -subject -in "$cert_path" 2>/dev/null | sed 's/^subject=//' | xargs || true)"
+    issuer="$(openssl x509 -noout -issuer -in "$cert_path" 2>/dev/null | sed -e 's/^issuer=//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)"
+    subject="$(openssl x509 -noout -subject -in "$cert_path" 2>/dev/null | sed -e 's/^subject=//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' || true)"
     [[ -n "$issuer" && -n "$subject" && "$issuer" == "$subject" ]]
 }
 

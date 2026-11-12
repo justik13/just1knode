@@ -6,7 +6,6 @@
 STATE_DIR="${STATE_DIR:-/etc/just1knode}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
-RELAYS_FILE="${RELAYS_FILE:-${STATE_DIR}/relays.json}"
 LINKS_FILE="${LINKS_FILE:-${STATE_DIR}/links.json}"
 
 init_state_dir() {
@@ -14,7 +13,7 @@ init_state_dir() {
     chown root:xrayapi "$STATE_DIR" 2>/dev/null || true
     chmod 2770 "$STATE_DIR" 2>/dev/null || true
 
-    for f in "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE"; do
+    for f in "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE"; do
         if [[ -L "$f" ]]; then
             rm -f "$f"
         fi
@@ -26,15 +25,12 @@ init_state_dir() {
     if [[ ! -f "$CLIENTS_FILE" ]]; then
         echo "{}" > "$CLIENTS_FILE"
     fi
-    if [[ ! -f "$RELAYS_FILE" ]]; then
-        echo "[]" > "$RELAYS_FILE"
-    fi
     if [[ ! -f "$LINKS_FILE" ]]; then
         echo "{}" > "$LINKS_FILE"
     fi
 
-    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE" 2>/dev/null || true
-    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" "$LINKS_FILE" 2>/dev/null || true
+    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
+    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -164,154 +160,12 @@ except Exception:
 " "$STATE_FILE" "$key" "$default_val"
 }
 
-# Миграция устаревших полей и ролей state.json
-migrate_legacy_state() {
-    if [[ ! -f "$STATE_FILE" ]] || ! command -v python3 >/dev/null 2>&1; then
-        return 0
-    fi
-    python3 -c "
-import sys, json, os, tempfile
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-
-f = sys.argv[1]
-if not os.path.exists(f) or os.path.getsize(f) == 0:
-    sys.exit(0)
-
-lock_file = f + '.lock'
-open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-lock_fd = os.open(lock_file, open_flags, 0o660)
-if fcntl:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-try:
-    try:
-        with open(f, 'r', encoding='utf-8', errors='replace') as fp:
-            data = json.load(fp)
-    except Exception:
-        sys.exit(0)
-    if not isinstance(data, dict):
-        sys.exit(0)
-
-    changed = False
-    role = str(data.get('role', '')).lower()
-
-    is_v2_role = role in ('ru_hub', 'eu_hub', 'exit_node')
-    if not is_v2_role:
-        if 'has_relay' not in data:
-            relay_p = str(data.get('relay_port', '')).strip()
-            if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
-                data['has_relay'] = '1'
-                changed = True
-            else:
-                data['has_relay'] = '0'
-                changed = True
-
-        if 'has_vless' not in data:
-            v_dom = str(data.get('vless_domain', '')).strip()
-            if role == 'vless' or (v_dom and v_dom != '-'):
-                data['has_vless'] = '1'
-                changed = True
-            else:
-                data['has_vless'] = '0'
-                changed = True
-
-        has_r = data.get('has_relay') == '1'
-        has_v = data.get('has_vless') == '1'
-        if role != 'origin' and (has_r or has_v) and data.get('role') != 'node':
-            data['role'] = 'node'
-            changed = True
-        elif role in ('awg', 'dual') and not (has_r or has_v):
-            data['role'] = 'unconfigured'
-            changed = True
-
-    if not data.get('xray_api_key') and data.get('awg_api_key'):
-        data['xray_api_key'] = data['awg_api_key']
-        changed = True
-
-    # Migrate active legacy traffic watchdog settings into traffic_limit.json before key purge
-    state_dir = os.path.dirname(os.path.abspath(f))
-    tl_cfg_path = os.path.join(state_dir, 'traffic_limit.json')
-    tl_exceeded_path = os.path.join(state_dir, 'traffic_limit_exceeded')
-    legacy_cutoff_path = os.path.join(state_dir, 'traffic_cutoff.active')
-    old_tl_status = str(data.get('traffic_limit_status') or '').strip().lower()
-    raw_old_gb = data.get('traffic_limit_gb')
-    raw_old_day = data.get('traffic_reset_day')
-    old_gb = 0
-    try:
-        if raw_old_gb is not None and not isinstance(raw_old_gb, bool):
-            old_gb = int(str(raw_old_gb).strip() or 0)
-    except (TypeError, ValueError):
-        old_gb = 0
-    old_day = 1
-    try:
-        if raw_old_day is not None and not isinstance(raw_old_day, bool):
-            parsed_day = int(str(raw_old_day).strip() or 1)
-            if 1 <= parsed_day <= 31:
-                old_day = parsed_day
-    except (TypeError, ValueError):
-        old_day = 1
-
-    if old_tl_status == 'enabled' and old_gb > 0 and not os.path.exists(tl_cfg_path):
-        tl_fd, tl_tmp = tempfile.mkstemp(dir=state_dir, suffix='.tmp')
-        try:
-            os.fchmod(tl_fd, 0o640)
-            with os.fdopen(tl_fd, 'w', encoding='utf-8') as tfp:
-                json.dump({'limit_gb': old_gb, 'reset_day': old_day}, tfp, indent=2)
-                tfp.flush()
-            os.replace(tl_tmp, tl_cfg_path)
-        except Exception:
-            if os.path.exists(tl_tmp):
-                os.remove(tl_tmp)
-    if (
-        str(data.get('traffic_cutoff_triggered') or '').strip().lower() == 'true'
-        or os.path.exists(legacy_cutoff_path)
-    ) and os.path.exists(tl_cfg_path) and not os.path.exists(tl_exceeded_path):
-        try:
-            with open(tl_exceeded_path, 'a', encoding='utf-8'):
-                pass
-        except Exception:
-            pass
-
-    legacy_keys = [
-        'has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port',
-        'traffic_limit_status', 'traffic_limit_gb', 'traffic_reset_day', 'traffic_cutoff_triggered',
-        'traffic_telegram_token', 'traffic_telegram_chat_id', 'traffic_warn_pct',
-        'traffic_tg_token', 'traffic_tg_chat',
-    ]
-    for k in legacy_keys:
-        if k in data:
-            del data[k]
-            changed = True
-
-    if changed:
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
-        try:
-            import grp
-            gid = grp.getgrnam('xrayapi').gr_gid
-            os.fchown(tmp_fd, 0, gid)
-            os.fchmod(tmp_fd, 0o660)
-        except Exception:
-            pass
-        with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:
-            json.dump(data, fp, indent=2, ensure_ascii=False)
-            fp.flush()
-        os.replace(tmp_path, f)
-finally:
-    if fcntl:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    os.close(lock_fd)
-" "$STATE_FILE" 2>/dev/null || true
-}
-
 # Определение фактического статуса сервера (только роли v2)
 get_node_status() {
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "unconfigured"
         return
     fi
-    migrate_legacy_state
 
     local role
     role="$(get_state_val "role" "unconfigured")"
@@ -331,19 +185,11 @@ manifest_begin() {
     : > "$MANIFEST_LOG"
 
     local targets=(
-        "$RELAYS_FILE"
         "$LINKS_FILE"
         "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
         "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}"
         "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/just1k-xhttp-upstreams.conf"
     )
-
-    if [[ -d "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" ]]; then
-        while IFS= read -r -d '' conf_file; do
-            targets+=("$conf_file")
-            echo "$conf_file" >> "$TXN_DIR/initial_nginx_relays.txt"
-        done < <(find "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" -type f -name "*.conf" -print0 2>/dev/null)
-    fi
 
     for extra in "${extra_targets[@]}"; do
         if [[ -n "$extra" ]]; then
@@ -428,16 +274,6 @@ manifest_rollback() {
             log "Удален файл, созданный во время транзакции: $target"
         fi
     done < "$MANIFEST_LOG"
-
-    # Удаление любых новых файлов в NGINX_RELAYS_DIR, созданных во время транзакции
-    if [[ -d "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" ]]; then
-        while IFS= read -r -d '' cur_conf; do
-            if [[ ! -f "$TXN_DIR/initial_nginx_relays.txt" ]] || ! grep -Fxq "$cur_conf" "$TXN_DIR/initial_nginx_relays.txt" 2>/dev/null; then
-                rm -f "$cur_conf" 2>/dev/null || true
-                log "Удален новый Nginx конфиг, созданный во время транзакции: $cur_conf"
-            fi
-        done < <(find "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" -type f -name "*.conf" -print0 2>/dev/null)
-    fi
 
     rm -rf "${TXN_DIR:-}"
     MANIFEST_LOG=""

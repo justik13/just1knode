@@ -46,18 +46,13 @@ vless_tls_install() {
         return 1
     fi
 
-    local prev_has_v prev_vdom prev_had_mod
-    prev_has_v="$(get_state_val "has_vless" "0")"
-    prev_vdom="$(get_state_val "vless_domain" "")"
+    local prev_had_mod
     prev_had_mod="0"
     is_module_enabled "vless_tls" && prev_had_mod="1"
 
     local mod_json
     mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "port": 443, "tag": "just1k-vless-direct", "domain": sys.argv[1]}))' "$domain")"
     set_module_config "vless_tls" "$mod_json"
-    set_state_val "has_vless" "1"
-    set_state_val "vless_domain" "$domain"
-    set_state_val "vless_port" "443"
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
         ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
@@ -67,8 +62,6 @@ vless_tls_install() {
         if [[ "$prev_had_mod" == "0" ]]; then
             remove_module_config "vless_tls"
         fi
-        set_state_val "has_vless" "$prev_has_v"
-        set_state_val "vless_domain" "$prev_vdom"
         warn "Не удалось применить конфигурацию VLESS TLS. Изменения откатаны."
         return 1
     fi
@@ -96,11 +89,9 @@ except Exception:
 ' "$STATE_FILE" 2>/dev/null || echo "{}")"
 
     remove_module_config "vless_tls"
-    set_state_val "has_vless" "0"
 
     if ! apply_v2_hub_configuration; then
         set_module_config "vless_tls" "$prev_json"
-        set_state_val "has_vless" "1"
         warn "Ошибка пересборки конфигурации после отключения VLESS TLS. Откат."
         return 1
     fi

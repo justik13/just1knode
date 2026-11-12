@@ -106,7 +106,7 @@ def ld(p):
     except Exception: return {}
 lk = ld(sys.argv[1])
 st = ld(sys.argv[2])
-ex_api = lk.get("exit_nodes") or lk.get("exits") or []
+ex_api = lk.get("exit_nodes") or []
 peers = st.get("peers") or []
 
 print("  [Админка links.json — Выходные НОДЫ]:")
@@ -228,7 +228,7 @@ lk = ld(sys.argv[2])
 ru = set(st.get("allowed_ru_ips") or []) | set(lk.get("allowed_ru_ips") or [])
 for item in (lk.get("incoming_ru_hubs") or []):
     if isinstance(item, dict) and item.get("ip"): ru.add(item["ip"])
-ex = len(lk.get("exit_nodes") or lk.get("exits") or []) + len(st.get("peers") or [])
+ex = len(lk.get("exit_nodes") or []) + len(st.get("peers") or [])
 print(f"{len(ru)}|{ex}")
 PYEOF
 )"

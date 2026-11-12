@@ -388,10 +388,33 @@ except Exception:
     print("{}")
 ' "$STATE_FILE" "$mod_key" 2>/dev/null || echo "{}")"
 
+    local prev_root_cdn next_root_cdn
+    prev_root_cdn="$(get_state_val "cdn_domain" "")"
+
     remove_module_config "$mod_key"
+
+    next_root_cdn="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        st = json.load(f)
+except Exception:
+    st = {}
+mods = st.get("modules") if isinstance(st.get("modules"), dict) else {}
+found = ""
+for k, m in mods.items():
+    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled"):
+        d = str(m.get("cdn_domain") or m.get("domain") or "").strip()
+        if d and d != "-":
+            found = d
+            break
+print(found)
+' "$STATE_FILE" 2>/dev/null || echo "")"
+    set_state_val "cdn_domain" "$next_root_cdn"
 
     if ! apply_v2_hub_configuration; then
         set_module_config "$mod_key" "$prev_json"
+        set_state_val "cdn_domain" "$prev_root_cdn"
         warn "Ошибка пересборки после удаления ${mod_key}. Откат."
         return 1
     fi

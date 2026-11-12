@@ -72,7 +72,6 @@ EOF
 ensure_api_ssl_cert() {
     local domain cert_path key_path
     domain="$(get_state_val "domain" "")"
-    [[ -z "$domain" || "$domain" == "-" ]] && domain="$(get_state_val "vless_domain" "")"
 
     if [[ -n "$domain" && "$domain" != "-" ]]; then
         local le_cert="${LETSENCRYPT_DIR:-/etc/letsencrypt}/live/${domain}/fullchain.pem"
@@ -334,9 +333,6 @@ change_role_guarded() {
     fi
 
     set_state_val "role" "unconfigured"
-    set_state_val "has_vless" "0"
-    set_state_val "has_relay" "0"
-    set_state_val "has_wl" "0"
     set_state_json_val "peers" "[]"
     set_state_json_val "allowed_ru_ips" "[]"
     save_links_json "{}"
@@ -437,7 +433,6 @@ select_role_wizard() {
         ru_hub_menu
     elif [[ "$new_role" == "eu_hub" ]]; then
         set_state_val "relay_port" "443"
-        set_state_val "has_relay" "1"
         if ! apply_v2_hub_configuration; then
             warn "Ошибка активации Зарубежного ХАБа."
             return 1
@@ -445,8 +440,6 @@ select_role_wizard() {
         log "✔ Роль 'Зарубежный ХАБ' активирована!"
         eu_hub_menu
     elif [[ "$new_role" == "exit_node" ]]; then
-        set_state_val "has_vless" "1"
-        set_state_val "vless_domain" "$input_dom"
         if ! apply_v2_hub_configuration; then
             warn "Ошибка активации Выходной НОДы."
             return 1

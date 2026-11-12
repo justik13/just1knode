@@ -80,10 +80,9 @@ vless_xhttp_install() {
     sub_prefix="$(get_state_val "sub_path_prefix" "/sub/wl")"
     [[ -z "$sub_prefix" || "$sub_prefix" == "-" ]] && sub_prefix="/sub/wl"
 
-    local prev_json prev_had_mod prev_has_wl
+    local prev_json prev_had_mod
     prev_had_mod="0"
     is_module_enabled "vless_xhttp" && prev_had_mod="1"
-    prev_has_wl="$(get_state_val "has_wl" "0")"
     prev_json="$(python3 -c '
 import json, sys
 try:
@@ -96,7 +95,6 @@ except Exception:
     local mod_json
     mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "bot_domain": sys.argv[1], "sub_path_prefix": sys.argv[2]}))' "$input_bot_dom" "$sub_prefix")"
     set_module_config "vless_xhttp" "$mod_json"
-    set_state_val "has_wl" "1"
     [[ -n "$input_bot_dom" ]] && set_state_val "bot_domain" "$input_bot_dom"
     set_state_val "sub_path_prefix" "$sub_prefix"
 
@@ -110,7 +108,6 @@ except Exception:
         else
             remove_module_config "vless_xhttp"
         fi
-        set_state_val "has_wl" "$prev_has_wl"
         warn "Не удалось применить базовый модуль VLESS XHTTP. Выполнен откат."
         return 1
     fi
@@ -144,11 +141,9 @@ except Exception:
 ' "$STATE_FILE" 2>/dev/null || echo "{}")"
 
     remove_module_config "vless_xhttp"
-    set_state_val "has_wl" "0"
 
     if ! apply_v2_hub_configuration; then
         set_module_config "vless_xhttp" "$prev_json"
-        set_state_val "has_wl" "1"
         warn "Ошибка пересборки после удаления VLESS XHTTP. Откат."
         return 1
     fi

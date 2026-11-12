@@ -501,7 +501,6 @@ update_node_post() {
     trap release_just1knode_lock RETURN EXIT
 
     info "4/4. Самодиагностика, авто-конфигурация и проверка сетевых политик..."
-    migrate_legacy_state
     if declare -F load_all_transport_modules >/dev/null 2>&1; then
         load_all_transport_modules || true
     fi

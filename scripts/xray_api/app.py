@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, model_validator
 
 import sqlite3
@@ -256,7 +256,6 @@ if os.path.exists(CONFIG_ENV_FILE):
 API_KEY = os.getenv("XRAY_API_KEY", "")
 GRPC_HOST = os.getenv("XRAY_GRPC_HOST", "127.0.0.1")
 GRPC_PORT = int(os.getenv("XRAY_GRPC_PORT", "10085"))
-RELAYS_FILE_PATH = Path(os.getenv("RELAYS_FILE_PATH", "/etc/just1knode/relays.json"))
 XRAY_CONFIG_PATH = Path(os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json"))
 CLIENTS_FILE_PATH = Path(os.getenv("CLIENTS_FILE_PATH", "/etc/just1knode/clients.json"))
 STATE_FILE_PATH = Path(os.getenv("STATE_FILE_PATH", "/etc/just1knode/state.json"))
@@ -440,9 +439,9 @@ def _mask_uuid(val: str) -> str:
 
 
 def get_secret_base_path() -> str:
-    """Discovers canonical secret XHTTP base path configured for this Origin node.
+    """Discovers canonical secret XHTTP base path configured for this RU hub node.
 
-    Strictly matches managed tags ('just1k-wl-*' or legacy 'inbound-default').
+    Strictly matches managed tags ('just1k-wl-*').
     """
     if STATE_FILE_PATH.exists():
         try:
@@ -459,10 +458,10 @@ def get_secret_base_path() -> str:
             with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
                 inbounds = cfg.get("inbounds", [])
-                # Priority 1: tags matching just1k-wl-default or legacy inbound-default
+                # Priority 1: tags matching just1k-wl-default
                 for ib in inbounds:
                     tag = ib.get("tag", "")
-                    if tag in ("just1k-wl-default", "inbound-default"):
+                    if tag == "just1k-wl-default":
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
                         if not path:
                             path = (
@@ -560,21 +559,7 @@ def get_all_managed_inbounds() -> List[str]:
 
     discovered_tags: List[str] = []
 
-    # 1. Read from relays.json if available
-    relay_tags: List[str] = []
-    if RELAYS_FILE_PATH.exists():
-        try:
-            with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    for r in data:
-                        t = r.get("inbound_tag")
-                        if t and (t.startswith("just1k-wl-") or t.startswith("just1k-vless-")):
-                            relay_tags.append(t)
-        except Exception as e:
-            logger.warning("Could not load relays from %s: %s", RELAYS_FILE_PATH, e)
-
-    # 2. Read from Xray config.json if available
+    # 1. Read from Xray config.json if available
     config_tags: List[str] = []
     config_read_ok = False
     if XRAY_CONFIG_PATH.exists():
@@ -584,11 +569,11 @@ def get_all_managed_inbounds() -> List[str]:
                 for ib in cfg.get("inbounds", []):
                     protocol = ib.get("protocol", "").lower()
                     tag = ib.get("tag", "")
-                    # Match managed VLESS/VMESS inbounds strictly by just1k-wl- and just1k-vless- namespaces
+                    # Match managed VLESS inbounds strictly by just1k-wl- and just1k-vless- namespaces
                     if protocol in ("vless", "vmess") and (
                         tag.startswith("just1k-wl-")
                         or tag.startswith("just1k-vless-")
-                        or tag in ("just1k-wl-default", "inbound-default", "just1k-vless-direct")
+                        or tag in ("just1k-wl-default", "just1k-vless-direct")
                     ):
                         config_tags.append(tag)
                 config_read_ok = True
@@ -596,17 +581,13 @@ def get_all_managed_inbounds() -> List[str]:
             logger.warning("Could not load inbounds from %s: %s", XRAY_CONFIG_PATH, e)
 
     # Prioritize default tag if present
-    all_candidate_tags = config_tags + relay_tags
-    for tag in all_candidate_tags:
-        if tag in ("just1k-wl-default", "inbound-default") and tag not in discovered_tags:
+    for tag in config_tags:
+        if tag == "just1k-wl-default" and tag not in discovered_tags:
             discovered_tags.insert(0, tag)
         elif tag not in discovered_tags:
             discovered_tags.append(tag)
 
-    if not discovered_tags and relay_tags:
-        discovered_tags = list(relay_tags)
-
-    is_ru_xhttp_hub = bool(relay_tags)
+    is_ru_xhttp_hub = False
     extra_cdn_tags: List[str] = []
     if STATE_FILE_PATH.exists():
         try:
@@ -619,7 +600,7 @@ def get_all_managed_inbounds() -> List[str]:
                         if not (isinstance(m_cfg, dict) and m_cfg.get("enabled")):
                             continue
                         if m_key == "vless_xhttp" or str(m_key).startswith("cdn_"):
-                            if r_val in ("ru_hub", "origin"):
+                            if r_val == "ru_hub":
                                 is_ru_xhttp_hub = True
                             if str(m_key).startswith("cdn_") and m_cfg.get("tag"):
                                 extra_cdn_tags.append(str(m_cfg["tag"]))
@@ -632,7 +613,7 @@ def get_all_managed_inbounds() -> List[str]:
             if ct not in discovered_tags:
                 discovered_tags.append(ct)
 
-    # 3. Fallback to environment override (for mock/test environments without real config files)
+    # 2. Fallback to environment override
     if not discovered_tags:
         raw = os.getenv("XRAY_INBOUND_TAGS")
         if raw:
@@ -645,9 +626,7 @@ def get_all_managed_inbounds() -> List[str]:
 
 def is_wl_inbound_tag(t: str) -> bool:
     """Check if tag belongs to white_internet, strictly excluding internal relay tunnels."""
-    if t in ("inbound-tls", "inbound-reality", "from-origin"):
-        return False
-    return t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default") or t.startswith("inbound-")
+    return t.startswith("just1k-wl-") or t == "just1k-wl-default"
 
 
 def resolve_effective_service(service: Optional[str] = None) -> str:
@@ -686,27 +665,6 @@ def get_target_inbounds(service: Optional[str] = None) -> List[str]:
         return vless_inbounds
 
     return discovered_tags
-
-
-def get_active_relays() -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return active relay configurations from relays.json and optional error message."""
-    if RELAYS_FILE_PATH.exists():
-        try:
-            with open(RELAYS_FILE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    invalid_count = sum(1 for r in data if not isinstance(r, dict))
-                    if invalid_count > 0:
-                        return (
-                            [],
-                            f"Expected list of objects in {RELAYS_FILE_PATH.name}, found {invalid_count} invalid entries",
-                        )
-                    return data, None
-                return [], f"Expected list in {RELAYS_FILE_PATH.name}, got {type(data).__name__}"
-        except Exception as e:
-            logger.warning("Failed to load relays from %s: %s", RELAYS_FILE_PATH, e)
-            return [], f"Corrupted {RELAYS_FILE_PATH.name}: {e}"
-    return [], None
 
 
 grpc_client = XrayGrpcClient(host=GRPC_HOST, port=GRPC_PORT)
@@ -1010,11 +968,10 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         store_corrupted = True
 
     target_inbounds = get_all_managed_inbounds()
-    relays, relays_err = get_active_relays()
     secret_path = get_secret_base_path()
 
     node_meta = get_node_state_metadata()
-    vless_domain = node_meta.get("vless_domain") or node_meta.get("domain") or node_meta.get("sni") or ""
+    domain = str(node_meta.get("domain") or "")
     role = str(node_meta.get("role") or "")
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
     peers = node_meta.get("peers") if isinstance(node_meta.get("peers"), list) else []
@@ -1028,10 +985,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     )
     detected_services: List[str] = []
     if (
-        any(
-            t.startswith("just1k-wl-") or t in ("just1k-wl-default", "inbound-default")
-            for t in target_inbounds
-        )
+        any(t.startswith("just1k-wl-") for t in target_inbounds)
         or (role == "ru_hub" and has_wl_module)
     ):
         detected_services.append("white_internet")
@@ -1050,8 +1004,6 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         capabilities.extend(["vless", "xray_vless"])
     if "white_internet" in detected_services:
         capabilities.append("white_internet")
-    if "relay" in detected_services:
-        capabilities.append("relay")
 
     pid, starttime, boot_id, running_epoch = (
         epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
@@ -1098,7 +1050,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "services": detected_services,
         "capabilities": capabilities,
         "role": role,
-        "domain": str(node_meta.get("domain") or ""),
+        "domain": domain,
         "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
         "module_errors": module_errors,
@@ -1107,9 +1059,6 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "traffic_limit": traffic_limit,
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
-        "vless_domain": vless_domain,
-        "relays": relays if not relays_err else [],
-        "relays_error": relays_err,
         "secret_base_path": secret_path,
         "cdn_domain": get_cdn_domain(),
         "sub_path_prefix": get_sub_path_prefix(),
@@ -1245,7 +1194,6 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
         "role": str(node_meta.get("role") or "unconfigured"),
         "domain": str(node_meta.get("domain") or ""),
         "cdn_domain": get_cdn_domain(),
-        "vless_domain": node_meta.get("vless_domain") or node_meta.get("domain") or "",
         "sub_path_prefix": get_sub_path_prefix(),
         "secret_base_path": get_secret_base_path(),
         "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
@@ -1286,134 +1234,6 @@ def update_node_links(
         "role": role,
         "apply_queued": queued,
         "links": payload,
-    }
-
-
-@app.get("/v1/relays")
-def list_relays(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
-    """Returns list of active relays configured on the node."""
-    relays, err = get_active_relays()
-    if err:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Relays configuration error: {err}",
-        )
-    return {
-        "status": "ok",
-        "count": len(relays),
-        "relays": relays,
-    }
-
-
-async def _probe_single_relay(
-    relay: Dict[str, Any],
-    timeout: float = 5.0,
-    retries: int = 2,
-    retry_delay: float = 0.5,
-) -> Dict[str, Any]:
-    if not isinstance(relay, dict):
-        return {
-            "name": "",
-            "code": "",
-            "ip": "",
-            "port": 0,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": "Invalid relay config entry (expected dict)",
-        }
-    ip = relay.get("ip")
-    port = relay.get("port")
-    code = relay.get("code", "")
-    name = relay.get("name", "")
-
-    if not ip or not port:
-        return {
-            "name": name,
-            "code": code,
-            "ip": ip,
-            "port": port,
-            "healthy": False,
-            "rtt_ms": None,
-            "error": "Missing IP or port",
-        }
-
-    last_error: Optional[str] = None
-    total_attempts = max(0, retries) + 1
-    for attempt in range(total_attempts):
-        t0 = time.perf_counter()
-        try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(str(ip), int(port)),
-                timeout=timeout,
-            )
-            rtt_ms = round((time.perf_counter() - t0) * 1000, 1)
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-            return {
-                "name": name,
-                "code": code,
-                "ip": ip,
-                "port": port,
-                "healthy": True,
-                "rtt_ms": rtt_ms,
-                "error": None,
-            }
-        except asyncio.TimeoutError:
-            last_error = f"Timeout ({timeout}s)"
-        except Exception as exc:
-            last_error = str(exc)
-
-        if attempt < retries:
-            await asyncio.sleep(retry_delay)
-
-    return {
-        "name": name,
-        "code": code,
-        "ip": ip,
-        "port": port,
-        "healthy": False,
-        "rtt_ms": None,
-        "error": last_error or f"Timeout ({timeout}s)",
-    }
-
-
-@app.get("/v1/relays/health")
-async def check_relays_health(
-    timeout: float = Query(5.0, ge=0.5, le=30.0, description="TCP connect timeout per attempt in seconds"),
-    retries: int = Query(2, ge=0, le=5, description="Number of retry attempts before reporting failure"),
-    _: bool = Depends(verify_api_key),
-) -> Dict[str, Any]:
-    """Probes all configured relay nodes from this Origin node via TCP connection.
-
-    Measures RTT and connectivity with configurable retry resilience. Returns status 'ok' if all
-    relays are healthy, 'degraded' if some are unreachable, 'error' if relays config is invalid,
-    or 'empty' if no relays configured.
-    """
-    relays, err = get_active_relays()
-    if err:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load relays config: {err}",
-        )
-    if not relays:
-        return {
-            "status": "empty",
-            "count": 0,
-            "all_healthy": True,
-            "relays": [],
-        }
-
-    tasks = [_probe_single_relay(r, timeout=timeout, retries=retries) for r in relays]
-    results = await asyncio.gather(*tasks)
-    all_healthy = all(r["healthy"] for r in results)
-    return {
-        "status": "ok" if all_healthy else "degraded",
-        "count": len(results),
-        "all_healthy": all_healthy,
-        "relays": list(results),
     }
 
 

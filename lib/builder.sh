@@ -69,10 +69,8 @@ assemble_v2_hub_config() {
     local cfg_file="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
     local state_file="${STATE_FILE:-/etc/just1knode/state.json}"
     local clients_file="${CLIENTS_FILE:-/etc/just1knode/clients.json}"
-    local relays_file="${RELAYS_FILE:-${STATE_DIR:-/etc/just1knode}/relays.json}"
     local links_file="${LINKS_FILE:-${STATE_DIR:-/etc/just1knode}/links.json}"
     local nginx_dir="${NGINX_CONF_DIR:-/etc/nginx}"
-    local relays_d="${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}"
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
     local xray_tls_dir="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}/tls"
 
@@ -99,9 +97,9 @@ assemble_v2_hub_config() {
     meta_tmp="$(mktemp "/tmp/just1k-meta.tmp.XXXXXX" 2>/dev/null || mktemp)"
 
     if ! python3 - \
-        "$state_file" "$clients_file" "$relays_file" "$links_file" \
+        "$state_file" "$clients_file" "$links_file" \
         "$cfg_file" "$tmp_xray" "$tmp_nginx" "$tmp_map" "$tmp_stream" \
-        "$xray_tls_dir" "$le_dir" "$relays_d" "$cdn_specs_json" \
+        "$xray_tls_dir" "$le_dir" "$cdn_specs_json" \
         "$broken_csv" "$nginx_stream_avail" > "$meta_tmp" <<'PYEOF'
 import ipaddress
 import json
@@ -114,7 +112,6 @@ import uuid as uuid_lib
 (
     state_path,
     clients_path,
-    relays_path,
     links_path,
     cur_cfg_path,
     out_xray_path,
@@ -123,11 +120,10 @@ import uuid as uuid_lib
     out_stream_path,
     xray_tls_dir,
     le_dir,
-    relays_d,
     cdn_specs_raw,
     broken_csv,
     nginx_stream_avail_str,
-) = sys.argv[1:16]
+) = sys.argv[1:14]
 
 nginx_stream_avail = nginx_stream_avail_str == "true"
 broken_modules = {x.strip() for x in broken_csv.split(",") if x.strip()}
@@ -197,9 +193,6 @@ elif not secret_base.startswith("/"):
 
 modules = state.get("modules") if isinstance(state.get("modules"), dict) else {}
 peers = state.get("peers") if isinstance(state.get("peers"), list) else []
-relays_disk = load_json(relays_path, [])
-if not isinstance(relays_disk, list):
-    relays_disk = []
 
 def mod_on(name):
     if name in broken_modules:
@@ -207,7 +200,8 @@ def mod_on(name):
     m = modules.get(name)
     return isinstance(m, dict) and m.get("enabled") is True
 
-# Сохраняем действующих клиентов из clients.json и текущего config.json (только для ru_hub)
+# Сохраняем действующих клиентов из clients.json и текущего config.json (только для ru_hub).
+# ClientStore хранит структуру {"clients": {uuid: meta}, ...}; исключаем отозванных/disabled.
 cur_cfg = load_json(cur_cfg_path, {})
 existing_clients_by_tag = {}
 if isinstance(cur_cfg, dict):
@@ -220,34 +214,66 @@ if isinstance(cur_cfg, dict):
 clients_db = load_json(clients_path, {})
 vless_clients = {}
 wl_clients = {}
+revoked_vless = set()
+revoked_wl = set()
 
+raw_clients_entries = {}
 if isinstance(clients_db, dict):
-    for cid, meta in clients_db.items():
-        if not isinstance(meta, dict):
-            continue
-        email = str(meta.get("email") or cid)
-        ss = meta.get("service_states") if isinstance(meta.get("service_states"), dict) else {}
-        if ss:
-            if isinstance(ss.get("vless"), dict) and ss["vless"].get("is_active") and not ss["vless"].get("tombstone"):
+    inner_clients = clients_db.get("clients")
+    if isinstance(inner_clients, dict):
+        raw_clients_entries = inner_clients
+    elif isinstance(inner_clients, list):
+        raw_clients_entries = {str(u): {"is_active": True} for u in inner_clients if isinstance(u, str)}
+    elif "clients" not in clients_db:
+        raw_clients_entries = clients_db
+elif isinstance(clients_db, list):
+    raw_clients_entries = {str(u): {"is_active": True} for u in clients_db if isinstance(u, str)}
+
+for cid, meta in raw_clients_entries.items():
+    if not isinstance(meta, dict):
+        continue
+    email = str(meta.get("email") or cid)
+    top_tombstone = bool(meta.get("tombstone", False))
+    ss = meta.get("service_states") if isinstance(meta.get("service_states"), dict) else {}
+    if ss:
+        st_v = ss.get("vless")
+        if isinstance(st_v, dict):
+            if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
                 vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
-            if isinstance(ss.get("white_internet"), dict) and ss["white_internet"].get("is_active") and not ss["white_internet"].get("tombstone"):
+            else:
+                revoked_vless.add(cid)
+        st_w = ss.get("white_internet")
+        if isinstance(st_w, dict):
+            if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
                 wl_clients[cid] = {"id": cid, "email": email}
-        elif meta.get("is_active", True) and not meta.get("tombstone", False):
-            svcs = meta.get("services") or ([meta.get("service")] if meta.get("service") else [])
+            else:
+                revoked_wl.add(cid)
+    else:
+        svcs = meta.get("services") or ([meta.get("service")] if meta.get("service") else [])
+        is_ok = bool(meta.get("is_active", True)) and not top_tombstone
+        if is_ok:
             if "vless" in svcs:
                 vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
             if "white_internet" in svcs:
                 wl_clients[cid] = {"id": cid, "email": email}
+        else:
+            if not svcs or "vless" in svcs:
+                revoked_vless.add(cid)
+            if not svcs or "white_internet" in svcs:
+                revoked_wl.add(cid)
 
-def merged_clients(tag, primary_map, flow_val=""):
+def merged_clients(tag, primary_map, flow_val="", revoked_set=None):
+    revoked = revoked_set or set()
     merged = {}
     for c in existing_clients_by_tag.get(tag, []):
-        if isinstance(c, dict) and c.get("id"):
+        if isinstance(c, dict) and c.get("id") and c["id"] not in revoked:
             item = {"id": c["id"], "email": c.get("email") or c["id"]}
             if flow_val:
                 item["flow"] = flow_val
             merged[c["id"]] = item
     for cid, c in primary_map.items():
+        if cid in revoked:
+            continue
         item = dict(c)
         if flow_val:
             item["flow"] = flow_val
@@ -400,27 +426,21 @@ if role == "ru_hub":
     has_xhttp = mod_on("vless_xhttp")
     active_cdns = [k for k in CDN_PROVIDER_SPECS if mod_on(k)] if has_xhttp else []
 
-    # Раздельное извлечение мостов Стандарт vs БИ (с фолбэком к общим peers / legacy bridges)
+    # Раздельное извлечение мостов Стандарт vs БИ (links.json v2 + локальный резерв peers)
     std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
     bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
     shared_bridges = [
         p for p in (links.get("bridges") if isinstance(links.get("bridges"), list) else peers)
         if isinstance(p, dict) and p.get("ip") and p.get("uuid")
     ]
-    std_bridges_raw = std_cfg.get("bridges") if isinstance(std_cfg.get("bridges"), list) else (
-        links.get("standard_bridges") if isinstance(links.get("standard_bridges"), list) else shared_bridges
-    )
-    bi_bridges_raw = bi_cfg.get("bridges") if isinstance(bi_cfg.get("bridges"), list) else (
-        links.get("bi_bridges") if isinstance(links.get("bi_bridges"), list) else shared_bridges
-    )
+    std_bridges_raw = std_cfg.get("bridges") if isinstance(std_cfg.get("bridges"), list) else []
+    bi_bridges_raw = bi_cfg.get("bridges") if isinstance(bi_cfg.get("bridges"), list) else []
     if not std_bridges_raw and shared_bridges:
         std_bridges_raw = shared_bridges
     if not bi_bridges_raw and shared_bridges:
         bi_bridges_raw = shared_bridges
 
-    sni_routes_raw = std_cfg.get("sni_routes") if isinstance(std_cfg.get("sni_routes"), list) else (
-        links.get("sni_routes") if isinstance(links.get("sni_routes"), list) else []
-    )
+    sni_routes_raw = std_cfg.get("sni_routes") if isinstance(std_cfg.get("sni_routes"), list) else []
     valid_sni_routes = []
     if has_vless_tls and nginx_stream_avail:
         seen_sni = set()
@@ -460,7 +480,7 @@ if role == "ru_hub":
             "port": tls_port,
             "protocol": "vless",
             "settings": {
-                "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision"),
+                "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision", revoked_vless),
                 "decryption": "none",
                 "fallbacks": [{"dest": fb_dest}],
             },
@@ -480,17 +500,16 @@ if role == "ru_hub":
         if mod_cfg.get("xPaddingPlacement"):
             spec_eff["xPaddingPlacement"] = str(mod_cfg["xPaddingPlacement"])
         cfg["inbounds"].append(
-            build_xhttp_inbound(c_tag, c_port, c_path, spec_eff, merged_clients(c_tag, wl_clients))
+            build_xhttp_inbound(c_tag, c_port, c_path, spec_eff, merged_clients(c_tag, wl_clients, "", revoked_wl))
         )
         bi_inbounds.append(c_tag)
 
-    # Локационные XHTTP инбаунды (БИ per-location paths из links.json / relays.json)
+    # Локационные XHTTP инбаунды (БИ per-location paths из links.json v2)
     seen_loc_codes = set()
     loc_sources = []
     if isinstance(bi_cfg.get("locations"), list):
         loc_sources.extend(bi_cfg["locations"])
     loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
-    loc_sources.extend(relays_disk)
 
     base_cdn_spec = CDN_PROVIDER_SPECS[active_cdns[0]] if active_cdns else None
     used_ports = {ib.get("port") for ib in cfg["inbounds"] if ib.get("port")}
@@ -503,7 +522,7 @@ if role == "ru_hub":
         if not code or code in seen_loc_codes:
             continue
         seen_loc_codes.add(code)
-        r_tag = str(loc.get("inbound_tag") or f"just1k-wl-inbound-{code}")
+        r_tag = f"just1k-wl-inbound-{code}"
         r_port = int(loc.get("inbound_port") or 0)
         if not r_port or r_port in used_ports:
             while next_port in used_ports:
@@ -513,7 +532,7 @@ if role == "ru_hub":
         r_path = str(loc.get("path") or f"{secret_base}/{code}")
         if base_cdn_spec is not None:
             cfg["inbounds"].append(
-                build_xhttp_inbound(r_tag, r_port, r_path, base_cdn_spec, merged_clients(r_tag, wl_clients))
+                build_xhttp_inbound(r_tag, r_port, r_path, base_cdn_spec, merged_clients(r_tag, wl_clients, "", revoked_wl))
             )
             bi_inbounds.append(r_tag)
             location_nginx_routes.append((r_path, f"xray_xhttp_relay_{code}", base_cdn_spec))
@@ -616,7 +635,7 @@ if role == "ru_hub":
                 "port": r_port,
                 "protocol": "vless",
                 "settings": {
-                    "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision"),
+                    "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision", revoked_vless),
                     "decryption": "none",
                     "fallbacks": [{"dest": "127.0.0.1:8080" if has_xhttp else "127.0.0.1:80"}],
                 },
@@ -766,8 +785,6 @@ if role == "ru_hub":
             "        return 204;\n"
             "    }\n"
         )
-        if os.path.isdir(relays_d):
-            loc_blocks.append(f"    include {relays_d}/*.conf;")
         cdn_doms = [str(state.get("cdn_domain") or "").strip()]
         for ck in active_cdns:
             m_cfg = modules.get(ck, {})
@@ -845,9 +862,7 @@ elif role == "eu_hub":
     })
 
     # СТРОГО без freedom: только выходы на Выходные НОДЫ + blackhole
-    exit_sources = links.get("exit_nodes") if isinstance(links.get("exit_nodes"), list) else (
-        links.get("exits") if isinstance(links.get("exits"), list) else []
-    )
+    exit_sources = links.get("exit_nodes") if isinstance(links.get("exit_nodes"), list) else []
     if peers:
         exit_sources = list(exit_sources) + [p for p in peers if isinstance(p, dict) and p.get("ip") and p.get("uuid")]
 

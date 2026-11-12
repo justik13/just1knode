@@ -27,9 +27,9 @@ st = load_d(sys.argv[2])
 if not isinstance(lk, dict): lk = {}
 if not isinstance(st, dict): st = {}
 
-std = (lk.get("standard") or {}).get("bridges") or lk.get("standard_bridges") or []
-bi = (lk.get("bi") or {}).get("bridges") or lk.get("bi_bridges") or []
-sni_routes = (lk.get("standard") or {}).get("sni_routes") or lk.get("sni_routes") or []
+std = (lk.get("standard") or {}).get("bridges") or []
+bi = (lk.get("bi") or {}).get("bridges") or []
+sni_routes = (lk.get("standard") or {}).get("sni_routes") or []
 peers = st.get("peers") or []
 
 print("  [Админка links.json — Стандарт (VLESS TLS)]:")
@@ -221,8 +221,8 @@ def ld(p):
 lk = ld(sys.argv[1])
 st = ld(sys.argv[2])
 peers = st.get("peers") or []
-std_cnt = len(((lk.get("standard") or {}).get("bridges") or lk.get("standard_bridges") or []) or peers)
-bi_cnt = len(((lk.get("bi") or {}).get("bridges") or lk.get("bi_bridges") or []) or peers)
+std_cnt = len(((lk.get("standard") or {}).get("bridges") or []) or peers)
+bi_cnt = len(((lk.get("bi") or {}).get("bridges") or []) or peers)
 print(f"{std_cnt}|{bi_cnt}")
 PYEOF
 )"

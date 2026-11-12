@@ -549,7 +549,6 @@ heal_node_firewall_and_stealth() {
         return 0
     fi
 
-    migrate_legacy_state
     local role
     role="$(get_state_val "role" "")"
 
@@ -769,7 +768,6 @@ sync_xhttp_upstreams_conf() {
     local conf_d="${NGINX_CONF_DIR:-/etc/nginx}/conf.d"
     local upstreams_file="${conf_d}/just1k-xhttp-upstreams.conf"
     local cfg_file="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-    local relays_file="${RELAYS_FILE:-${STATE_DIR:-/etc/just1knode}/relays.json}"
 
     mkdir -p "$conf_d" 2>/dev/null || true
     manifest_track_file "$upstreams_file" 2>/dev/null || true
@@ -780,7 +778,6 @@ import json, os, tempfile, sys, re
 
 upstreams_file = sys.argv[1]
 cfg_file = sys.argv[2]
-relays_file = sys.argv[3]
 
 xray_inbound_ports = {}
 if os.path.exists(cfg_file):
@@ -795,16 +792,6 @@ if os.path.exists(cfg_file):
     except Exception as e:
         sys.stderr.write('Error parsing Xray config: ' + str(e) + '\\n')
         sys.exit(1)
-
-relays = []
-if os.path.exists(relays_file):
-    try:
-        with open(relays_file, 'r', encoding='utf-8') as f:
-            relays = json.load(f)
-            if not isinstance(relays, list):
-                relays = []
-    except Exception:
-        relays = []
 
 def_port = xray_inbound_ports.get('just1k-wl-default', 8003)
 lines = [
@@ -821,42 +808,6 @@ lines = [
 ]
 
 seen_codes = set()
-for r in relays:
-    if not isinstance(r, dict):
-        continue
-    code = r.get('code')
-    if not code:
-        continue
-    code_lower = str(code).strip().lower()
-    if not code_lower or not re.fullmatch(r'^[a-z0-9_-]+$', code_lower) or code_lower in seen_codes:
-        continue
-    in_tag = r.get('inbound_tag') or f'just1k-wl-inbound-{code_lower}'
-    port = xray_inbound_ports.get(in_tag)
-    if not port:
-        for t, p in xray_inbound_ports.items():
-            if t.lower() == f'just1k-wl-inbound-{code_lower}':
-                port = p
-                break
-    # Источник истины — секция inbounds в config.json (Desired-State).
-    # Релеи, отсутствующие в Xray, не получают upstream (защита от устаревших записей в relays.json).
-    if not port and not os.path.exists(cfg_file):
-        port = r.get('inbound_port')
-    if port:
-        seen_codes.add(code_lower)
-        try:
-            port_num = int(port)
-            lines.append(f'upstream xray_xhttp_relay_{code_lower} {{')
-            lines.append(f'    server 127.0.0.1:{port_num};')
-            lines.append('    keepalive 128;')
-            lines.append('    keepalive_requests 100000;')
-            lines.append('    keepalive_timeout 300s;')
-            lines.append('}')
-            lines.append('')
-        except Exception:
-            continue
-
-# Защита в глубину: если релеи или модульные XHTTP-провайдеры есть в Xray inbounds,
-# генерируем keepalive upstream pools динамически (без хардкода провайдеров)
 for t, p in xray_inbound_ports.items():
     if t.startswith('just1k-wl-inbound-'):
         c_tag = t[len('just1k-wl-inbound-'):].strip().lower()
@@ -901,7 +852,7 @@ try:
     os.chmod(upstreams_file, 0o644)
 except Exception:
     pass
-" "$upstreams_file" "$cfg_file" "$relays_file"; then
+" "$upstreams_file" "$cfg_file"; then
         warn "Не удалось сгенерировать Nginx upstreams для XHTTP ($upstreams_file)"
         return 1
     fi
@@ -1634,10 +1585,11 @@ set_origin_bot_ip() {
         return 1
     fi
 
-    local old_bot_ip
+    local old_bot_ip new_bot_ip_re
     old_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    new_bot_ip_re="${new_bot_ip//./\\.}"
 
-    if [[ "$new_bot_ip" == "$old_bot_ip" ]] && ufw status 2>/dev/null | grep -F "$new_bot_ip" | grep -q "$target_port"; then
+    if [[ "$new_bot_ip" == "$old_bot_ip" ]] && ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
         if ! is_ssh_port "${target_port}"; then
             ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
             ufw delete allow "${target_port}" >/dev/null 2>&1 || true
@@ -1654,7 +1606,7 @@ set_origin_bot_ip() {
         return 1
     fi
 
-    if ! ufw status 2>/dev/null | grep -F "$new_bot_ip" | grep -q "$target_port"; then
+    if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
         ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
         release_just1knode_lock
         error "Верификация не пройдена: правило для $new_bot_ip на порт $target_port отсутствует в UFW. Изменение откатано."

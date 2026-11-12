@@ -291,7 +291,6 @@ PYEOF
 get_ssl_header_summary() {
     local domain
     domain="$(get_state_val "domain" "")"
-    [[ -z "$domain" || "$domain" == "-" ]] && domain="$(get_state_val "vless_domain" "")"
     if [[ -n "$domain" && "$domain" != "-" ]]; then
         local exp
         exp="$(get_ssl_cert_expiry "$domain" 2>/dev/null || true)"
@@ -310,7 +309,6 @@ show_v2_connection_card() {
     local my_ip domain api_url api_key bot_ip role mod_cnt
     my_ip="$(get_public_ipv4 2>/dev/null || echo "<IP_СЕРВЕРА>")"
     domain="$(get_state_val "domain" "")"
-    [[ -z "$domain" || "$domain" == "-" ]] && domain="$(get_state_val "vless_domain" "")"
     api_url="$(get_state_val "api_url" "")"
     if [[ -z "$api_url" || "$api_url" == "-" ]]; then
         if [[ -n "$domain" && "$domain" != "-" ]]; then
@@ -921,9 +919,36 @@ run_doctor() {
             failed=$((failed + 1))
         fi
 
+        local cdn_domains=()
+        local _cdn_dom
+        while IFS= read -r _cdn_dom; do
+            [[ -n "$_cdn_dom" && "$_cdn_dom" != "$check_target" && "$_cdn_dom" != "-" ]] && cdn_domains+=("$_cdn_dom")
+        done < <(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        st = json.load(f)
+except Exception:
+    st = {}
+if not isinstance(st, dict):
+    st = {}
+seen = []
+def add_dom(val):
+    s = str(val or "").strip()
+    if s and s != "-" and s not in seen:
+        seen.append(s)
+mods = st.get("modules") if isinstance(st.get("modules"), dict) else {}
+for k, m in mods.items():
+    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled"):
+        add_dom(m.get("cdn_domain") or m.get("domain"))
+add_dom(st.get("cdn_domain"))
+for d in seen:
+    print(d)
+PYEOF
+)
+
         local cdn_domain
-        cdn_domain="$(get_state_val "cdn_domain" "")"
-        if [[ -n "$cdn_domain" && "$cdn_domain" != "$check_target" && "$cdn_domain" != "-" ]]; then
+        for cdn_domain in "${cdn_domains[@]}"; do
             log "9. Проверка доступности CDN подписок (${cdn_domain})..."
             local cdn_code
             local cdn_err=0
@@ -961,7 +986,7 @@ run_doctor() {
                 echo -e "  ${RED}✗${NC} ОШИБКА: CDN вернул неожиданный HTTP код: $cdn_code (ожидался 200 OK)!"
                 failed=$((failed + 1))
             fi
-        fi
+        done
     fi
 
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" ]]; then
@@ -978,10 +1003,7 @@ if os.path.exists(links_path):
             ("standard", ((links.get("standard") or {}).get("bridges") if isinstance(links.get("standard"), dict) else None)),
             ("bi", ((links.get("bi") or {}).get("bridges") if isinstance(links.get("bi"), dict) else None)),
             ("bridges", links.get("bridges")),
-            ("standard_bridges", links.get("standard_bridges")),
-            ("bi_bridges", links.get("bi_bridges")),
             ("exit_nodes", links.get("exit_nodes")),
-            ("exits", links.get("exits")),
         ]
         seen_link_keys = set()
         for bucket, items in link_groups:
@@ -1163,7 +1185,7 @@ reset_node() {
     cleanup_legacy_traffic_watchdog_residue
     remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
-    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/just1k-stream443.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -f /etc/nginx/nginx.conf ]]; then
         sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' /etc/nginx/nginx.conf 2>/dev/null || true
     fi
@@ -1175,7 +1197,7 @@ reset_node() {
             fi
         done
     fi
-    rm -rf /etc/nginx/fallback_ssl /etc/nginx/just1k_relays.d /etc/just1knode /etc/xray-api "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
+    rm -rf /etc/nginx/fallback_ssl /etc/just1knode /etc/xray-api "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
     if [[ ! -e /etc/nginx/sites-enabled/default ]]; then
         if [[ -f /etc/nginx/sites-available/default.user.bak ]]; then
             cp -a /etc/nginx/sites-available/default.user.bak /etc/nginx/sites-available/default 2>/dev/null || true
@@ -1247,7 +1269,7 @@ uninstall_node() {
     echo -e "  5. ${BOLD}Исполняемые файлы и базы:${NC} ${XRAY_BIN:-/usr/local/bin/xray}, ${XRAY_SHARE_DIR:-/usr/local/share/xray} (geoip/geosite)"
     echo -e "  6. ${BOLD}Конфигурации Xray:${NC} ${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
     echo -e "  7. ${BOLD}Агент Xray-API:${NC} ${XRAY_API_DIR:-/opt/xray-api}, ${XRAY_API_ETC:-/etc/xray-api}, ${XRAY_API_LIB:-/var/lib/xray-api}"
-    echo -e "  8. ${BOLD}Веб-сервер Nginx:${NC} виртуальный хост just1k-origin.conf, conf.d/xhttp-map.conf, just1k_relays.d"
+    echo -e "  8. ${BOLD}Веб-сервер Nginx:${NC} виртуальный хост just1k-origin.conf, conf.d/xhttp-map.conf, just1k-stream443.conf"
     echo -e "     (атомарное восстановление default сайта, если создавалась резервная копия default.user.bak)"
     echo -e "  9. ${BOLD}Let's Encrypt renewal hook:${NC} deploy-скрипт перезапуска служб"
     echo -e "  10. ${BOLD}Камуфляжный сайт:${NC} /var/www/html/index.html (если создан just1knode)"
@@ -1377,12 +1399,11 @@ uninstall_node() {
     rm -f "${nginx_conf_dir}/conf.d/just1k-bootstrap.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
     rm -f "${nginx_conf_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
-    rm -f "${nginx_conf_dir}/conf.d/just1k-stream443.conf" "${nginx_conf_dir}/streams-enabled/just1k-stream443.conf" 2>/dev/null || true
+    rm -f "${nginx_conf_dir}/just1k-stream443.conf" "${nginx_conf_dir}/conf.d/just1k-stream443.conf" "${nginx_conf_dir}/streams-enabled/just1k-stream443.conf" 2>/dev/null || true
     if [[ -f "${nginx_conf_dir}/nginx.conf" ]]; then
         sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' "${nginx_conf_dir}/nginx.conf" 2>/dev/null || true
     fi
     rm -rf "${nginx_conf_dir}/fallback_ssl" 2>/dev/null || true
-    rm -rf "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" 2>/dev/null || true
     remove_antiabuse_protection 2>/dev/null || true
 
     if [[ -f "${nginx_conf_dir}/sites-available/default.user.bak" ]]; then
@@ -1494,7 +1515,7 @@ uninstall_node() {
                         fi
                     elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
                         is_node_rule=1
-                    elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification|hub ingress|eu_hub bridge))'; then
+                    elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification|hub ingress|eu_hub bridge|exit ingress|api))'; then
                         is_node_rule=1
                     fi
 
@@ -1637,7 +1658,6 @@ uninstall_node() {
 main_menu() {
     check_root
     init_state_dir
-    migrate_legacy_state 2>/dev/null || true
     ensure_global_symlink
 
     local init_status
@@ -1743,7 +1763,6 @@ main_menu() {
 
 heal_node_config() {
     cleanup_legacy_traffic_watchdog_residue
-    migrate_legacy_state 2>/dev/null || true
     local role
     role="$(get_state_val "role")"
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then

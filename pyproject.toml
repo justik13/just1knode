@@ -28,7 +28,3 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/xray_api/generated/*" = ["F401", "F821", "E402", "E741", "E501"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests", "scripts/xray_api/tests"]
-norecursedirs = [".git", ".pytest_cache"]

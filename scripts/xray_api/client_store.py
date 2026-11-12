@@ -183,7 +183,7 @@ class ClientStore:
         if raw_env:
             tags = [t.strip().lower() for t in raw_env.split(",") if t.strip()]
             has_wl = any(
-                t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                t.startswith("just1k-wl-") or t == "just1k-wl-default"
                 for t in tags
             )
             has_vless = any(
@@ -199,7 +199,6 @@ class ClientStore:
             os.getenv("STATE_FILE_PATH"),
             os.getenv("JUST1K_STATE_PATH"),
             "/etc/just1knode/state.json",
-            "/etc/just1k/state.json",
         ]
         for sc in state_candidates:
             if not sc:
@@ -220,16 +219,8 @@ class ClientStore:
                                 isinstance(modules.get("vless_tls"), dict)
                                 and bool(modules["vless_tls"].get("enabled"))
                             )
-                            has_vless = (
-                                str(sdata.get("has_vless", "")) == "1"
-                                or has_tls_mod
-                                or role == "exit_node"
-                            )
-                            has_wl = (
-                                str(sdata.get("has_wl", "")) == "1"
-                                or role in ("origin", "eu_hub")
-                                or has_xhttp_mod
-                            )
+                            has_vless = has_tls_mod or role == "exit_node"
+                            has_wl = role == "eu_hub" or has_xhttp_mod
                             if has_wl and not has_vless:
                                 return "white_internet"
                             if has_vless and not has_wl:
@@ -254,7 +245,7 @@ class ClientStore:
                         inbounds = cdata.get("inbounds", [])
                         tags = [ib.get("tag", "").lower() for ib in inbounds if isinstance(ib, dict)]
                         has_wl = any(
-                            t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                            t.startswith("just1k-wl-") or t == "just1k-wl-default"
                             for t in tags
                         )
                         has_vless = any(

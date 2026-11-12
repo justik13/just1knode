@@ -11,7 +11,6 @@ SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
 STATE_DIR="${STATE_DIR:-/etc/just1knode}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
-RELAYS_FILE="${RELAYS_FILE:-${STATE_DIR}/relays.json}"
 
 JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
 JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
@@ -264,7 +263,6 @@ XRAY_API_KEY=${api_key}
 XRAY_GRPC_HOST=127.0.0.1
 XRAY_GRPC_PORT=10085
 CLIENTS_FILE_PATH=${STATE_DIR}/clients.json
-RELAYS_FILE_PATH=${STATE_DIR}/relays.json
 LINKS_FILE_PATH=${STATE_DIR}/links.json
 APPLY_PENDING_PATH=${STATE_DIR}/.apply_pending
 MODULE_ERRORS_PATH=${STATE_DIR}/module_errors.json
@@ -298,7 +296,6 @@ EOF
     chown -R root:xrayapi "${STATE_DIR}" 2>/dev/null || true
     chmod 2770 "${STATE_DIR}"
     [[ -f "${CLIENTS_FILE}" ]] && { chown root:xrayapi "${CLIENTS_FILE}" 2>/dev/null || true; chmod 660 "${CLIENTS_FILE}"; }
-    [[ -f "${RELAYS_FILE}" ]] && { chown root:xrayapi "${RELAYS_FILE}" 2>/dev/null || true; chmod 660 "${RELAYS_FILE}"; }
     [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 660 "${STATE_FILE}"; }
     [[ -f "${LINKS_FILE:-${STATE_DIR}/links.json}" ]] && { chown root:xrayapi "${LINKS_FILE:-${STATE_DIR}/links.json}" 2>/dev/null || true; chmod 660 "${LINKS_FILE:-${STATE_DIR}/links.json}"; }
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
