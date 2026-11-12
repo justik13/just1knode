@@ -455,6 +455,18 @@ update_node() {
         source "${node_dir}/modules/xray/core.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/origin.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/relay.sh" 2>/dev/null || true
+        # shellcheck source=modules/roles/common_xray.sh
+        [[ -f "${node_dir}/modules/roles/common_xray.sh" ]] && { source "${node_dir}/modules/roles/common_xray.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/transports/vless_tls.sh
+        [[ -f "${node_dir}/modules/transports/vless_tls.sh" ]] && { source "${node_dir}/modules/transports/vless_tls.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/transports/vless_xhttp.sh
+        [[ -f "${node_dir}/modules/transports/vless_xhttp.sh" ]] && { source "${node_dir}/modules/transports/vless_xhttp.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/ru_hub.sh
+        [[ -f "${node_dir}/modules/roles/ru_hub.sh" ]] && { source "${node_dir}/modules/roles/ru_hub.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/eu_hub.sh
+        [[ -f "${node_dir}/modules/roles/eu_hub.sh" ]] && { source "${node_dir}/modules/roles/eu_hub.sh" 2>/dev/null || true; }
+        # shellcheck source=modules/roles/exit_node.sh
+        [[ -f "${node_dir}/modules/roles/exit_node.sh" ]] && { source "${node_dir}/modules/roles/exit_node.sh" 2>/dev/null || true; }
     fi
 
     update_node_post "$target" "${is_menu:-0}"
@@ -484,7 +496,11 @@ update_node_post() {
     cur_r="$(get_state_val "has_relay" "0")"
     cur_v="$(get_state_val "has_vless" "0")"
 
-    if [[ "$role" == "origin" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        if declare -f heal_v2_role_config >/dev/null 2>&1; then
+            heal_v2_role_config
+        fi
+    elif [[ "$role" == "origin" ]]; then
         heal_and_update_origin_config
     elif [[ "$role" == "node" ]]; then
         if [[ "$cur_r" == "1" || "$cur_v" == "1" ]]; then
@@ -497,17 +513,16 @@ update_node_post() {
     fi
 
     local has_xray="0"
-    if [[ "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]]; then
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$role" == "origin" || "$cur_r" == "1" || "$cur_v" == "1" || "$role" == "relay" || "$role" == "vless" ]] || [[ -x "${XRAY_BIN:-/usr/local/bin/xray}" && -f "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" ]]; then
         has_xray="1"
     fi
 
-    if [[ "$target" == "all" && "$has_xray" == "1" && "$role" != "unconfigured" ]]; then
+    if [[ "$target" == "all" && "$has_xray" == "1" ]]; then
         update_xray_core
     fi
 
     title "ОБНОВЛЕНИЕ И АВТО-КОНФИГУРАЦИЯ УЗЛА УСПЕШНО ЗАВЕРШЕНЫ!"
-    echo -e "${GREEN}✔ Все параметры Xray, DNS (Split-DNS), IPv4 и системные настройки приведены к эталону.${NC}"
-    echo -e "${GREEN}✔ 100% российских сервисов (включая 2ip.ru, Госуслуги, банки) направляются через Origin.${NC}\n"
+    echo -e "${GREEN}✔ Модули just1knode, сетевые политики и конфигурация роли (${role:-unconfigured}) приведены к эталону.${NC}\n"
 
     release_just1knode_lock
     trap - RETURN EXIT

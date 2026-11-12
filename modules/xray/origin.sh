@@ -1002,12 +1002,12 @@ set_origin_bot_ip() {
     if [[ "$role" == "origin" ]]; then
         target_port="8444"
         role_descr="Origin API (порт 8444)"
-    elif [[ "$role" == "node" || "$role" == "relay" || "$role" == "vless" || "$has_v" == "1" || "$has_r" == "1" ]]; then
+    elif [[ "$role" == "node" || "$role" == "relay" || "$role" == "vless" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" || "$has_v" == "1" || "$has_r" == "1" || -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
         target_port="8444"
         role_descr="Xray API (порт 8444)"
     else
         release_just1knode_lock
-        error "Функция доступна только на настроенных узлах (Origin, Relay или VLESS)."
+        error "Функция доступна только на настроенных узлах или при установленном xray-api."
         return 1
     fi
 

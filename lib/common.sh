@@ -587,8 +587,8 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    # 4. Origin API (роль origin)
-    if [[ "$role" == "origin" ]]; then
+    # 4. Origin / Hub / Node API (8444/tcp строго по BOT_IP — Fail-Closed)
+    if [[ "$role" == "origin" || "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]] || [[ "$role" == "unconfigured" && -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
         local origin_bot_ip
         origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
@@ -609,8 +609,60 @@ heal_node_firewall_and_stealth() {
                 fi
             fi
         else
-            warn "BOT_IP не задан в state.json. Порт Origin API (8444) закрыт от мира (Fail-Closed)."
+            warn "BOT_IP не задан в state.json. Порт API (8444) закрыт от мира (Fail-Closed)."
         fi
+    fi
+
+    # 4b. Роли v2 периметра (ru_hub / eu_hub / exit_node)
+    if [[ "$role" == "ru_hub" ]]; then
+        if is_module_enabled "vless_tls" 2>/dev/null || is_module_enabled "vless_xhttp" 2>/dev/null; then
+            if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
+            fi
+        fi
+    elif [[ "$role" == "exit_node" ]]; then
+        if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
+        fi
+    elif [[ "$role" == "eu_hub" ]]; then
+        local bridge_port
+        bridge_port="$(get_state_val "relay_port" "443")"
+        [[ "$bridge_port" =~ ^[0-9]+$ ]] || bridge_port="443"
+        if ! is_ssh_port "$bridge_port"; then
+            if ufw status 2>/dev/null | grep -E "${bridge_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw delete allow "${bridge_port}/tcp" >/dev/null 2>&1 || true
+                ufw delete allow "${bridge_port}" >/dev/null 2>&1 || true
+                warn "Фаервол UFW: устранена уязвимость — закрыт публичный доступ к порту моста ${bridge_port} на Зарубежном ХАБе."
+            fi
+        fi
+        local ru_ips=()
+        while IFS= read -r rip; do
+            [[ -n "$rip" ]] && ru_ips+=("$rip")
+        done < <(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        d = json.load(f)
+    seen = set()
+    for k in ('origin_ip',):
+        v = str(d.get(k, '')).strip()
+        if v and v != '-' and v not in seen:
+            seen.add(v); print(v)
+    for item in (d.get('allowed_ru_ips') or []):
+        v = str(item).strip()
+        if v and v not in seen:
+            seen.add(v); print(v)
+except Exception:
+    pass
+" "${STATE_FILE:-/etc/just1knode/state.json}" 2>/dev/null || true)
+        local rip
+        for rip in "${ru_ips[@]}"; do
+            if validate_ipv4 "$rip" || validate_ip "$rip"; then
+                if ! ufw status 2>/dev/null | grep -F "$rip" | grep -q "$bridge_port"; then
+                    ufw allow from "$rip" to any port "$bridge_port" proto tcp comment "just1knode eu_hub bridge" >/dev/null 2>&1 || true
+                fi
+            fi
+        done
     fi
 
     # 5. Relay туннель (роль relay либо has_relay)
@@ -785,7 +837,8 @@ for r in relays:
         except Exception:
             continue
 
-# Защита в глубину: если релеи есть в Xray inbounds, но relays.json временно пуст
+# Защита в глубину: если релеи или модульные XHTTP-провайдеры есть в Xray inbounds,
+# генерируем keepalive upstream pools динамически (без хардкода провайдеров)
 for t, p in xray_inbound_ports.items():
     if t.startswith('just1k-wl-inbound-'):
         c_tag = t[len('just1k-wl-inbound-'):].strip().lower()
@@ -794,6 +847,20 @@ for t, p in xray_inbound_ports.items():
                 port_num = int(p)
                 seen_codes.add(c_tag)
                 lines.append(f'upstream xray_xhttp_relay_{c_tag} {{')
+                lines.append(f'    server 127.0.0.1:{port_num};')
+                lines.append('    keepalive 128;')
+                lines.append('    keepalive_requests 100000;')
+                lines.append('    keepalive_timeout 300s;')
+                lines.append('}')
+                lines.append('')
+            except Exception:
+                continue
+    elif t.startswith('just1k-wl-') and t not in ('just1k-wl-default', 'just1k-wl-api-grpc'):
+        m_tag = t[len('just1k-wl-'):].strip().lower()
+        if m_tag and re.fullmatch(r'^[a-z0-9_-]+$', m_tag):
+            try:
+                port_num = int(p)
+                lines.append(f'upstream xray_xhttp_{m_tag} {{')
                 lines.append(f'    server 127.0.0.1:{port_num};')
                 lines.append('    keepalive 128;')
                 lines.append('    keepalive_requests 100000;')
