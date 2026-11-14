@@ -74,15 +74,6 @@ just1knode
 | `just1knode relay rename <ID> "Новое имя"` | Переименовать Relay-узел |
 | `just1knode relay remove <ID>` | Удалить Relay-узел |
 
-### Контроль трафика узла (`traffic_watchdog`)
-
-| Команда | Описание |
-|---|---|
-| `just1knode limit status` | Текущий объем переданного трафика и статус лимита |
-| `just1knode limit set <GB> [день] [tg_token] [tg_chat]` | Установка месячного лимита трафика с алертами в Telegram |
-| `just1knode limit check` | Ручная проверка расхода трафика |
-| `just1knode limit disable` | Отключение лимитирования трафика |
-
 ---
 
 ## Сетевая безопасность и периметр
@@ -104,9 +95,7 @@ just1knode/
 │   ├── common.sh              # Базовые функции логирования и валидации
 │   ├── state.sh               # Хранение состояния и параметров узла
 │   ├── ssl.sh                 # Управление сертификатами Let's Encrypt
-│   ├── backup.sh              # Механизмы создания и восстановления бэкапов
-│   ├── traffic_watchdog.sh    # Служба мониторинга трафика
-│   └── traffic_watchdog.py    # Логика подсчета байтов и Telegram-алертов
+│   └── backup.sh              # Механизмы создания и восстановления бэкапов
 ├── modules/
 │   └── xray/                  # Модули Xray (core, origin, relay, relays_manage, api)
 ├── scripts/

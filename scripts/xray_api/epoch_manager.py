@@ -139,22 +139,29 @@ class EpochManager:
 
     @staticmethod
     def _is_xray_process(pid: int) -> bool:
-        """Verify whether a given process ID belongs to an Xray process."""
-        comm_path = Path(f"/proc/{pid}/comm")
-        if comm_path.exists():
-            try:
-                comm = comm_path.read_text(encoding="utf-8", errors="ignore").strip().lower()
-                if "xray" in comm:
-                    return True
-            except Exception:
-                pass
+        """Verify whether a given process ID belongs specifically to the Xray core binary."""
+        if pid <= 1 or pid == os.getpid():
+            return False
 
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         if cmdline_path.exists():
             try:
                 cmdline = cmdline_path.read_text(encoding="utf-8", errors="ignore").lower()
-                parts = cmdline.split("\0")
-                if parts and (parts[0].endswith("/xray") or parts[0] == "xray" or "xray" in parts[0]):
+                parts = [p for p in cmdline.split("\0") if p]
+                if parts:
+                    exe_name = Path(parts[0]).name
+                    if exe_name == "xray":
+                        return True
+                    # Reject wrappers/interpreters whose paths happen to contain "xray" (e.g. xray-api)
+                    return False
+            except Exception:
+                pass
+
+        comm_path = Path(f"/proc/{pid}/comm")
+        if comm_path.exists():
+            try:
+                comm = comm_path.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if comm == "xray":
                     return True
             except Exception:
                 pass

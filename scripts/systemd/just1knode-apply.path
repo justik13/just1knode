@@ -1,0 +1,9 @@
+[Unit]
+Description=Just1kNode Pending Configuration Trigger Path
+
+[Path]
+PathExists=/etc/just1knode/.apply_pending
+Unit=just1knode-apply.service
+
+[Install]
+WantedBy=multi-user.target

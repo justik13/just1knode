@@ -6,14 +6,14 @@
 STATE_DIR="${STATE_DIR:-/etc/just1knode}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
-RELAYS_FILE="${RELAYS_FILE:-${STATE_DIR}/relays.json}"
+LINKS_FILE="${LINKS_FILE:-${STATE_DIR}/links.json}"
 
 init_state_dir() {
     mkdir -p "$STATE_DIR"
     chown root:xrayapi "$STATE_DIR" 2>/dev/null || true
     chmod 2770 "$STATE_DIR" 2>/dev/null || true
 
-    for f in "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE"; do
+    for f in "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE"; do
         if [[ -L "$f" ]]; then
             rm -f "$f"
         fi
@@ -25,12 +25,12 @@ init_state_dir() {
     if [[ ! -f "$CLIENTS_FILE" ]]; then
         echo "{}" > "$CLIENTS_FILE"
     fi
-    if [[ ! -f "$RELAYS_FILE" ]]; then
-        echo "[]" > "$RELAYS_FILE"
+    if [[ ! -f "$LINKS_FILE" ]]; then
+        echo "{}" > "$LINKS_FILE"
     fi
 
-    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" 2>/dev/null || true
-    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$RELAYS_FILE" 2>/dev/null || true
+    chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
+    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -160,121 +160,20 @@ except Exception:
 " "$STATE_FILE" "$key" "$default_val"
 }
 
-# Миграция устаревших полей и ролей state.json
-migrate_legacy_state() {
-    if [[ ! -f "$STATE_FILE" ]] || ! command -v python3 >/dev/null 2>&1; then
-        return 0
-    fi
-    python3 -c "
-import sys, json, os, tempfile
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-
-f = sys.argv[1]
-if not os.path.exists(f) or os.path.getsize(f) == 0:
-    sys.exit(0)
-
-lock_file = f + '.lock'
-open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-lock_fd = os.open(lock_file, open_flags, 0o660)
-if fcntl:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-try:
-    try:
-        with open(f, 'r', encoding='utf-8', errors='replace') as fp:
-            data = json.load(fp)
-    except Exception:
-        sys.exit(0)
-    if not isinstance(data, dict):
-        sys.exit(0)
-
-    changed = False
-    role = str(data.get('role', '')).lower()
-
-    if 'has_relay' not in data:
-        relay_p = str(data.get('relay_port', '')).strip()
-        if role in ('relay', 'dual') or (relay_p and relay_p != '-'):
-            data['has_relay'] = '1'
-            changed = True
-        else:
-            data['has_relay'] = '0'
-            changed = True
-
-    if 'has_vless' not in data:
-        v_dom = str(data.get('vless_domain', '')).strip()
-        if role == 'vless' or (v_dom and v_dom != '-'):
-            data['has_vless'] = '1'
-            changed = True
-        else:
-            data['has_vless'] = '0'
-            changed = True
-
-    has_r = data.get('has_relay') == '1'
-    has_v = data.get('has_vless') == '1'
-    if role != 'origin' and (has_r or has_v) and data.get('role') != 'node':
-        data['role'] = 'node'
-        changed = True
-    elif role in ('awg', 'dual') and not (has_r or has_v):
-        data['role'] = 'unconfigured'
-        changed = True
-
-    if not data.get('xray_api_key') and data.get('awg_api_key'):
-        data['xray_api_key'] = data['awg_api_key']
-        changed = True
-
-    legacy_keys = ['has_awg', 'awg_installed', 'awg_api_url', 'awg_api_key', 'awg_domain', 'awg_port']
-    for k in legacy_keys:
-        if k in data:
-            del data[k]
-            changed = True
-
-    if changed:
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
-        try:
-            import grp
-            gid = grp.getgrnam('xrayapi').gr_gid
-            os.fchown(tmp_fd, 0, gid)
-            os.fchmod(tmp_fd, 0o660)
-        except Exception:
-            pass
-        with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:
-            json.dump(data, fp, indent=2, ensure_ascii=False)
-            fp.flush()
-        os.replace(tmp_path, f)
-finally:
-    if fcntl:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    os.close(lock_fd)
-" "$STATE_FILE" 2>/dev/null || true
-}
-
-# Определение фактического статуса сервера
+# Определение фактического статуса сервера (только роли v2)
 get_node_status() {
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "unconfigured"
         return
     fi
-    migrate_legacy_state
 
     local role
     role="$(get_state_val "role" "unconfigured")"
-    if [[ "$role" == "origin" ]] || [[ "$(get_state_val "is_origin" "0")" == "1" ]]; then
-        echo "origin"
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        echo "$role"
         return
     fi
-
-    local has_v has_r
-    has_v="$(get_state_val "has_vless" "0")"
-    has_r="$(get_state_val "has_relay" "0")"
-
-    # Модульный зарубежный узел (TLS / Relay)
-    if [[ "$has_v" == "1" || "$has_r" == "1" || "$role" == "node" || "$role" =~ ^(vless|relay)$ ]]; then
-        echo "node"
-    else
-        echo "unconfigured"
-    fi
+    echo "unconfigured"
 }
 
 # Транзакционный манифест
@@ -286,18 +185,11 @@ manifest_begin() {
     : > "$MANIFEST_LOG"
 
     local targets=(
-        "$RELAYS_FILE"
+        "$LINKS_FILE"
         "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
         "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}"
         "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/just1k-xhttp-upstreams.conf"
     )
-
-    if [[ -d "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" ]]; then
-        while IFS= read -r -d '' conf_file; do
-            targets+=("$conf_file")
-            echo "$conf_file" >> "$TXN_DIR/initial_nginx_relays.txt"
-        done < <(find "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" -type f -name "*.conf" -print0 2>/dev/null)
-    fi
 
     for extra in "${extra_targets[@]}"; do
         if [[ -n "$extra" ]]; then
@@ -383,16 +275,6 @@ manifest_rollback() {
         fi
     done < "$MANIFEST_LOG"
 
-    # Удаление любых новых файлов в NGINX_RELAYS_DIR, созданных во время транзакции
-    if [[ -d "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" ]]; then
-        while IFS= read -r -d '' cur_conf; do
-            if [[ ! -f "$TXN_DIR/initial_nginx_relays.txt" ]] || ! grep -Fxq "$cur_conf" "$TXN_DIR/initial_nginx_relays.txt" 2>/dev/null; then
-                rm -f "$cur_conf" 2>/dev/null || true
-                log "Удален новый Nginx конфиг, созданный во время транзакции: $cur_conf"
-            fi
-        done < <(find "${NGINX_RELAYS_DIR:-/etc/nginx/just1k_relays.d}" -type f -name "*.conf" -print0 2>/dev/null)
-    fi
-
     rm -rf "${TXN_DIR:-}"
     MANIFEST_LOG=""
 
@@ -403,12 +285,12 @@ manifest_rollback() {
         systemctl reload nginx 2>/dev/null || true
     fi
     if [[ -n "${XRAY_CONFIG:-}" && -f "${XRAY_CONFIG:-}" && -n "${XRAY_BIN:-}" && -x "${XRAY_BIN:-}" ]]; then
-        if [[ ! -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" ]]; then
-            if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
+        if "$XRAY_BIN" run -test -config "$XRAY_CONFIG" >/dev/null 2>&1; then
+            if declare -f safe_restart_xray >/dev/null 2>&1; then
+                safe_restart_xray >/dev/null 2>&1 || true
+            elif [[ ! -f "${STATE_DIR:-/etc/just1knode}/traffic_limit_exceeded" && ! -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" ]]; then
                 systemctl restart xray 2>/dev/null || true
             fi
-        else
-            systemctl stop xray 2>/dev/null || true
         fi
     fi
 
@@ -424,4 +306,226 @@ ensure_xray_config_permissions() {
         chown root:xrayapi "$cfg" 2>/dev/null || true
         chmod 640 "$cfg" 2>/dev/null || true
     fi
+}
+
+# Единый атомарный мутатор JSON-полей state.json (zero duplication)
+_state_mutate_json() {
+    local action="$1"
+    local arg1="${2:-}"
+    local arg2="${3:-}"
+    init_state_dir
+    python3 -c "
+import sys, json, os, tempfile
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+f, action, arg1, arg2 = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+lock_file = f + '.lock'
+open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+lock_fd = os.open(lock_file, open_flags, 0o660)
+if fcntl:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+try:
+    data = {}
+    if os.path.exists(f) and os.path.getsize(f) > 0:
+        with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+            loaded = json.load(fp)
+            if isinstance(loaded, dict):
+                data = loaded
+
+    if action == 'set_json':
+        data[arg1] = json.loads(arg2)
+    elif action == 'set_module':
+        mod_obj = json.loads(arg2)
+        if not isinstance(mod_obj, dict):
+            raise ValueError('module config must be a dict')
+        mod_obj.setdefault('enabled', True)
+        mods = data.get('modules')
+        if not isinstance(mods, dict):
+            mods = {}
+        mods[arg1] = mod_obj
+        data['modules'] = mods
+    elif action == 'remove_module':
+        mods = data.get('modules')
+        if isinstance(mods, dict) and arg1 in mods:
+            del mods[arg1]
+            data['modules'] = mods
+    else:
+        raise ValueError('Unknown mutation action: ' + action)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
+    try:
+        import grp
+        gid = grp.getgrnam('xrayapi').gr_gid
+        os.fchown(tmp_fd, 0, gid)
+        os.fchmod(tmp_fd, 0o660)
+    except Exception:
+        pass
+    with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:
+        json.dump(data, fp, indent=2, ensure_ascii=False)
+        fp.flush()
+    os.replace(tmp_path, f)
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+" "$STATE_FILE" "$action" "$arg1" "$arg2"
+}
+
+set_state_json_val() {
+    _state_mutate_json "set_json" "$1" "$2"
+}
+
+get_state_json_val() {
+    local key="$1"
+    local default_json="${2:-null}"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "$default_json"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+f, k, d = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    print(json.dumps(data[k], ensure_ascii=False) if k in data else d)
+except Exception:
+    print(d)
+" "$STATE_FILE" "$key" "$default_json"
+}
+
+is_module_enabled() {
+    local mod_name="$1"
+    [[ -f "$STATE_FILE" ]] || return 1
+    python3 -c "
+import sys, json
+f, m = sys.argv[1], sys.argv[2]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    mods = data.get('modules', {})
+    sys.exit(0 if isinstance(mods, dict) and isinstance(mods.get(m), dict) and mods[m].get('enabled') is True else 1)
+except Exception:
+    sys.exit(1)
+" "$STATE_FILE" "$mod_name"
+}
+
+get_module_val() {
+    local mod_name="$1"
+    local field="$2"
+    local default_val="${3:-}"
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "$default_val"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+f, m, k, d = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
+        data = json.load(fp)
+    mods = data.get('modules', {})
+    if isinstance(mods, dict) and isinstance(mods.get(m), dict):
+        v = mods[m].get(k, d)
+        print('' if v is None else v)
+    else:
+        print(d)
+except Exception:
+    print(d)
+" "$STATE_FILE" "$mod_name" "$field" "$default_val"
+}
+
+set_module_config() {
+    _state_mutate_json "set_module" "$1" "${2:-{\"enabled\": true}}"
+}
+
+remove_module_config() {
+    _state_mutate_json "remove_module" "$1"
+}
+
+count_enabled_modules() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "0"
+        return 0
+    fi
+    python3 -c "
+import sys, json
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8', errors='replace') as fp:
+        mods = json.load(fp).get('modules', {})
+    print(sum(1 for v in mods.values() if isinstance(v, dict) and v.get('enabled') is True) if isinstance(mods, dict) else 0)
+except Exception:
+    print(0)
+" "$STATE_FILE"
+}
+
+get_links_json() {
+    local lf="${LINKS_FILE:-${STATE_DIR}/links.json}"
+    if [[ ! -f "$lf" ]]; then
+        echo "{}"
+        return 0
+    fi
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fp:
+        d = json.load(fp)
+    print(json.dumps(d if isinstance(d, dict) else {}, ensure_ascii=False))
+except Exception:
+    print("{}")
+' "$lf"
+}
+
+save_links_json() {
+    local payload_json="$1"
+    init_state_dir
+    local lf="${LINKS_FILE:-${STATE_DIR}/links.json}"
+    python3 -c '
+import json, os, sys, tempfile
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+os.umask(0o007)
+lf, raw = sys.argv[1], sys.argv[2]
+data = json.loads(raw)
+if not isinstance(data, dict):
+    raise ValueError("links.json root must be object")
+
+lock_file = lf + ".lock"
+open_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+lock_fd = os.open(lock_file, open_flags, 0o660)
+try:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(lf)), suffix=".tmp")
+    try:
+        import grp
+        gid = grp.getgrnam("xrayapi").gr_gid
+        os.fchown(tmp_fd, 0, gid)
+    except Exception:
+        pass
+    os.fchmod(tmp_fd, 0o660)
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2, ensure_ascii=False)
+        fp.flush()
+    os.replace(tmp_path, lf)
+finally:
+    if fcntl:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+' "$lf" "$payload_json"
+}
+
+has_active_xray_config() {
+    local role
+    role="$(get_state_val "role" "unconfigured")"
+    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
+        return 0
+    fi
+    return 1
 }
