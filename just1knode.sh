@@ -1464,9 +1464,8 @@ uninstall_node() {
 
     info "9/11. Очистка правил фаервола (UFW)..."
     if command -v ufw >/dev/null 2>&1; then
-        local st_relay_port st_origin_ip st_bot_ip
+        local st_relay_port st_bot_ip
         st_relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
-        st_origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
         st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
         if ufw status 2>/dev/null | grep -qi "Status: active"; then
@@ -1524,9 +1523,6 @@ uninstall_node() {
         fi
 
         if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
-            if [[ -n "$st_origin_ip" ]]; then
-                ufw delete allow from "$st_origin_ip" to any port "$st_relay_port" proto tcp >/dev/null 2>&1 || true
-            fi
             ufw delete allow "$st_relay_port"/tcp >/dev/null 2>&1 || true
             ufw delete allow "$st_relay_port" >/dev/null 2>&1 || true
         fi

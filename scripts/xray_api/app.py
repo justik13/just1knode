@@ -179,26 +179,6 @@ class DurableIdempotencyStore:
                     "DELETE FROM idempotent_ops WHERE client_id = ?",
                     (norm_target,),
                 )
-                legacy_cur = conn.execute(
-                    "SELECT idempotency_key, response_json FROM idempotent_ops WHERE client_id IS NULL"
-                )
-                keys = []
-                for k, v_str in legacy_cur.fetchall():
-                    try:
-                        data = json.loads(v_str)
-                        if isinstance(data, dict):
-                            raw_cid = data.get("client_id")
-                            if raw_cid:
-                                try:
-                                    norm_cid = str(uuid_lib.UUID(str(raw_cid).strip())).lower()
-                                except Exception:
-                                    norm_cid = str(raw_cid).strip().lower()
-                                if norm_cid == norm_target:
-                                    keys.append(k)
-                    except Exception:
-                        pass
-                if keys:
-                    conn.executemany("DELETE FROM idempotent_ops WHERE idempotency_key = ?", [(k,) for k in keys])
         except Exception as e:
             logging.getLogger("xray_api").warning("Failed to evict idempotent ops for client %s: %s", client_id, e)
 
@@ -502,7 +482,7 @@ def get_secret_base_path() -> str:
 
 
 def get_cdn_domain() -> Optional[str]:
-    """Resolves CDN domain configured for this Origin node.
+    """Resolves CDN domain configured for this ru_hub node.
 
     1. Checks CDN_DOMAIN environment variable.
     2. Reads cdn_domain from STATE_FILE_PATH (/etc/just1knode/state.json).
@@ -557,7 +537,7 @@ def get_cdn_domains() -> Dict[str, str]:
 
 
 def get_sub_path_prefix() -> Optional[str]:
-    """Resolves subscription path prefix configured for this Origin node.
+    """Resolves subscription path prefix configured for this ru_hub node.
 
     1. Checks WHITE_INTERNET_SUB_PATH_PREFIX environment variable.
     2. Reads sub_path_prefix from STATE_FILE_PATH (/etc/just1knode/state.json).
@@ -713,7 +693,7 @@ def _get_xhttp_location_routes() -> List[Dict[str, Any]]:
 
 
 def is_wl_inbound_tag(t: str) -> bool:
-    """Check if tag belongs to white_internet, strictly excluding internal relay tunnels."""
+    """Check if tag belongs to white_internet, strictly excluding internal bridge tunnels."""
     return t.startswith("just1k-wl-") or t == "just1k-wl-default"
 
 
