@@ -182,34 +182,10 @@ EOF
 }
 
 _sync_all_role_certs() {
-    local domain sni_dom
+    local domain
     domain="$(get_state_val "domain" "")"
     if [[ -n "$domain" && "$domain" != "-" ]]; then
-        _resolve_existing_or_wildcard_cert "$domain" >/dev/null 2>&1 || true
         sync_xray_tls_cert_files "$domain" 2>/dev/null || true
-    fi
-    local lf="${LINKS_FILE:-${STATE_DIR:-/etc/just1knode}/links.json}"
-    if [[ -f "$lf" ]]; then
-        while IFS= read -r sni_dom; do
-            [[ -z "$sni_dom" || "$sni_dom" == "$domain" ]] && continue
-            _resolve_existing_or_wildcard_cert "$sni_dom" >/dev/null 2>&1 || true
-        done < <(python3 - "$lf" <<'PYEOF' 2>/dev/null || true
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as fp:
-        lk = json.load(fp)
-    routes = ((lk.get("standard") or {}).get("sni_routes") or []) if isinstance(lk, dict) else []
-    seen = set()
-    for rt in routes:
-        if isinstance(rt, dict) and rt.get("sni"):
-            s = str(rt["sni"]).strip().lower().rstrip(".")
-            if s and s not in seen:
-                seen.add(s)
-                print(s)
-except Exception:
-    pass
-PYEOF
-)
     fi
 }
 
@@ -418,7 +394,7 @@ select_role_wizard() {
     echo ""
     echo -e "  Роль:  ${CYAN}$(role_display_name "$new_role")${NC}"
     echo -e "  Домен: ${CYAN}${input_dom}${NC}"
-    echo -e "  SSL:   ${DIM:-}Zero-Signature (поиск Wildcard или стартовый Bootstrap без открытия 80 порта)${NC}"
+    echo -e "  SSL:   ${DIM:-}Let's Encrypt (автоматический выпуск сертификата для домена)${NC}"
     echo ""
     local confirm=""
     read -rp "Подтвердите (y/n): " confirm || true

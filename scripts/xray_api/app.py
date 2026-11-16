@@ -316,6 +316,25 @@ def _load_links_data() -> Dict[str, Any]:
     return {}
 
 
+def _get_sni_routes(links_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    data = links_data if isinstance(links_data, dict) else _load_links_data()
+    standard = data.get("standard") if isinstance(data, dict) else None
+    if not isinstance(standard, dict):
+        return []
+    raw_routes = standard.get("sni_routes")
+    if not isinstance(raw_routes, list):
+        return []
+    routes: List[Dict[str, str]] = []
+    for item in raw_routes:
+        if not isinstance(item, dict):
+            continue
+        sni = str(item.get("sni") or "").strip().lower()
+        bridge_code = str(item.get("bridge_code") or "").strip().lower()
+        if sni and bridge_code:
+            routes.append({"sni": sni, "bridge_code": bridge_code})
+    return routes
+
+
 def _load_module_errors() -> Dict[str, str]:
     mp = _module_errors_path()
     if mp.exists():
@@ -463,10 +482,6 @@ def get_secret_base_path() -> str:
                     tag = ib.get("tag", "")
                     if tag == "just1k-wl-default":
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if not path:
-                            path = (
-                                ib.get("streamSettings", {}).get("httpSettings", {}).get("path", "")
-                            )
                         if path and path.startswith("/"):
                             parts = [p for p in path.strip("/").split("/") if p]
                             if parts:
@@ -476,10 +491,6 @@ def get_secret_base_path() -> str:
                     tag = ib.get("tag", "")
                     if tag.startswith("just1k-wl-"):
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if not path:
-                            path = (
-                                ib.get("streamSettings", {}).get("httpSettings", {}).get("path", "")
-                            )
                         if path and path.startswith("/"):
                             parts = [p for p in path.strip("/").split("/") if p]
                             if parts:
@@ -523,6 +534,26 @@ def get_cdn_domain() -> Optional[str]:
         return fallback.strip()
 
     return None
+
+
+def get_cdn_domains() -> Dict[str, str]:
+    """Resolves all active CDN domains keyed by module id (e.g. cdn_yandex, cdn_turboflare)."""
+    domains: Dict[str, str] = {}
+    if STATE_FILE_PATH.exists():
+        try:
+            with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
+                st = json.load(f)
+                if isinstance(st, dict):
+                    modules = st.get("modules")
+                    if isinstance(modules, dict):
+                        for m_key, m_cfg in modules.items():
+                            if str(m_key).startswith("cdn_") and isinstance(m_cfg, dict) and m_cfg.get("enabled"):
+                                cand = m_cfg.get("cdn_domain") or m_cfg.get("domain")
+                                if cand and str(cand).strip():
+                                    domains[str(m_key)] = str(cand).strip()
+        except Exception as e:
+            logger.warning("Could not read cdn_domains from %s: %s", STATE_FILE_PATH, e)
+    return domains
 
 
 def get_sub_path_prefix() -> Optional[str]:
@@ -978,6 +1009,11 @@ class InventoryRequest(BaseModel):
     )
 
 
+class ClientSyncBatchRequest(BaseModel):
+    items: List[ClientSyncRequest] = Field(..., max_length=1000)
+    expected_node_epoch: Optional[str] = None
+
+
 # Endpoints
 @app.get("/healthz")
 @app.get("/health")
@@ -1060,6 +1096,10 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         capabilities.extend(["vless", "xray_vless"])
     if "white_internet" in detected_services:
         capabilities.append("white_internet")
+    if "bridge_hub" in detected_services:
+        capabilities.append("bridge_hub")
+    if "exit_node" in detected_services:
+        capabilities.append("exit_node")
 
     pid, starttime, boot_id, running_epoch = (
         epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
@@ -1111,12 +1151,14 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "modules": modules,
         "module_errors": module_errors,
         "links": links_data,
+        "sni_routes": _get_sni_routes(links_data),
         "xhttp_locations": _get_xhttp_location_routes(),
         "traffic_limit": traffic_limit,
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
         "secret_base_path": secret_path,
         "cdn_domain": get_cdn_domain(),
+        "cdn_domains": get_cdn_domains(),
         "sub_path_prefix": get_sub_path_prefix(),
         "node_epoch": running_epoch if is_running else None,
         "boot_id": boot_id if is_running else None,
@@ -1246,18 +1288,21 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
     node_meta = get_node_state_metadata()
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
     bot_status = get_bot_status()
+    links_data = _load_links_data()
     return {
         "status": "ok",
         "role": str(node_meta.get("role") or "unconfigured"),
         "country_code": str(node_meta.get("country_code") or ""),
         "domain": str(node_meta.get("domain") or ""),
         "cdn_domain": get_cdn_domain(),
+        "cdn_domains": get_cdn_domains(),
         "sub_path_prefix": get_sub_path_prefix(),
         "secret_base_path": get_secret_base_path(),
         "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
         "module_errors": _load_module_errors(),
-        "links": _load_links_data(),
+        "links": links_data,
+        "sni_routes": _get_sni_routes(links_data),
         "xhttp_locations": _get_xhttp_location_routes(),
         "inbounds": get_all_managed_inbounds(),
         "traffic_limit": _load_traffic_limit_summary(),
@@ -1319,7 +1364,7 @@ def _get_host_net_bytes() -> tuple[int, int]:
                         continue
                     name, stats = line.split(":", 1)
                     name = name.strip()
-                    if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "tun", "tap")):
+                    if name == "lo" or name.startswith(("docker", "veth", "br-", "tun", "tap")):
                         continue
                     cols = stats.split()
                     if len(cols) >= 9:
@@ -1354,7 +1399,7 @@ async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, A
             )
 
         try:
-            users_stats = grpc_client.get_users_stats(reset=False)
+            users_stats = await asyncio.to_thread(grpc_client.get_users_stats, reset=False)
         except Exception as e:
             logger.error("Failed to fetch traffic stats from gRPC: %s", e)
             raise HTTPException(
@@ -1802,11 +1847,91 @@ async def _sync_client_internal(
 
     if req.idempotency_key:
         completed_idempotent_ops[req.idempotency_key] = resp
-        if len(completed_idempotent_ops) > 2000:
-            for k in list(completed_idempotent_ops.keys())[:500]:
-                completed_idempotent_ops.pop(k, None)
 
     return resp
+
+
+def _sync_clients_batch_sync(req: ClientSyncBatchRequest) -> Dict[str, Any]:
+    epoch_before = epoch_manager.get_current_running_epoch() if epoch_manager else None
+    if not epoch_before and epoch_manager:
+        epoch_before = epoch_manager.load_state().get("node_epoch")
+    if not epoch_before:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
+        )
+    sync_active_users_with_epoch(epoch_before)
+    if req.expected_node_epoch and req.expected_node_epoch != epoch_before:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail=f"EpochMismatchError: expected {req.expected_node_epoch}, current {epoch_before}",
+        )
+
+    store_ops: list[Dict[str, Any]] = []
+    results: list[Dict[str, Any]] = []
+    for item in req.items:
+        cid = item.client_id
+        desired_state = item.desired_state or "active"
+        eff_svc = resolve_effective_service(item.service)
+        target_inbounds = get_target_inbounds(service=eff_svc)
+        if not target_inbounds:
+            results.append({"client_id": cid, "status": "error", "detail": "no_inbounds"})
+            continue
+
+        flow = "xtls-rprx-vision" if eff_svc == "vless" else ""
+        try:
+            if desired_state == "active":
+                for tag in target_inbounds:
+                    grpc_client.add_user(tag, cid, email=cid, flow=flow)
+                store_ops.append({
+                    "client_id": cid,
+                    "active": True,
+                    "version": item.version,
+                    "email": cid,
+                    "service": eff_svc,
+                })
+            else:
+                for tag in target_inbounds:
+                    grpc_client.remove_user(tag, cid)
+                store_ops.append({
+                    "client_id": cid,
+                    "active": False,
+                    "version": item.version,
+                    "service": eff_svc,
+                })
+            results.append({"client_id": cid, "status": "ok", "state": desired_state})
+        except Exception as e:
+            results.append({"client_id": cid, "status": "error", "detail": str(e)})
+
+    if store_ops:
+        client_store.apply_clients_batch(store_ops)
+
+    epoch_after = epoch_manager.get_current_running_epoch() if epoch_manager else None
+    if not epoch_after and epoch_manager:
+        epoch_after = epoch_manager.load_state().get("node_epoch")
+    if epoch_after != epoch_before:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail=f"EpochDriftError: epoch drifted during batch {epoch_before} -> {epoch_after}",
+        )
+
+    node_sync_state["last_synced_at"] = time.time()
+    node_sync_state["last_client_sync_at"] = time.time()
+    return {
+        "status": "ok",
+        "verified_epoch": epoch_after,
+        "processed": len(results),
+        "results": results,
+    }
+
+
+@app.post("/v1/clients/sync-batch")
+async def sync_clients_batch(
+    req: ClientSyncBatchRequest,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """Batch client synchronization endpoint (single clients.json fsync, non-blocking event loop)."""
+    return await asyncio.to_thread(_sync_clients_batch_sync, req)
 
 
 @app.delete("/v1/clients/{uuid}")
@@ -1959,7 +2084,7 @@ async def get_clients_inventory(
         client_ids = client_ids[:1000]
     if not client_ids:
         try:
-            client_ids = list(client_store.load_client_entries().keys())
+            client_ids = list((await asyncio.to_thread(client_store.load_client_entries)).keys())
         except ClientStoreCorruptedError as e:
             logger.critical("Inventory cannot load entries from corrupt store: %s", e)
             raise HTTPException(

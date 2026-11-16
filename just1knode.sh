@@ -526,10 +526,6 @@ show_status() {
     fi
 }
 
-show_bot_credentials() {
-    show_v2_connection_card
-}
-
 run_doctor() {
     title "КОМПЛЕКСНАЯ САМОДИАГНОСТИКА (DOCTOR)"
     local failed=0
@@ -643,7 +639,7 @@ run_doctor() {
     done
 
     if [[ ${#check_domains[@]} -eq 0 ]]; then
-        echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (ожидается настройка роли или bootstrap SAN-сертификат)"
+        echo -e "  ${YELLOW}i${NC} Персональный SSL домен не настроен (ожидается настройка роли)"
     else
         for d_item in "${check_domains[@]}"; do
             if [[ -f "/etc/letsencrypt/live/${d_item}/fullchain.pem" ]]; then
@@ -836,7 +832,7 @@ run_doctor() {
                         # 2. Легитимные веб-порты 80 и 443 (только для публичной роли RU ХАБ)
                         if [[ "$r_port" == "443" && ("$proto" == "tcp" || "$proto" == "any") && "$role" == "ru_hub" ]]; then
                             is_authorized=1
-                        elif [[ "$r_port" == "80" && ("$proto" == "tcp" || "$proto" == "any") && "$role" == "ru_hub" && "${USE_WILDCARD_CERT:-1}" == "0" ]]; then
+                        elif [[ "$r_port" == "80" && ("$proto" == "tcp" || "$proto" == "any") && "$role" == "ru_hub" ]]; then
                             is_authorized=1
                         fi
 
@@ -1175,7 +1171,6 @@ reset_node() {
 
     systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
     systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
-    cleanup_legacy_traffic_watchdog_residue
     remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/just1k-stream443.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
@@ -1345,7 +1340,6 @@ uninstall_node() {
     done
 
     info "1/11. Остановка и отключение системных служб systemd..."
-    cleanup_legacy_traffic_watchdog_residue
     remove_traffic_limit_timer
     systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
     systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
@@ -1500,7 +1494,7 @@ uninstall_node() {
 
                     # Очистка строго собственных правил Just1kNode
                     local is_node_rule=0
-                    if [[ "$t_port" == "8444" || "$t_port" == "8443" || "$t_port" == "443" ]]; then
+                    if [[ "$t_port" == "8444" || "$t_port" == "443" ]]; then
                         if [[ "$t_port" == "443" ]] && echo "$r_body" | grep -qiE '\b(https web service|caddy)\b'; then
                             is_node_rule=0
                         else
@@ -1542,13 +1536,6 @@ uninstall_node() {
             fi
             ufw delete allow 8444/tcp >/dev/null 2>&1 || true
             ufw delete allow 8444 >/dev/null 2>&1 || true
-        fi
-        if ! is_ssh_port "8443"; then
-            if [[ -n "$st_bot_ip" ]]; then
-                ufw delete allow from "$st_bot_ip" to any port 8443 proto tcp >/dev/null 2>&1 || true
-            fi
-            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8443 >/dev/null 2>&1 || true
         fi
         if ! is_ssh_port "443"; then
             if ! (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^just1kbot_caddy\b"); then
@@ -1755,7 +1742,6 @@ main_menu() {
 }
 
 heal_node_config() {
-    cleanup_legacy_traffic_watchdog_residue
     local role
     role="$(get_state_val "role")"
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then

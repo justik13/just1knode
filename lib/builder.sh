@@ -41,6 +41,13 @@ cleaned = re.sub(
     text,
     flags=re.DOTALL,
 )
+cleaned = re.sub(
+    r"(events\s*\{[^}]*?worker_connections\s+)\d+(\s*;)",
+    r"\g<1>4096\g<2>",
+    cleaned,
+    count=1,
+    flags=re.DOTALL,
+)
 
 if enable:
     block = (
@@ -236,16 +243,8 @@ revoked_vless = set()
 revoked_wl = set()
 
 raw_clients_entries = {}
-if isinstance(clients_db, dict):
-    inner_clients = clients_db.get("clients")
-    if isinstance(inner_clients, dict):
-        raw_clients_entries = inner_clients
-    elif isinstance(inner_clients, list):
-        raw_clients_entries = {str(u): {"is_active": True} for u in inner_clients if isinstance(u, str)}
-    elif "clients" not in clients_db:
-        raw_clients_entries = clients_db
-elif isinstance(clients_db, list):
-    raw_clients_entries = {str(u): {"is_active": True} for u in clients_db if isinstance(u, str)}
+if isinstance(clients_db, dict) and isinstance(clients_db.get("clients"), dict):
+    raw_clients_entries = clients_db["clients"]
 
 for cid, meta in raw_clients_entries.items():
     if not isinstance(meta, dict):
@@ -253,32 +252,18 @@ for cid, meta in raw_clients_entries.items():
     email = str(cid)
     top_tombstone = bool(meta.get("tombstone", False))
     ss = meta.get("service_states") if isinstance(meta.get("service_states"), dict) else {}
-    if ss:
-        st_v = ss.get("vless")
-        if isinstance(st_v, dict):
-            if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
-                vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
-            else:
-                revoked_vless.add(cid)
-        st_w = ss.get("white_internet")
-        if isinstance(st_w, dict):
-            if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
-                wl_clients[cid] = {"id": cid, "email": email}
-            else:
-                revoked_wl.add(cid)
-    else:
-        svcs = meta.get("services") or ([meta.get("service")] if meta.get("service") else [])
-        is_ok = bool(meta.get("is_active", True)) and not top_tombstone
-        if is_ok:
-            if "vless" in svcs:
-                vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
-            if "white_internet" in svcs:
-                wl_clients[cid] = {"id": cid, "email": email}
+    st_v = ss.get("vless")
+    if isinstance(st_v, dict):
+        if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
+            vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
         else:
-            if not svcs or "vless" in svcs:
-                revoked_vless.add(cid)
-            if not svcs or "white_internet" in svcs:
-                revoked_wl.add(cid)
+            revoked_vless.add(cid)
+    st_w = ss.get("white_internet")
+    if isinstance(st_w, dict):
+        if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
+            wl_clients[cid] = {"id": cid, "email": email}
+        else:
+            revoked_wl.add(cid)
 
 def merged_clients(tag, primary_map, flow_val="", revoked_set=None):
     revoked = revoked_set or set()
@@ -398,6 +383,10 @@ def build_bridge_outbound(ob_tag, peer):
                 "fingerprint": "firefox",
                 "alpn": ["http/1.1"],
                 "allowInsecure": False,
+            },
+            "sockopt": {
+                "tcpKeepAliveIdle": 60,
+                "tcpKeepAliveInterval": 15,
             },
         },
     }
@@ -615,11 +604,14 @@ if role == "ru_hub":
 
     # Outbounds для Стандарта (std_bridges)
     std_outbounds = {}
+    std_tags_by_loc = {}
+    std_all_tags = []
     std_default_tag = None
     for idx, p in enumerate(std_bridges_raw):
         if not isinstance(p, dict):
             continue
         p_code = clean_code(p.get("code"), f"hub{idx+1}")
+        loc_key = clean_code(p.get("location_code") or p.get("code"), p_code)
         ob_tag = f"bridge-std-{p_code}"
         if p_code in std_outbounds:
             continue
@@ -627,17 +619,22 @@ if role == "ru_hub":
         if ob is None:
             continue
         std_outbounds[p_code] = ob_tag
+        std_tags_by_loc.setdefault(loc_key, []).append(ob_tag)
+        std_all_tags.append(ob_tag)
         cfg["outbounds"].append(ob)
         if not std_default_tag or p.get("is_default"):
             std_default_tag = ob_tag
 
     # Outbounds для БИ (bi_bridges)
     bi_outbounds = {}
+    bi_tags_by_loc = {}
+    bi_all_tags = []
     bi_default_tag = None
     for idx, p in enumerate(bi_bridges_raw):
         if not isinstance(p, dict):
             continue
         p_code = clean_code(p.get("code"), f"hub{idx+1}")
+        loc_key = clean_code(p.get("location_code") or p.get("code"), p_code)
         ob_tag = f"bridge-bi-{p_code}"
         if p_code in bi_outbounds:
             continue
@@ -645,31 +642,45 @@ if role == "ru_hub":
         if ob is None:
             continue
         bi_outbounds[p_code] = ob_tag
+        bi_tags_by_loc.setdefault(loc_key, []).append(ob_tag)
+        bi_all_tags.append(ob_tag)
         cfg["outbounds"].append(ob)
         if not bi_default_tag or p.get("is_default"):
             bi_default_tag = ob_tag
+
+    balancers = []
+    observed_tags = set()
+
+    def _route_target_for_tags(bal_tag, tags, fallback_tag):
+        if len(tags) >= 2:
+            if not any(b["tag"] == bal_tag for b in balancers):
+                balancers.append({
+                    "tag": bal_tag,
+                    "selector": list(tags),
+                    "strategy": {"type": "leastPing"},
+                })
+                observed_tags.update(tags)
+            return {"balancerTag": bal_tag}
+        if len(tags) == 1:
+            return {"outboundTag": tags[0]}
+        return {"outboundTag": fallback_tag}
 
     cfg["outbounds"].extend([
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         {"tag": "just1k-wl-api", "protocol": "blackhole", "settings": {}},
     ])
 
-    all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
-    rules = [api_rule] + antiabuse_rules()
-    if all_client_inbounds:
-        # Строго доменный direct для РФ + AsIs: зарубежные запросы уходят в мосты по FQDN без DNS в РФ
-        rules.append(
-            {"type": "field", "inboundTag": all_client_inbounds, "domain": ru_domains, "outboundTag": "just1k-wl-direct"}
-        )
-
     # Пер-SNI маршруты Стандарта (если включён nginx stream ssl_preread)
     stream_map_entries = []
     stream_upstream_blocks = []
+    sni_route_inbounds = []
+    sni_route_rules = []
     if stream_needed:
         route_port_base = 8450
         for r_idx, rt in enumerate(valid_sni_routes):
             b_code = rt["bridge_code"]
-            if b_code not in std_outbounds:
+            loc_tags = std_tags_by_loc.get(b_code) or ([std_outbounds[b_code]] if b_code in std_outbounds else [])
+            if not loc_tags:
                 continue
             r_sni = rt["sni"]
             r_port = route_port_base + r_idx
@@ -696,7 +707,9 @@ if role == "ru_hub":
                 },
                 "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
             })
-            rules.append({"type": "field", "inboundTag": [r_tag], "outboundTag": std_outbounds[b_code]})
+            sni_route_inbounds.append(r_tag)
+            target_kw = _route_target_for_tags(f"bal-std-{b_code}", loc_tags, "just1k-wl-block")
+            sni_route_rules.append({"type": "field", "inboundTag": [r_tag], **target_kw})
             stream_map_entries.append(f"    {r_sni} just1k_sni_route_{r_idx};")
             stream_upstream_blocks.append(
                 f"upstream just1k_sni_route_{r_idx} {{\n    server 127.0.0.1:{r_port};\n}}"
@@ -721,25 +734,48 @@ if role == "ru_hub":
         with open(out_stream_path, "w", encoding="utf-8") as sfp:
             sfp.write(stream_text)
 
-    # Локационные БИ-правила (все CDN-инбаунды локации -> соответствующий мост bridge-bi-<code>)
-    for b_code, ob_tag in bi_outbounds.items():
-        loc_tags = bi_loc_inbounds_by_target.get(b_code, [])
-        if loc_tags:
-            rules.append({"type": "field", "inboundTag": loc_tags, "outboundTag": ob_tag})
+    all_client_inbounds = list(dict.fromkeys(std_inbounds + sni_route_inbounds + bi_inbounds))
+    rules = [api_rule] + antiabuse_rules()
+    if all_client_inbounds:
+        # Строго доменный direct для РФ + AsIs: зарубежные запросы уходят в мосты по FQDN без DNS в РФ
+        rules.append(
+            {"type": "field", "inboundTag": all_client_inbounds, "domain": ru_domains, "outboundTag": "just1k-wl-direct"}
+        )
+    rules.extend(sni_route_rules)
+
+    # Локационные БИ-правила (все CDN-инбаунды локации -> балансировщик или мост bridge-bi-<code>)
+    for b_code, loc_tags in bi_loc_inbounds_by_target.items():
+        if not loc_tags:
+            continue
+        target_tags = bi_tags_by_loc.get(b_code) or ([bi_outbounds[b_code]] if b_code in bi_outbounds else [])
+        if target_tags:
+            target_kw = _route_target_for_tags(f"bal-bi-{b_code}", target_tags, "just1k-wl-block")
+            rules.append({"type": "field", "inboundTag": loc_tags, **target_kw})
 
     # Zero-Trust Fallback: иностранный трафик без моста ИДЁТ В BLACKHOLE, НИКОГДА НЕ В DIRECT!
     if std_inbounds:
+        std_fb_kw = _route_target_for_tags("bal-std-default", std_all_tags, std_default_tag or "just1k-wl-block")
         rules.append({
             "type": "field",
             "inboundTag": std_inbounds,
-            "outboundTag": std_default_tag or "just1k-wl-block",
+            **std_fb_kw,
         })
     if bi_inbounds:
+        bi_fb_kw = _route_target_for_tags("bal-bi-default", bi_all_tags, bi_default_tag or "just1k-wl-block")
         rules.append({
             "type": "field",
             "inboundTag": bi_inbounds,
-            "outboundTag": bi_default_tag or "just1k-wl-block",
+            **bi_fb_kw,
         })
+
+    if balancers:
+        cfg["routing"]["balancers"] = balancers
+        cfg["observatory"] = {
+            "subjectSelector": sorted(observed_tags),
+            "probeUrl": "https://www.google.com/generate_204",
+            "probeInterval": "30s",
+            "enableConcurrency": True,
+        }
 
     cfg["routing"]["rules"] = rules
 
@@ -805,9 +841,9 @@ if role == "ru_hub":
         loc_blocks = []
         if bot_domain:
             loc_blocks.append(
-                f"    location ^~ {sub_prefix}/ {{\n"
-                f"        proxy_pass https://{bot_domain}{sub_prefix}/;\n"
-                f"        proxy_ssl_server_name on;\n"
+                "    location ^~ /sub/ {\n"
+                f"        proxy_pass https://{bot_domain}/sub/;\n"
+                "        proxy_ssl_server_name on;\n"
                 f"        proxy_set_header Host {bot_domain};\n"
                 "        proxy_set_header X-Real-IP $remote_addr;\n"
                 "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"

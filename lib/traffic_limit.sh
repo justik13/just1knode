@@ -5,7 +5,6 @@
 
 TRAFFIC_LIMIT_CONFIG="${STATE_DIR:-/etc/just1knode}/traffic_limit.json"
 TRAFFIC_EXCEEDED_FLAG="${STATE_DIR:-/etc/just1knode}/traffic_limit_exceeded"
-TRAFFIC_LEGACY_CUTOFF_FLAG="${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active"
 
 ensure_vnstat() {
     if ! command -v vnstat >/dev/null 2>&1; then
@@ -131,7 +130,7 @@ total = 0
 
 for iface in data.get("interfaces", []):
     name = iface.get("name", "")
-    if name == "lo" or name.startswith(("docker", "veth", "br-", "wg", "tun", "tap")):
+    if name == "lo" or name.startswith(("docker", "veth", "br-", "tun", "tap")):
         continue
     months = iface.get("traffic", {}).get("month", [])
     if not months:
@@ -335,11 +334,11 @@ disable_traffic_limit() {
     remove_traffic_limit_timer
 
     local need_start=0
-    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || -f "$TRAFFIC_LEGACY_CUTOFF_FLAG" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true" ]]; then
+    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true" ]]; then
         need_start=1
     fi
 
-    rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
+    rm -f "$TRAFFIC_EXCEEDED_FLAG" 2>/dev/null || true
 
     if command -v systemctl >/dev/null 2>&1; then
         if [[ "$need_start" -eq 1 ]] || ! systemctl is-active --quiet xray 2>/dev/null; then

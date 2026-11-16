@@ -156,7 +156,6 @@ update_node() {
     title "КОМПЛЕКСНОЕ ОБНОВЛЕНИЕ УТИЛИТЫ И КОНФИГУРАЦИИ УЗЛА"
     check_root
     init_state_dir
-    cleanup_legacy_traffic_watchdog_residue
     acquire_just1knode_lock
     trap release_just1knode_lock RETURN EXIT
 
@@ -505,7 +504,6 @@ update_node_post() {
         load_all_transport_modules || true
     fi
     heal_node_firewall_and_stealth
-    cleanup_legacy_traffic_watchdog_residue
     if declare -f reconcile_traffic_limit_on_update >/dev/null 2>&1; then
         reconcile_traffic_limit_on_update
     fi

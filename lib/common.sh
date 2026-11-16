@@ -484,17 +484,6 @@ EOF
             echo "nf_conntrack" >> /etc/modules-load.d/just1knode.conf 2>/dev/null || true
         fi
         sysctl -p "$conf_path" >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.icmp_echo_ignore_all=1 >/dev/null 2>&1 || true
-        sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_fin_timeout=15 >/dev/null 2>&1 || true
-        sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.ip_local_port_range="32768 65535" >/dev/null 2>&1 || true
-        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
     fi
     local ipv6_curr
     ipv6_curr="$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo "0")"
@@ -595,16 +584,7 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. Очистка устаревшего порта 8443 (Amnezia) во всех ролях при условии, что на нем не слушает SSH
-    if ! is_ssh_port "8443"; then
-        if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
-            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8443 >/dev/null 2>&1 || true
-            warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
-        fi
-    fi
-
-    # 4. Панель API узла (8444/tcp строго по BOT_IP — Fail-Closed)
+    # 3. Панель API узла (8444/tcp строго по BOT_IP — Fail-Closed)
     local origin_bot_ip
     origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
@@ -789,7 +769,6 @@ sync_xhttp_upstreams_conf() {
     local cfg_file="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
 
     mkdir -p "$conf_d" 2>/dev/null || true
-    manifest_track_file "$upstreams_file" 2>/dev/null || true
     create_backup "$upstreams_file" 2>/dev/null || true
 
     if ! python3 -c "
@@ -998,91 +977,6 @@ normalize_country_code() {
             fi
             ;;
     esac
-}
-
-get_country_display_name() {
-    local raw="${1:-}"
-    local val="${raw,,}"
-    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
-    case "$val" in
-        de|germany|германия|"de germany"|"de германия") echo "🇩🇪 Германия" ;;
-        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "🇳🇱 Нидерланды" ;;
-        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "🇫🇮 Финляндия" ;;
-        se|sweden|швеция|"se sweden"|"se швеция") echo "🇸🇪 Швеция" ;;
-        us|usa|сша|"us usa"|"us сша") echo "🇺🇸 США" ;;
-        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "🇬🇧 Великобритания" ;;
-        fr|france|франция|"fr france"|"fr франция") echo "🇫🇷 Франция" ;;
-        tr|turkey|турция|"tr turkey"|"tr турция") echo "🇹🇷 Турция" ;;
-        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "🇰🇿 Казахстан" ;;
-        pl|poland|польша|"pl poland"|"pl польша") echo "🇵🇱 Польша" ;;
-        at|austria|австрия|"at austria"|"at австрия") echo "🇦🇹 Австрия" ;;
-        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "🇨🇭 Швейцария" ;;
-        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "🇪🇪 Эстония" ;;
-        es|spain|испания|"es spain"|"es испания") echo "🇪🇸 Испания" ;;
-        it|italy|италия|"it italy"|"it италия") echo "🇮🇹 Италия" ;;
-        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "🇨🇿 Чехия" ;;
-        no|norway|норвегия|"no norway"|"no норвегия") echo "🇳🇴 Норвегия" ;;
-        dk|denmark|дания|"dk denmark"|"dk дания") echo "🇩🇰 Дания" ;;
-        is|iceland|исландия|"is iceland"|"is исландия") echo "🇮🇸 Исландия" ;;
-        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "🇱🇹 Литва" ;;
-        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "🇱🇻 Латвия" ;;
-        ro|romania|румыния|"ro romania"|"ro румыния") echo "🇷🇴 Румыния" ;;
-        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "🇧🇬 Болгария" ;;
-        gr|greece|греция|"gr greece"|"gr греция") echo "🇬🇷 Греция" ;;
-        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "🇭🇺 Венгрия" ;;
-        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "🇸🇰 Словакия" ;;
-        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "🇮🇪 Ирландия" ;;
-        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "🇵🇹 Португалия" ;;
-        jp|japan|япония|"jp japan"|"jp япония") echo "🇯🇵 Япония" ;;
-        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "🇸🇬 Сингапур" ;;
-        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "🇦🇪 ОАЭ" ;;
-        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "🇬🇪 Грузия" ;;
-        am|armenia|армения|"am armenia"|"am армения") echo "🇦🇲 Армения" ;;
-        *)
-            local norm
-            norm="$(normalize_country_code "$raw")"
-            if [[ -n "$norm" && "$norm" != "$val" && "$norm" != "$raw" ]]; then
-                get_country_display_name "$norm"
-            elif [[ -n "$raw" ]]; then
-                echo "$raw"
-            else
-                echo "Зарубежный шлюз"
-            fi
-            ;;
-    esac
-}
-
-resolve_relay_geo_interactive() {
-    local ip="${1:-}"
-    local fallback="${2:-exit}"
-    local code=""
-    local country=""
-
-    if [[ -n "$ip" ]]; then
-        code="$(detect_node_country_code "$ip" 2>/dev/null || true)"
-    fi
-    if [[ -z "$code" ]]; then
-        code="$fallback"
-    fi
-
-    code="$(normalize_country_code "$code")"
-    country="$(get_country_display_name "$code")"
-
-    if [[ -t 0 ]]; then
-        info "Определена геолокация Relay: ${BOLD}${country}${NC} (код: ${CYAN}${code}${NC})" >&2
-        local confirm=""
-        read -rp "Использовать эту локацию? [Y/n]: " confirm >&2 || true
-        if [[ "$confirm" =~ ^[NnНн]$ ]]; then
-            local custom_code=""
-            read -rp "Введите двухбуквенный код или название страны (например: se, fi, de): " custom_code >&2 || true
-            if [[ -n "$custom_code" ]]; then
-                code="$(normalize_country_code "$custom_code")"
-                country="$(get_country_display_name "$code")"
-            fi
-        fi
-    fi
-
-    echo "${code}|${country}"
 }
 
 # =============================================================================
@@ -1467,29 +1361,9 @@ remove_antiabuse_protection() {
     log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
 }
 
-cleanup_legacy_traffic_watchdog_residue() {
-    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop just1knode-traffic.timer just1knode-traffic.service 2>/dev/null || true
-        systemctl disable just1knode-traffic.timer just1knode-traffic.service 2>/dev/null || true
-    fi
-    rm -f "${systemd_dir}/just1knode-traffic.service" "${systemd_dir}/just1knode-traffic.timer" 2>/dev/null || true
-    rm -f "${systemd_dir}/xray.service.d/traffic-cutoff.conf" 2>/dev/null || true
-    rm -f "${STATE_DIR:-/etc/just1knode}/traffic_cutoff.active" /etc/just1knode/traffic_cutoff.active 2>/dev/null || true
-    rm -f "${STATE_DIR:-/etc/just1knode}/traffic_monthly.json" /etc/just1knode/traffic_monthly.json 2>/dev/null || true
-    rm -f /run/just1knode_traffic_cutoff "${RUN_DIR:-/run}/just1knode_traffic_cutoff" 2>/dev/null || true
-    if [[ -d "${systemd_dir}/xray.service.d" ]] && [[ -z "$(ls -A "${systemd_dir}/xray.service.d" 2>/dev/null)" ]]; then
-        rmdir "${systemd_dir}/xray.service.d" 2>/dev/null || true
-    fi
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl reset-failed just1knode-traffic.service just1knode-traffic.timer 2>/dev/null || true
-    fi
-}
-
 is_traffic_limit_exceeded() {
     local state_dir="${STATE_DIR:-/etc/just1knode}"
-    [[ -f "${state_dir}/traffic_limit_exceeded" || -f "${state_dir}/traffic_cutoff.active" ]]
+    [[ -f "${state_dir}/traffic_limit_exceeded" ]]
 }
 
 safe_restart_xray() {
