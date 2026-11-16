@@ -434,7 +434,7 @@ ensure_v2_base_stack_installed() {
             break
         fi
         if validate_ipv4 "$bot_ip_input" 2>/dev/null; then
-            set_origin_bot_ip "$bot_ip_input" || warn "Не удалось применить BOT_IP в UFW."
+            set_bot_ip "$bot_ip_input" || warn "Не удалось применить BOT_IP в UFW."
             break
         fi
         warn "Некорректный IPv4 адрес: '$bot_ip_input'."
@@ -1707,7 +1707,7 @@ main_menu() {
                 read -rp "Нажмите Enter для продолжения..." || true
                 ;;
             3)
-                set_origin_bot_ip || true
+                set_bot_ip || true
                 read -rp "Нажмите Enter для продолжения..." || true
                 ;;
             4)
@@ -1876,7 +1876,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             doctor|test) run_doctor || exit 1 ;;
             heal) heal_node_config ;;
             set-bot-ip|bot-ip)
-                set_origin_bot_ip "${2:-}"
+                set_bot_ip "${2:-}"
                 ;;
             anti-abuse|antiabuse|apply-abuse-protection)
                 check_root

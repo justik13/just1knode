@@ -261,9 +261,9 @@ print(1 if limit_gb > 0 and total >= limit_gb * (1024 ** 3) else 0)
         fi
     else
         # Traffic is below limit
-        if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || -f "$TRAFFIC_LEGACY_CUTOFF_FLAG" ]]; then
+        if [[ -f "$TRAFFIC_EXCEEDED_FLAG" ]]; then
             warn "Лимит трафика восстановлен / наступил новый биллинговый цикл. Запуск Xray..."
-            rm -f "$TRAFFIC_EXCEEDED_FLAG" "$TRAFFIC_LEGACY_CUTOFF_FLAG" 2>/dev/null || true
+            rm -f "$TRAFFIC_EXCEEDED_FLAG" 2>/dev/null || true
             if command -v systemctl >/dev/null 2>&1; then
                 systemctl start xray 2>/dev/null || true
             fi

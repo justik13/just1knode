@@ -585,8 +585,8 @@ heal_node_firewall_and_stealth() {
     ufw default allow outgoing >/dev/null 2>&1 || true
 
     # 3. Панель API узла (8444/tcp строго по BOT_IP — Fail-Closed)
-    local origin_bot_ip
-    origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    local cur_bot_ip
+    cur_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
 
     if ! is_ssh_port "8444"; then
         if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
@@ -596,11 +596,11 @@ heal_node_firewall_and_stealth() {
         fi
     fi
 
-    if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
-        local bot_ip_re="${origin_bot_ip//./\\.}"
+    if [[ -n "$cur_bot_ip" && "$cur_bot_ip" != "any" && "$cur_bot_ip" != "-" ]] && (validate_ip "$cur_bot_ip" || validate_ipv4 "$cur_bot_ip"); then
+        local bot_ip_re="${cur_bot_ip//./\\.}"
         if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${bot_ip_re}(/32)?([[:space:]]|$)" | grep -q "8444"; then
-            if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
-                log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
+            if ufw allow from "$cur_bot_ip" to any port 8444 proto tcp comment "just1knode api" >/dev/null 2>&1; then
+                log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${cur_bot_ip})"
             fi
         fi
     else
@@ -1409,7 +1409,7 @@ validate_sub_prefix() {
     return 0
 }
 
-set_origin_bot_ip() {
+set_bot_ip() {
     title "ОБНОВЛЕНИЕ IP-АДРЕСА TELEGRAM-БОТА (BOT_IP ДЛЯ ЗАЩИТЫ API)"
     check_root
     init_state_dir
@@ -1523,6 +1523,10 @@ set_origin_bot_ip() {
 
     log "BOT_IP успешно обновлен и зафиксирован в state.json: ${old_bot_ip:-не был задан} -> ${new_bot_ip}"
     release_just1knode_lock
+}
+
+set_origin_bot_ip() {
+    set_bot_ip "$@"
 }
 
 
