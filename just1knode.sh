@@ -14,7 +14,7 @@ export PYTHONIOENCODING=utf-8
 # Определение каталога скрипта с защитой от запуска через pipe (curl | bash)
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 SCRIPT_DIR=""
-if [[ -n "$SCRIPT_SOURCE" && "$SCRIPT_SOURCE" != "bash" && "$SCRIPT_SOURCE" != "-bash" ]]; then
+if [[ -n "$SCRIPT_SOURCE" && "$SCRIPT_SOURCE" != "bash" && "$SCRIPT_SOURCE" != "-bash" && "$SCRIPT_SOURCE" != /dev/fd/* && "$SCRIPT_SOURCE" != /proc/* ]]; then
     if command -v realpath >/dev/null 2>&1; then
         resolved_source="$(realpath "$SCRIPT_SOURCE" 2>/dev/null || echo "$SCRIPT_SOURCE")"
     elif command -v readlink >/dev/null 2>&1; then
@@ -22,7 +22,7 @@ if [[ -n "$SCRIPT_SOURCE" && "$SCRIPT_SOURCE" != "bash" && "$SCRIPT_SOURCE" != "
     else
         resolved_source="$SCRIPT_SOURCE"
     fi
-    SCRIPT_DIR="$(cd "$(dirname "$resolved_source")" 2>/dev/null && pwd)"
+    SCRIPT_DIR="$(cd "$(dirname "$resolved_source")" 2>/dev/null && pwd || true)"
 fi
 
 # Если скрипт запущен через pipe (curl | bash) или модули не найдены локально:
@@ -410,6 +410,9 @@ ensure_v2_base_stack_installed() {
     set_state_val "api_key" "$api_key"
     set_state_val "api_url" "https://${my_ip}:8444"
     set_state_json_val "modules" "{}"
+    if [[ -n "${JUST1KNODE_REF:-}" ]]; then
+        set_state_val "repo_ref" "$JUST1KNODE_REF"
+    fi
 
     local c_code=""
     c_code="$(detect_node_country_code "$my_ip" 2>/dev/null || true)"
@@ -438,8 +441,12 @@ ensure_v2_base_stack_installed() {
     done
 
     heal_node_firewall_and_stealth
+    echo ""
+    log "✔ Базовый системный стек развернут. Переходим к выбору роли и домена узла..."
+    sleep 1
+    select_role_wizard || true
     clear
-    log "✨ Базовая установка Just1kNode v2 завершена!"
+    log "✨ Настройка Just1kNode v2 завершена!"
     echo ""
     show_v2_connection_card
     read -rp "Нажмите Enter для перехода в главное меню..." || true

@@ -114,7 +114,11 @@ assemble_v2_hub_config() {
     fi
 
     local tmp_xray tmp_nginx tmp_map tmp_stream meta_tmp
-    tmp_xray="$(mktemp "${cfg_file}.tmp.XXXXXX" 2>/dev/null || mktemp)"
+    tmp_xray="$(mktemp "${cfg_file}.tmp.XXXXXX.json" 2>/dev/null || mktemp --suffix=.json "${cfg_file}.tmp.XXXXXX" 2>/dev/null || mktemp)"
+    if [[ "$tmp_xray" != *.json ]]; then
+        mv "$tmp_xray" "${tmp_xray}.json" 2>/dev/null || true
+        tmp_xray="${tmp_xray}.json"
+    fi
     tmp_nginx="$(mktemp "/tmp/just1k-origin.tmp.XXXXXX" 2>/dev/null || mktemp)"
     tmp_map="$(mktemp "/tmp/just1k-map.tmp.XXXXXX" 2>/dev/null || mktemp)"
     tmp_stream="$(mktemp "/tmp/just1k-stream.tmp.XXXXXX" 2>/dev/null || mktemp)"
