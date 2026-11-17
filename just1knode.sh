@@ -36,8 +36,6 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
     if [[ -d "/app/just1knode" && -f "/app/just1knode/lib/common.sh" ]]; then
         cp -a /app/just1knode/. "$INSTALL_DIR/"
         if [[ -d "/app/scripts/xray_api" ]]; then
-            mkdir -p "${XRAY_API_DIR:-/opt/xray-api}"
-            cp -a /app/scripts/xray_api/. "${XRAY_API_DIR:-/opt/xray-api}/"
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a /app/scripts/xray_api/. "$INSTALL_DIR/scripts/xray_api/"
         fi
@@ -90,8 +88,6 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             cp -a "$tmp_extract/modules" "$INSTALL_DIR/" 2>/dev/null || true
         fi
         if [[ -d "$tmp_extract/scripts/xray_api" ]]; then
-            mkdir -p "${XRAY_API_DIR:-/opt/xray-api}"
-            cp -a "$tmp_extract/scripts/xray_api/." "${XRAY_API_DIR:-/opt/xray-api}/"
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a "$tmp_extract/scripts/xray_api/." "$INSTALL_DIR/scripts/xray_api/"
         fi
@@ -111,10 +107,8 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
     fi
     
     chmod +x "$INSTALL_DIR/just1knode.sh"
-    ln -sf "$INSTALL_DIR/just1knode.sh" /usr/local/bin/just1knode
     
     echo -e "\033[1;32m✔\033[0m Модули успешно установлены в ${INSTALL_DIR}"
-    echo -e "\033[1;32m✔\033[0m Команда зарегистрирована: \033[1;36mjust1knode\033[0m"
     echo ""
     
     if [[ -t 0 ]]; then
@@ -369,9 +363,59 @@ show_v2_connection_card() {
     echo ""
 }
 
+# Очистка остаточных файлов при отмене или сбое базовой установки (Zero-Residual Bootstrap)
+cleanup_unconfirmed_installation() {
+    local node_st
+    node_st="$(get_node_status 2>/dev/null || echo "unconfigured")"
+    if [[ "$node_st" != "unconfigured" ]]; then
+        return 0
+    fi
+    if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null || [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
+        return 0
+    fi
+
+    local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+    rm -f "$global_bin" 2>/dev/null || true
+
+    local state_dir="${STATE_DIR:-/etc/just1knode}"
+    state_dir="${state_dir%/}"
+    if [[ -d "$state_dir" && "$state_dir" != "/" && "$state_dir" != "/etc" && "$state_dir" != "/var" && "$state_dir" != "/usr" && "$state_dir" != "/opt" ]]; then
+        rm -rf "$state_dir" 2>/dev/null || true
+    fi
+
+    local xray_api_dir="${XRAY_API_DIR:-/opt/xray-api}"
+    xray_api_dir="${xray_api_dir%/}"
+    local xray_api_etc="${XRAY_API_ETC:-/etc/xray-api}"
+    xray_api_etc="${xray_api_etc%/}"
+    local xray_api_lib="${XRAY_API_LIB:-/var/lib/xray-api}"
+    xray_api_lib="${xray_api_lib%/}"
+    if [[ -d "$xray_api_dir" && "$xray_api_dir" != "/" && "$xray_api_dir" != "/opt" ]]; then
+        rm -rf "$xray_api_dir" 2>/dev/null || true
+    fi
+    if [[ -d "$xray_api_etc" && "$xray_api_etc" != "/" && "$xray_api_etc" != "/etc" ]]; then
+        rm -rf "$xray_api_etc" 2>/dev/null || true
+    fi
+    if [[ -d "$xray_api_lib" && "$xray_api_lib" != "/" && "$xray_api_lib" != "/var" && "$xray_api_lib" != "/var/lib" ]]; then
+        rm -rf "$xray_api_lib" 2>/dev/null || true
+    fi
+
+    rm -rf /run/lock/just1knode /run/just1knode* /tmp/just1knode* /tmp/just1k* /tmp/xray* /tmp/update_bak* /tmp/xray_idempotency.db 2>/dev/null || true
+
+    local install_dir="${INSTALL_DIR:-/opt/just1knode}"
+    install_dir="${install_dir%/}"
+    local s_dir="${SCRIPT_DIR:-}"
+    s_dir="${s_dir%/}"
+    cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    if [[ "$s_dir" == "/opt/just1knode" && ! -d "${s_dir}/.git" ]]; then
+        rm -rf "$s_dir" 2>/dev/null || true
+    fi
+    if [[ -d "$install_dir" && "$install_dir" == "/opt/just1knode" && ! -d "${install_dir}/.git" ]]; then
+        rm -rf "$install_dir" 2>/dev/null || true
+    fi
+}
+
 ensure_v2_base_stack_installed() {
     check_root
-    init_state_dir
     clear
     title "БАЗОВАЯ УСТАНОВКА JUST1KNODE v2"
     echo -e "  Обнаружен чистый сервер без развернутого API-агента.\n"
@@ -381,10 +425,20 @@ ensure_v2_base_stack_installed() {
     echo -e "    • Агент управления xray-api (порт 8444 HTTPS с защитой UFW по BOT_IP)\n"
 
     local confirm=""
+    trap 'echo ""; cleanup_unconfirmed_installation; log "Базовая установка отменена. Все временные файлы очищены."; exit 130' INT TERM
     read -rp "Выполнить базовую установку? [Y/n]: " confirm || true
+    trap - INT TERM
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
-        return 1
+        cleanup_unconfirmed_installation
+        echo ""
+        log "Базовая установка отменена. Все временные файлы очищены."
+        exit 0
     fi
+
+    init_state_dir
+    ensure_global_symlink
+    echo -e "\033[1;32m✔\033[0m Команда зарегистрирована: \033[1;36mjust1knode\033[0m"
+    echo ""
 
     install_base_deps
     install_nginx_if_missing
@@ -455,7 +509,7 @@ ensure_v2_base_stack_installed() {
 
 # Автоматическая регистрация команды в /usr/local/bin
 ensure_global_symlink() {
-    local target="/usr/local/bin/just1knode"
+    local target="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
     local current_bin="${SCRIPT_DIR}/just1knode.sh"
     if [[ ! -L "$target" ]] || [[ "$(readlink -f "$target" 2>/dev/null || true)" != "$current_bin" ]]; then
         ln -sf "$current_bin" "$target" 2>/dev/null || true
@@ -1327,6 +1381,8 @@ uninstall_node() {
     fi
 
     local node_cleanup_errors=()
+    local node_domain
+    node_domain="$(get_state_val "domain" "" 2>/dev/null || true)"
 
     # Валидация системных путей (Defense-in-Depth защита от удаления критических каталогов ОС)
     local protected_node_paths=(
@@ -1364,6 +1420,14 @@ uninstall_node() {
     pkill -9 -u xrayapi 2>/dev/null || true
 
     info "3/11. Удаление пользователя и группы xrayapi..."
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    if [[ -d "$le_dir" ]]; then
+        chown -R root:root "$le_dir" 2>/dev/null || true
+        chmod 755 "$le_dir" 2>/dev/null || true
+        if [[ -d "${le_dir}/live" ]]; then
+            chmod 755 "${le_dir}/live" 2>/dev/null || true
+        fi
+    fi
     if id -u xrayapi >/dev/null 2>&1; then
         userdel -f xrayapi 2>/dev/null || userdel xrayapi 2>/dev/null || node_cleanup_errors+=("Не удалось удалить системного пользователя xrayapi")
     fi
@@ -1408,9 +1472,6 @@ uninstall_node() {
         else
             node_cleanup_errors+=("Не удалось восстановить default.user.bak в Nginx")
         fi
-    elif [[ -f "${nginx_conf_dir}/sites-available/default" && ! -e "${nginx_conf_dir}/sites-enabled/default" ]]; then
-        info "Восстановление стандартного default сайта в Nginx..."
-        ln -sf "${nginx_conf_dir}/sites-available/default" "${nginx_conf_dir}/sites-enabled/default" 2>/dev/null || true
     fi
 
     if command -v nginx >/dev/null 2>&1; then
@@ -1422,6 +1483,10 @@ uninstall_node() {
     fi
 
     info "7/11. Удаление веб-файлов и хуков Let's Encrypt..."
+    if [[ -n "$node_domain" && "$node_domain" != "-" && "$node_domain" != "None" && "$node_domain" != "null" ]] && command -v certbot >/dev/null 2>&1; then
+        info "Удаление сертификата certbot для домена $node_domain..."
+        certbot delete --cert-name "$node_domain" --non-interactive >/dev/null 2>&1 || true
+    fi
     local www_index="${WWW_HTML_DIR:-/var/www/html}/index.html"
     if [[ -f "$www_index" ]] && (grep -q "Cloud Ingress Network Node" "$www_index" 2>/dev/null || grep -q "SimpleCalc" "$www_index" 2>/dev/null || grep -q "Edge Gateway" "$www_index" 2>/dev/null); then
         rm -f "$www_index" 2>/dev/null || true
@@ -1471,10 +1536,6 @@ uninstall_node() {
 
     info "9/11. Очистка правил фаервола (UFW)..."
     if command -v ufw >/dev/null 2>&1; then
-        local st_relay_port st_bot_ip
-        st_relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
-        st_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-
         if ufw status 2>/dev/null | grep -qi "Status: active"; then
             local ufw_num_out
             ufw_num_out="$(ufw status numbered 2>/dev/null || true)"
@@ -1493,26 +1554,12 @@ uninstall_node() {
                     local first_tok t_port
                     first_tok="$(echo "$r_body" | awk '{print $1}')"
                     t_port="${first_tok%/*}"
-                    [[ "$t_port" =~ ^[0-9]+$ ]] || continue
-                    if is_ssh_port "$t_port"; then
+                    if [[ "$t_port" =~ ^[0-9]+$ ]] && is_ssh_port "$t_port"; then
                         continue
                     fi
 
-                    # Очистка строго собственных правил Just1kNode
-                    local is_node_rule=0
-                    if [[ "$t_port" == "8444" || "$t_port" == "443" ]]; then
-                        if [[ "$t_port" == "443" ]] && echo "$r_body" | grep -qiE '\b(https web service|caddy)\b'; then
-                            is_node_rule=0
-                        else
-                            is_node_rule=1
-                        fi
-                    elif [[ -n "$st_relay_port" && "$t_port" == "$st_relay_port" ]]; then
-                        is_node_rule=1
-                    elif echo "$r_body" | grep -qiE '(just1knode (origin api|relay tunnel|vless direct|xray-api bot_ip|certbot verification|hub ingress|eu_hub bridge|exit ingress|api))'; then
-                        is_node_rule=1
-                    fi
-
-                    if [[ $is_node_rule -eq 1 ]]; then
+                    # Очистка строго собственных правил Just1kNode по наличию метки/комментария just1knode
+                    if echo "$r_body" | grep -qi "just1knode"; then
                         r_nums+=("$r_n")
                     fi
                 fi
@@ -1523,27 +1570,9 @@ uninstall_node() {
                 sorted_nums="$(printf "%s\n" "${r_nums[@]}" | sort -rn -u)"
                 for r_n in $sorted_nums; do
                     if [[ -n "$r_n" ]]; then
-                        echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
+                        ufw --force delete "$r_n" >/dev/null 2>&1 || echo "y" | ufw delete "$r_n" >/dev/null 2>&1 || true
                     fi
                 done
-            fi
-        fi
-
-        if [[ -n "$st_relay_port" ]] && ! is_ssh_port "$st_relay_port"; then
-            ufw delete allow "$st_relay_port"/tcp >/dev/null 2>&1 || true
-            ufw delete allow "$st_relay_port" >/dev/null 2>&1 || true
-        fi
-        if ! is_ssh_port "8444"; then
-            if [[ -n "$st_bot_ip" ]]; then
-                ufw delete allow from "$st_bot_ip" to any port 8444 proto tcp >/dev/null 2>&1 || true
-            fi
-            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8444 >/dev/null 2>&1 || true
-        fi
-        if ! is_ssh_port "443"; then
-            if ! (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^just1kbot_caddy\b"); then
-                ufw delete allow 443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 443 >/dev/null 2>&1 || true
             fi
         fi
     fi
@@ -1556,7 +1585,7 @@ uninstall_node() {
     else
         log "Каталог бэкапов сохранен: ${BACKUP_DIR:-/var/backups/just1knode} (используйте --purge-backups для удаления)."
     fi
-    rm -rf /run/lock/just1knode /run/just1knode* /tmp/just1knode* "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
+    rm -rf /run/lock/just1knode /run/just1knode* /tmp/just1knode* /tmp/just1k* /tmp/xray* /tmp/update_bak* /tmp/xray_idempotency.db "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service.d" 2>/dev/null || true
 
     info "11/11. Удаление глобальной команды и каталога установки..."
     local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
@@ -1578,6 +1607,32 @@ uninstall_node() {
     if [[ -e "$global_bin" || -L "$global_bin" ]]; then
         node_cleanup_errors+=("Глобальный исполняемый файл все еще существует: $global_bin")
     fi
+    local xray_bin="${XRAY_BIN:-/usr/local/bin/xray}"
+    if [[ -e "$xray_bin" || -L "$xray_bin" ]]; then
+        node_cleanup_errors+=("Бинарный файл Xray все еще существует: $xray_bin")
+    fi
+    local xray_share="${XRAY_SHARE_DIR:-/usr/local/share/xray}"
+    if [[ -d "$xray_share" || -f "${xray_share}/geoip.dat" || -f "${xray_share}/geosite.dat" ]]; then
+        node_cleanup_errors+=("Каталог баз гео-данных Xray все еще существует: $xray_share")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" ]]; then
+        node_cleanup_errors+=("Служба systemd just1knode-apply.path все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.service" ]]; then
+        node_cleanup_errors+=("Служба systemd just1knode-apply.service все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-traffic-limit.service" ]]; then
+        node_cleanup_errors+=("Служба systemd just1knode-traffic-limit.service все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-traffic-limit.timer" ]]; then
+        node_cleanup_errors+=("Таймер systemd just1knode-traffic-limit.timer все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-traffic.service" ]]; then
+        node_cleanup_errors+=("Служба systemd just1knode-traffic.service все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-traffic.timer" ]]; then
+        node_cleanup_errors+=("Таймер systemd just1knode-traffic.timer все еще существует")
+    fi
     if [[ -f "$sysctl_ipv6_conf" ]]; then
         node_cleanup_errors+=("Файл sysctl $sysctl_ipv6_conf все еще существует")
     fi
@@ -1598,6 +1653,15 @@ uninstall_node() {
     fi
     if [[ -d "${XRAY_API_DIR:-/opt/xray-api}" ]]; then
         node_cleanup_errors+=("Каталог xray-api все еще существует: ${XRAY_API_DIR:-/opt/xray-api}")
+    fi
+    if [[ -d "${XRAY_API_ETC:-/etc/xray-api}" ]]; then
+        node_cleanup_errors+=("Каталог конфигурации xray-api все еще существует: ${XRAY_API_ETC:-/etc/xray-api}")
+    fi
+    if [[ -d "${XRAY_API_LIB:-/var/lib/xray-api}" ]]; then
+        node_cleanup_errors+=("Каталог данных xray-api все еще существует: ${XRAY_API_LIB:-/var/lib/xray-api}")
+    fi
+    if [[ -e "/run/lock/just1knode" ]]; then
+        node_cleanup_errors+=("Файл блокировки все еще существует: /run/lock/just1knode")
     fi
     if [[ -d "${STATE_DIR:-/etc/just1knode}" ]]; then
         node_cleanup_errors+=("Каталог состояния state все еще существует: ${STATE_DIR:-/etc/just1knode}")
@@ -1628,7 +1692,7 @@ uninstall_node() {
             echo -e "  ${RED}• $err${NC}"
         done
         error "Процедура удаления завершилась со статусом FAIL-CLOSED (код 1). Устраните указанные остатки вручную."
-        return 1
+        exit 1
     fi
 
     log "✨ just1knode успешно и полностью удален с сервера без остатков (верификация пройдена)."
@@ -1640,13 +1704,18 @@ uninstall_node() {
 # =============================================================================
 main_menu() {
     check_root
-    init_state_dir
-    ensure_global_symlink
 
     local init_status
     init_status="$(get_node_status)"
+    if [[ "$init_status" != "unconfigured" || -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+        init_state_dir
+        ensure_global_symlink
+    fi
+
     if [[ "$init_status" == "unconfigured" && -t 0 && ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
         ensure_v2_base_stack_installed || { echo ""; info "Выход из мастера установки."; return 0; }
+        init_state_dir
+        ensure_global_symlink
     fi
 
     # Однократная best-effort проверка обновлений при входе (не в цикле).
