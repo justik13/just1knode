@@ -602,7 +602,7 @@ if role == "ru_hub":
     # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; без не-РФ DNS-резолва)
     ru_domains = [
         "geosite:category-ru", "geosite:tld-ru",
-        "domain:ru", "domain:su", "domain:xn--p1ai", "domain:2ip.ru",
+        "domain:ru", "domain:su", "domain:xn--p1ai",
     ]
     cfg["dns"] = {
         "servers": [
