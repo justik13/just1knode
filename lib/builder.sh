@@ -1155,6 +1155,9 @@ print(
         cp -f "$tmp_nginx" "${nginx_dir}/sites-available/just1k-origin.conf"
         chmod 644 "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
         ln -sf "${nginx_dir}/sites-available/just1k-origin.conf" "${nginx_dir}/sites-enabled/just1k-origin.conf"
+        if [[ -e "${nginx_dir}/sites-enabled/default" && ! -f "${nginx_dir}/sites-available/default.user.bak" ]]; then
+            cp -L "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-available/default.user.bak" 2>/dev/null || true
+        fi
         rm -f "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
         if [[ "$map_needed" == "true" ]]; then
             cp -f "$tmp_map" "${nginx_dir}/conf.d/xhttp-map.conf"

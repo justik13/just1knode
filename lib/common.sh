@@ -549,6 +549,33 @@ is_ssh_port() {
 }
 
 # Автоматическое приведение периметра UFW и системных настроек к эталонному закрытому состоянию (Stealth)
+_ufw_delete_rules_by_comment() {
+    local match_comment="$1"
+    [[ -n "$match_comment" ]] || return 0
+    command -v ufw >/dev/null 2>&1 || return 0
+    ufw status 2>/dev/null | grep -qi "Status: active" || return 0
+
+    local stale_nums=()
+    local rule_line r_n r_body
+    while IFS= read -r rule_line; do
+        [[ -z "$rule_line" ]] && continue
+        if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+            r_n="${BASH_REMATCH[1]}"
+            r_body="${BASH_REMATCH[2]}"
+            if echo "$r_body" | grep -Fqi "$match_comment"; then
+                stale_nums+=("$r_n")
+            fi
+        fi
+    done < <(ufw status numbered 2>/dev/null || true)
+
+    if [[ ${#stale_nums[@]} -gt 0 ]]; then
+        local rn_s
+        for rn_s in $(printf "%s\n" "${stale_nums[@]}" | sort -rn -u); do
+            [[ -n "$rn_s" ]] && (ufw --force delete "$rn_s" >/dev/null 2>&1 || echo "y" | ufw delete "$rn_s" >/dev/null 2>&1 || true)
+        done
+    fi
+}
+
 heal_node_firewall_and_stealth() {
     # 1. Применяем системное скрытие (IPv6 leak protection + ICMP stealth)
     apply_node_sysctl_hardening
@@ -720,10 +747,7 @@ for ip in seen:
                 ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
             fi
         elif ! is_ssh_port "443"; then
-            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])443(/tcp)?[[:space:]]+ALLOW" -q; then
-                ufw delete allow 443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 443 >/dev/null 2>&1 || true
-            fi
+            _ufw_delete_rules_by_comment "just1knode hub ingress"
         fi
     elif [[ "$role" == "eu_hub" ]]; then
         local bridge_port
@@ -733,33 +757,17 @@ for ip in seen:
     elif [[ "$role" == "exit_node" ]]; then
         _ufw_sync_whitelist_port "443" "just1knode exit ingress" "exit_node"
     else
-        # Не сконфигурирован: держим 443 закрытым (Fail-Closed Stealth)
+        # Не сконфигурирован: удаляем правила ingress/bridge Just1kNode, если остались
         if ! is_ssh_port "443"; then
-            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])443(/tcp)?[[:space:]]+ALLOW" -q; then
-                ufw delete allow 443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 443 >/dev/null 2>&1 || true
-            fi
+            _ufw_delete_rules_by_comment "just1knode hub ingress"
+            _ufw_delete_rules_by_comment "just1knode eu_hub bridge"
+            _ufw_delete_rules_by_comment "just1knode exit ingress"
         fi
     fi
 
-    # 6. Защита веб-периметра: закрытие публичного порта 80 (Zero-Signature)
-    local has_external_sites=0
-    if command -v nginx >/dev/null 2>&1; then
-        if [[ -n "$(detect_existing_nginx_sites 2>/dev/null || true)" ]]; then
-            has_external_sites=1
-        fi
-    fi
-    if [[ "$has_external_sites" == "0" ]] && \
-       [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
-       [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
-       ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
-        if ! is_ssh_port "80"; then
-            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
-                ufw delete allow 80/tcp >/dev/null 2>&1 || true
-                ufw delete allow 80 >/dev/null 2>&1 || true
-                log "Фаервол UFW: закрыт неиспользуемый публичный порт 80 (маскировка Zero-Signature)."
-            fi
-        fi
+    # 6. Защита веб-периметра: удаление временных правил certbot для Just1kNode
+    if ! command -v certbot >/dev/null 2>&1 || [[ ! -f /run/just1knode_certbot_active ]]; then
+        _ufw_delete_rules_by_comment "just1knode certbot verification"
     fi
 }
 

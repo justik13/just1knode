@@ -149,11 +149,8 @@ except Exception:
     fi
 
     if ! is_module_enabled "vless_tls"; then
-        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-            if ! is_ssh_port "443"; then
-                ufw delete allow 443/tcp >/dev/null 2>&1 || true
-                ufw delete allow 443 >/dev/null 2>&1 || true
-            fi
+        if ! is_ssh_port "443"; then
+            _ufw_delete_rules_by_comment "just1knode hub ingress"
         fi
     fi
 
