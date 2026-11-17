@@ -56,14 +56,22 @@ fi
 
 # Sync renewed certs to Xray TLS directory
 XRAY_TLS_DIR="/usr/local/etc/xray/tls"
+STATE_FILE="/etc/just1knode/state.json"
+PRIMARY_DOMAIN=""
+if [[ -f "$STATE_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    PRIMARY_DOMAIN="$(jq -r '.primary_domain // .domain // empty' "$STATE_FILE" 2>/dev/null || true)"
+fi
+
 if [[ -d "$XRAY_TLS_DIR" ]]; then
     for live_dir in /etc/letsencrypt/live/*; do
         if [[ -d "$live_dir" && -f "$live_dir/fullchain.pem" && -f "$live_dir/privkey.pem" ]]; then
             dom=$(basename "$live_dir")
-            install -m 644 "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem" 2>/dev/null || cp -f "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem"
-            install -m 640 "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem" 2>/dev/null || cp -f "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem"
             install -m 644 "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/${dom}_fullchain.pem" 2>/dev/null || true
             install -m 640 "$live_dir/privkey.pem" "$XRAY_TLS_DIR/${dom}_privkey.pem" 2>/dev/null || true
+            if [[ -n "$PRIMARY_DOMAIN" && "$dom" == "$PRIMARY_DOMAIN" ]] || [[ -z "$PRIMARY_DOMAIN" && ! -f "$XRAY_TLS_DIR/fullchain.pem" ]]; then
+                install -m 644 "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem" 2>/dev/null || cp -f "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem"
+                install -m 640 "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem" 2>/dev/null || cp -f "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem"
+            fi
         fi
     done
     if getent group xrayapi >/dev/null 2>&1; then
@@ -157,7 +165,7 @@ ensure_domain_ssl_auto() {
     fi
 
     local ufw_opened_80=0
-    local nginx_paused=0
+    local nginx_paused_80=0
     local port80_container=""
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
         if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
@@ -166,8 +174,11 @@ ensure_domain_ssl_auto() {
     fi
 
     _cleanup_auto_ssl() {
-        if [[ $nginx_paused -eq 1 ]]; then
-            systemctl start nginx 2>/dev/null || true
+        if [[ $nginx_paused_80 -eq 1 ]]; then
+            if [[ -f /etc/nginx/sites-available/default && ! -L /etc/nginx/sites-enabled/default ]]; then
+                ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
+            fi
+            systemctl reload nginx 2>/dev/null || true
         fi
         if [[ -n "$port80_container" ]] && command -v docker >/dev/null 2>&1; then
             docker start "$port80_container" >/dev/null 2>&1 || true
@@ -179,8 +190,12 @@ ensure_domain_ssl_auto() {
     }
 
     if systemctl is-active --quiet nginx 2>/dev/null; then
-        if systemctl stop nginx 2>/dev/null; then
-            nginx_paused=1
+        if ss -tlnp 2>/dev/null | grep -E ':(80)[[:space:]]' | grep -q 'nginx'; then
+            if [[ -L /etc/nginx/sites-enabled/default ]]; then
+                rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+                nginx_paused_80=1
+                systemctl reload nginx 2>/dev/null || true
+            fi
         fi
     fi
     if command -v detect_host_port80_container >/dev/null 2>&1; then

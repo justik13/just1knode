@@ -452,7 +452,7 @@ resolved_tunnel_uuid = ""
 api_rule = {"type": "field", "inboundTag": ["just1k-wl-api-grpc"], "outboundTag": "just1k-wl-api"}
 
 if role == "ru_hub":
-    cfg["routing"]["domainStrategy"] = "AsIs"
+    cfg["routing"]["domainStrategy"] = "IPIfNonMatch"
     has_vless_tls = mod_on("vless_tls")
     has_xhttp = mod_on("vless_xhttp")
     active_cdns = [k for k in CDN_PROVIDER_SPECS if mod_on(k)] if has_xhttp else []
@@ -623,7 +623,7 @@ if role == "ru_hub":
     cfg["outbounds"].append({
         "tag": "just1k-wl-direct",
         "protocol": "freedom",
-        "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}},
+        "settings": {"domainStrategy": "UseIPv4"},
     })
 
     # Outbounds для Стандарта (std_bridges)
@@ -1106,7 +1106,7 @@ elif role == "exit_node":
         "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
     })
     cfg["outbounds"] = [
-        {"tag": "direct", "protocol": "freedom", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+        {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         {"tag": "just1k-wl-api", "protocol": "blackhole", "settings": {}},
     ]
