@@ -1023,14 +1023,14 @@ PYEOF
                 echo -e "  ${RED}✗${NC} ОШИБКА TLS CDN: Сертификат для https://${cdn_domain} не прошел валидацию (curl error 60)!"
                 failed=$((failed + 1))
             elif [[ "$cdn_code" == "502" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте Origin и CDN кэш)!"
+                echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте узел ru_hub и CDN кэш)!"
                 failed=$((failed + 1))
             elif [[ "$cdn_code" == "504" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: Origin или вышестоящий бот не ответили вовремя!"
-                echo -e "      ${YELLOW}→${NC} Проверьте доступность Origin и домена бота, а также логи /var/log/nginx/error.log на Origin."
+                echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: узел ru_hub или вышестоящий бот не ответили вовремя!"
+                echo -e "      ${YELLOW}→${NC} Проверьте доступность узла ru_hub и домена бота, а также логи /var/log/nginx/error.log на узле ru_hub."
                 failed=$((failed + 1))
             elif [[ "$cdn_code" == "404" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/Origin)!"
+                echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/ru_hub)!"
                 failed=$((failed + 1))
             elif [[ $cdn_err -eq 28 ]]; then
                 echo -e "  ${RED}✗${NC} ТАЙМАУТ CDN (curl error 28): https://${cdn_domain}${sub_prefix}/ping не ответил вовремя!"

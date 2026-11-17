@@ -328,7 +328,7 @@ get_public_ipv4() {
 
 ensure_xray_api_healthy() {
     local force="${1:-0}"
-    # Функция вызывается на узлах, где установлен агент xray-api (Origin / модульный узел с VLESS).
+    # Функция вызывается на узлах, где установлен агент xray-api (ru_hub / модульный узел с VLESS).
     if [[ ! -f /etc/systemd/system/xray-api.service && ! -f /lib/systemd/system/xray-api.service ]]; then
         return 0
     fi
