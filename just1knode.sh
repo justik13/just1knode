@@ -1111,12 +1111,18 @@ PYEOF
     fi
 
     if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
-        log "10. Проверка правил сетевой защиты Anti-Abuse в Xray..."
-        if [[ -f "/usr/local/etc/xray/config.json" ]] && grep -q "bittorrent" "/usr/local/etc/xray/config.json" 2>/dev/null; then
-            echo -e "  ${GREEN}✔${NC} Защита Anti-Abuse активна в ядре Xray (BitTorrent L7 + SMTP:25 + P2P)"
+        log "10. Проверка правил сетевой защиты Anti-Abuse..."
+        if check_antiabuse_rules; then
+            echo -e "  ${GREEN}✔${NC} Сетевая защита Anti-Abuse активна (SMTP:25 + BitTorrent L7 TCP/UDP/DHT)"
         else
-            echo -e "  ${YELLOW}!${NC} Конфигурация Anti-Abuse в Xray не найдена"
-            failed=$((failed + 1))
+            echo -e "  ${YELLOW}!${NC} Сетевая защита Anti-Abuse неполная или отсутствует в iptables"
+            warn "ВНИМАНИЕ: Сетевая защита Anti-Abuse не активна! Запуск автоматического восстановления (Auto-Heal)..."
+            if apply_antiabuse_protection && check_antiabuse_rules; then
+                echo -e "  ${GREEN}✔${NC} Правила сетевой защиты Anti-Abuse успешно восстановлены и активны."
+            else
+                echo -e "  ${RED}✗${NC} ОШИБКА: Не удалось восстановить правила Anti-Abuse (проверьте модуль ядра xt_string)!"
+                failed=$((failed + 1))
+            fi
         fi
     fi
 
@@ -1229,6 +1235,7 @@ reset_node() {
     systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
     systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
     remove_traffic_limit_timer
+    remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/just1k-stream443.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
     if [[ -f /etc/nginx/nginx.conf ]]; then
         sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' /etc/nginx/nginx.conf 2>/dev/null || true
@@ -1457,6 +1464,7 @@ uninstall_node() {
         sed -i '/# JUST1KNODE STREAM443 START/,/# JUST1KNODE STREAM443 END/d' "${nginx_conf_dir}/nginx.conf" 2>/dev/null || true
     fi
     rm -rf "${nginx_conf_dir}/fallback_ssl" 2>/dev/null || true
+    remove_antiabuse_protection 2>/dev/null || true
 
     if [[ -f "${nginx_conf_dir}/sites-available/default.user.bak" ]]; then
         info "Восстановление исходного default сайта в Nginx..."
@@ -1943,10 +1951,12 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                 set_bot_ip "${2:-}"
                 ;;
             anti-abuse|antiabuse|apply-abuse-protection)
-                info "Защита Anti-Abuse (BitTorrent, SMTP:25, P2P) встроена нативно в маршрутизацию Xray."
+                check_root
+                apply_antiabuse_protection
                 ;;
             remove-anti-abuse|remove-antiabuse|disable-anti-abuse)
-                info "Защита Anti-Abuse управляется конфигурацией ядра Xray."
+                check_root
+                remove_antiabuse_protection
                 ;;
             update-post)
                 check_root
