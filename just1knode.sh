@@ -460,9 +460,7 @@ ensure_v2_base_stack_installed() {
 
     local my_ip
     my_ip="$(get_public_ipv4 2>/dev/null || echo "127.0.0.1")"
-    set_state_val "role" "unconfigured"
     set_state_val "api_key" "$api_key"
-    set_state_val "api_url" "https://${my_ip}:8444"
     set_state_json_val "modules" "{}"
     if [[ -n "${JUST1KNODE_REF:-}" ]]; then
         set_state_val "repo_ref" "$JUST1KNODE_REF"
@@ -496,9 +494,13 @@ ensure_v2_base_stack_installed() {
 
     heal_node_firewall_and_stealth
     echo ""
-    log "✔ Базовый системный стек развернут. Переходим к выбору роли и домена узла..."
+    log "✔ Базовый системный стек развернут. Переходим к обязательному выбору роли и домена узла..."
     sleep 1
-    select_role_wizard || true
+    if ! select_role_wizard; then
+        warn "Настройка роли не была завершена. Сервер не может функционировать без роли."
+        cleanup_unconfirmed_installation
+        return 1
+    fi
     clear
     log "✨ Настройка Just1kNode v2 завершена!"
     echo ""
@@ -1738,6 +1740,11 @@ main_menu() {
 
         local status
         status="$(get_node_status)"
+        if [[ "$status" != "ru_hub" && "$status" != "eu_hub" && "$status" != "exit_node" ]]; then
+            warn "Узел не имеет активной роли. Запуск обязательной настройки роли..."
+            select_role_wizard || true
+            status="$(get_node_status)"
+        fi
 
         echo -e "  Роль:   $(role_display_name "$status")"
         echo -e "  Бот:    $(get_bot_connection_label)"
@@ -1745,11 +1752,7 @@ main_menu() {
         echo -e "  Трафик: $(get_traffic_limit_summary)"
         echo ""
 
-        if [[ "$status" == "unconfigured" ]]; then
-            echo -e "  ${BOLD}[1]${NC} ⚙️  Выберите роль (РУ ХАБ / Зарубежный ХАБ / Выходная НОДА)"
-        else
-            echo -e "  ${BOLD}[1]${NC} ⚙️  Управление ролью ($(role_display_name "$status"))"
-        fi
+        echo -e "  ${BOLD}[1]${NC} ⚙️  Управление ролью ($(role_display_name "$status"))"
         echo -e "  ${BOLD}[2]${NC} 🔑 Данные для подключения"
         echo -e "  ${BOLD}[3]${NC} 🤖 Изменить IP Telegram-бота (BOT_IP)"
         echo -e "  ${BOLD}[4]${NC} ⏱️  Лимит трафика хостинга"

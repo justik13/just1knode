@@ -1271,7 +1271,7 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
     links_data = _load_links_data()
     return {
         "status": "ok",
-        "role": str(node_meta.get("role") or "unconfigured"),
+        "role": str(node_meta.get("role") or ""),
         "country_code": str(node_meta.get("country_code") or ""),
         "domain": str(node_meta.get("domain") or ""),
         "cdn_domain": get_cdn_domain(),
@@ -1298,7 +1298,7 @@ def update_node_links(
 ) -> Dict[str, Any]:
     """Atomically saves Admin-defined node topology links and queues root config apply."""
     node_meta = get_node_state_metadata()
-    role = str(node_meta.get("role") or "unconfigured")
+    role = str(node_meta.get("role") or "")
     payload = req.model_dump(exclude_none=True)
 
     lp = _links_file_path()

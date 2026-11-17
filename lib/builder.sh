@@ -119,7 +119,7 @@ assemble_v2_hub_config() {
         mv "$tmp_xray" "${tmp_xray}.json" 2>/dev/null || true
         tmp_xray="${tmp_xray}.json"
     fi
-    tmp_nginx="$(mktemp "/tmp/just1k-origin.tmp.XXXXXX" 2>/dev/null || mktemp)"
+    tmp_nginx="$(mktemp "/tmp/just1k-ru-hub.tmp.XXXXXX" 2>/dev/null || mktemp)"
     tmp_map="$(mktemp "/tmp/just1k-map.tmp.XXXXXX" 2>/dev/null || mktemp)"
     tmp_stream="$(mktemp "/tmp/just1k-stream.tmp.XXXXXX" 2>/dev/null || mktemp)"
     meta_tmp="$(mktemp "/tmp/just1k-meta.tmp.XXXXXX" 2>/dev/null || mktemp)"
@@ -548,10 +548,10 @@ if role == "ru_hub":
                 spec_eff["xPaddingPlacement"] = str(m_cfg["xPaddingPlacement"])
 
             if len(loc_cdns) == 1:
-                relay_slug = code
+                loc_slug = code
             else:
-                relay_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
-            r_tag = f"just1k-wl-inbound-{relay_slug}"
+                loc_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
+            r_tag = f"just1k-wl-inbound-{loc_slug}"
 
             req_port = int(loc.get("inbound_port") or 0) if len(loc_cdns) == 1 else 0
             if not req_port or req_port in used_ports:
@@ -576,7 +576,7 @@ if role == "ru_hub":
             )
             bi_inbounds.append(r_tag)
             bi_loc_inbounds_by_target.setdefault(target_bridge, []).append(r_tag)
-            location_nginx_routes.append((r_path, f"xray_xhttp_relay_{relay_slug}", spec_eff))
+            location_nginx_routes.append((r_path, f"xray_xhttp_loc_{loc_slug}", spec_eff))
 
     # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; без не-РФ DNS-резолва)
     ru_domains = [
@@ -1152,9 +1152,11 @@ print(
     install_nginx_if_missing
     mkdir -p "${nginx_dir}/sites-available" "${nginx_dir}/sites-enabled" "${nginx_dir}/conf.d"
     if [[ "$nginx_needed" == "true" ]]; then
-        cp -f "$tmp_nginx" "${nginx_dir}/sites-available/just1k-origin.conf"
-        chmod 644 "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
-        ln -sf "${nginx_dir}/sites-available/just1k-origin.conf" "${nginx_dir}/sites-enabled/just1k-origin.conf"
+        # Atomically retire legacy origin.conf if present
+        rm -f "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
+        cp -f "$tmp_nginx" "${nginx_dir}/sites-available/just1k-ru-hub.conf"
+        chmod 644 "${nginx_dir}/sites-available/just1k-ru-hub.conf" 2>/dev/null || true
+        ln -sf "${nginx_dir}/sites-available/just1k-ru-hub.conf" "${nginx_dir}/sites-enabled/just1k-ru-hub.conf"
         if [[ -e "${nginx_dir}/sites-enabled/default" && ! -f "${nginx_dir}/sites-available/default.user.bak" ]]; then
             cp -L "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-available/default.user.bak" 2>/dev/null || true
         fi
@@ -1167,7 +1169,7 @@ print(
         fi
         sync_xhttp_upstreams_conf || true
     else
-        rm -f "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/conf.d/xhttp-map.conf" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
+        rm -f "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/conf.d/xhttp-map.conf" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
         if [[ "$fallback80_needed" == "true" ]]; then
             deploy_v2_fallback80_nginx
         else

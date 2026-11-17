@@ -821,6 +821,13 @@ for t, p in xray_inbound_ports.items():
             try:
                 port_num = int(p)
                 seen_codes.add(c_tag)
+                lines.append(f'upstream xray_xhttp_loc_{c_tag} {{')
+                lines.append(f'    server 127.0.0.1:{port_num};')
+                lines.append('    keepalive 128;')
+                lines.append('    keepalive_requests 100000;')
+                lines.append('    keepalive_timeout 300s;')
+                lines.append('}')
+                lines.append('')
                 lines.append(f'upstream xray_xhttp_relay_{c_tag} {{')
                 lines.append(f'    server 127.0.0.1:{port_num};')
                 lines.append('    keepalive 128;')
@@ -1531,10 +1538,6 @@ set_bot_ip() {
 
     log "BOT_IP успешно обновлен и зафиксирован в state.json: ${old_bot_ip:-не был задан} -> ${new_bot_ip}"
     release_just1knode_lock
-}
-
-set_origin_bot_ip() {
-    set_bot_ip "$@"
 }
 
 

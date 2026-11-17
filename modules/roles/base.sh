@@ -335,7 +335,10 @@ change_role_guarded() {
     set_state_json_val "allowed_ru_ips" "[]"
     save_links_json "{}"
     _sync_nginx_main_stream_include "false"
-    rm -f "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-origin.conf" \
+    rm -f "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-ru-hub.conf" \
+          "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/just1k-ru-hub.conf" \
+          "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-origin.conf" \
+          "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/just1k-origin.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-fallback80.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/xhttp-map.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/just1k-stream443.conf" 2>/dev/null || true
@@ -356,40 +359,56 @@ change_role_guarded() {
 select_role_wizard() {
     check_root
     init_state_dir
-    clear
-    title "ВЫБОР РОЛИ СЕРВЕРА JUST1KNODE v2"
-    echo -e "  ${BOLD}[1]${NC} 🇷🇺 ${BOLD}РУ ХАБ${NC}           — входной узел (VLESS TLS / VLESS XHTTP + CDN + мост в ЕС)"
-    echo -e "  ${BOLD}[2]${NC} 🌍 ${BOLD}Зарубежный ХАБ${NC}  — чистый транзитный мост (443 от РУ ХАБов -> Выходные НОДЫ)"
-    echo -e "  ${BOLD}[3]${NC} 🚀 ${BOLD}Выходная НОДА${NC}   — финальный выход (443 от хабов -> Freedom + Anti-Abuse)"
-    echo -e "  ${BOLD}[0]${NC} ⬅️  Назад"
-    echo ""
 
-    local r_choice new_role=""
-    read -rp "Выберите роль [0-3]: " r_choice || true
-    case "$r_choice" in
-        1) new_role="ru_hub" ;;
-        2) new_role="eu_hub" ;;
-        3) new_role="exit_node" ;;
-        0|"") return 0 ;;
-        *) warn "Неверный выбор."; return 1 ;;
-    esac
+    local new_role="${JUST1KNODE_ROLE:-}"
+    local input_dom="${JUST1KNODE_DOMAIN:-}"
 
-    local cur_dom input_dom=""
-    cur_dom="$(get_state_val "domain" "")"
-    [[ "$cur_dom" == "-" ]] && cur_dom=""
-    while true; do
-        if [[ -n "$cur_dom" ]]; then
-            read -rp "Домен [Enter для '$cur_dom']: " input_dom || true
-            input_dom="${input_dom:-$cur_dom}"
-        else
-            read -rp "Домен: " input_dom || true
-        fi
+    if [[ -n "$new_role" && -n "$input_dom" ]]; then
+        case "$new_role" in
+            ru_hub|eu_hub|exit_node) ;;
+            *) warn "Недопустимая роль в JUST1KNODE_ROLE: '$new_role'. Допустимы: ru_hub, eu_hub, exit_node."; return 1 ;;
+        esac
         input_dom="$(normalize_domain "$input_dom" 2>/dev/null || echo "$input_dom")"
-        if [[ -n "$input_dom" ]] && validate_fqdn "$input_dom" 2>/dev/null; then
-            break
+        if ! validate_fqdn "$input_dom" 2>/dev/null; then
+            warn "Некорректный домен в JUST1KNODE_DOMAIN: '$input_dom'."
+            return 1
         fi
-        warn "Введите корректное доменное имя (например, assets.example.com)."
-    done
+    else
+        while true; do
+            clear
+            title "ВЫБОР РОЛИ СЕРВЕРА JUST1KNODE v2"
+            echo -e "  ${BOLD}[1]${NC} 🇷🇺 ${BOLD}РУ ХАБ${NC}           — входной узел (VLESS TLS / VLESS XHTTP + CDN + мост в ЕС)"
+            echo -e "  ${BOLD}[2]${NC} 🌍 ${BOLD}Зарубежный ХАБ${NC}  — чистый транзитный мост (443 от РУ ХАБов -> Выходные НОДЫ)"
+            echo -e "  ${BOLD}[3]${NC} 🚀 ${BOLD}Выходная НОДА${NC}   — финальный выход (443 от хабов -> Freedom + Anti-Abuse)"
+            echo ""
+
+            local r_choice=""
+            read -rp "Выберите роль [1-3]: " r_choice || true
+            case "$r_choice" in
+                1) new_role="ru_hub"; break ;;
+                2) new_role="eu_hub"; break ;;
+                3) new_role="exit_node"; break ;;
+                *) warn "Выбор роли обязателен. Сервер не может функционировать без роли." ;;
+            esac
+        done
+
+        local cur_dom
+        cur_dom="$(get_state_val "domain" "")"
+        [[ "$cur_dom" == "-" ]] && cur_dom=""
+        while true; do
+            if [[ -n "$cur_dom" ]]; then
+                read -rp "Домен [Enter для '$cur_dom']: " input_dom || true
+                input_dom="${input_dom:-$cur_dom}"
+            else
+                read -rp "Домен (FQDN): " input_dom || true
+            fi
+            input_dom="$(normalize_domain "$input_dom" 2>/dev/null || echo "$input_dom")"
+            if [[ -n "$input_dom" ]] && validate_fqdn "$input_dom" 2>/dev/null; then
+                break
+            fi
+            warn "Введите корректное доменное имя (например, assets.example.com)."
+        done
+    fi
 
     echo ""
     echo -e "  Роль:  ${CYAN}$(role_display_name "$new_role")${NC}"
@@ -400,7 +419,7 @@ select_role_wizard() {
     read -rp "Подтвердите (y/n): " confirm || true
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         info "Настройка роли отменена."
-        return 0
+        return 1
     fi
 
     if ! ensure_domain_ssl_auto "$input_dom"; then
