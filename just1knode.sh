@@ -308,7 +308,7 @@ show_v2_connection_card() {
         if [[ -n "$domain" && "$domain" != "-" ]]; then
             api_url="https://${domain}:8444"
         else
-            api_url="https://${my_ip}:8444"
+            api_url="https://<домен_узла>:8444"
         fi
     fi
     api_key="$(get_state_val "api_key" "-")"

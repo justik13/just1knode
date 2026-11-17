@@ -9,7 +9,10 @@ exit_node_show_credentials() {
     my_ip="$(get_public_ipv4 2>/dev/null || echo "-")"
     domain="$(get_state_val "domain" "-")"
     t_uuid="$(get_state_val "tunnel_uuid" "-")"
-    api_url="$(get_state_val "api_url" "https://${my_ip}:8444")"
+    api_url="$(get_state_val "api_url" "")"
+    if [[ -z "$api_url" || "$api_url" == "-" ]]; then
+        api_url="https://${domain}:8444"
+    fi
     api_key="$(get_state_val "api_key" "-")"
 
     echo -e "  ${BOLD}Для добавления на Зарубежном ХАБе / в админке:${NC}"

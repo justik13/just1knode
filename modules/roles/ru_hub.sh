@@ -77,7 +77,10 @@ ru_hub_show_connection_details() {
     domain="$(get_state_val "domain" "-")"
     cdn_dom="$(get_state_val "cdn_domain" "-")"
     secret_path="$(get_state_val "secret_base_path" "-")"
-    api_url="$(get_state_val "api_url" "https://${my_ip}:8444")"
+    api_url="$(get_state_val "api_url" "")"
+    if [[ -z "$api_url" || "$api_url" == "-" ]]; then
+        api_url="https://${domain}:8444"
+    fi
     api_key="$(get_state_val "api_key" "-")"
 
     echo -e "  🌐 IP / Домен:        ${CYAN}${my_ip} / ${domain}${NC}"
