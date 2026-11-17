@@ -121,7 +121,7 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
 fi
 
 VERSION_FILE="${SCRIPT_DIR}/VERSION"
-JUST1KNODE_VERSION="2.5.1"
+JUST1KNODE_VERSION="3.0.0"
 if [[ -f "$VERSION_FILE" ]]; then
     JUST1KNODE_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 fi

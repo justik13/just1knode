@@ -1,3 +1,9 @@
+# Release Notes — just1knode v3.0.0
+
+## Что изменилось
+- Подняли версию ноды до `3.0.0` в `VERSION`, `pyproject.toml` и `just1knode.sh`.
+- Синхронизация с мажорным релизом v3 платформы: архитектура ролей (`ru_hub`, `eu_hub`, `exit_node`), строгая доменная адресация API нод (порт 8444) и 1-slot-1-UUID изоляция устройств.
+
 # Release Notes — just1knode v2.5.1
 
 ## Что изменилось
