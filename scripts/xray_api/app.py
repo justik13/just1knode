@@ -989,11 +989,6 @@ class InventoryRequest(BaseModel):
     )
 
 
-class ClientSyncBatchRequest(BaseModel):
-    items: List[ClientSyncRequest] = Field(..., max_length=1000)
-    expected_node_epoch: Optional[str] = None
-
-
 # Endpoints
 @app.get("/healthz")
 @app.get("/health")
@@ -1840,89 +1835,6 @@ async def _sync_client_internal(
         completed_idempotent_ops[req.idempotency_key] = resp
 
     return resp
-
-
-def _sync_clients_batch_sync(req: ClientSyncBatchRequest) -> Dict[str, Any]:
-    epoch_before = epoch_manager.get_current_running_epoch() if epoch_manager else None
-    if not epoch_before and epoch_manager:
-        epoch_before = epoch_manager.load_state().get("node_epoch")
-    if not epoch_before:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
-        )
-    sync_active_users_with_epoch(epoch_before)
-    if req.expected_node_epoch and req.expected_node_epoch != epoch_before:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=f"EpochMismatchError: expected {req.expected_node_epoch}, current {epoch_before}",
-        )
-
-    store_ops: list[Dict[str, Any]] = []
-    results: list[Dict[str, Any]] = []
-    for item in req.items:
-        cid = item.client_id
-        desired_state = item.desired_state or "active"
-        eff_svc = resolve_effective_service(item.service)
-        target_inbounds = get_target_inbounds(service=eff_svc)
-        if not target_inbounds:
-            results.append({"client_id": cid, "status": "error", "detail": "no_inbounds"})
-            continue
-
-        flow = "xtls-rprx-vision" if eff_svc == "vless" else ""
-        try:
-            if desired_state == "active":
-                for tag in target_inbounds:
-                    grpc_client.add_user(tag, cid, email=cid, flow=flow)
-                store_ops.append({
-                    "client_id": cid,
-                    "active": True,
-                    "version": item.version,
-                    "email": cid,
-                    "service": eff_svc,
-                })
-            else:
-                for tag in target_inbounds:
-                    grpc_client.remove_user(tag, cid)
-                store_ops.append({
-                    "client_id": cid,
-                    "active": False,
-                    "version": item.version,
-                    "service": eff_svc,
-                })
-            results.append({"client_id": cid, "status": "ok", "state": desired_state})
-        except Exception as e:
-            results.append({"client_id": cid, "status": "error", "detail": str(e)})
-
-    if store_ops:
-        client_store.apply_clients_batch(store_ops)
-
-    epoch_after = epoch_manager.get_current_running_epoch() if epoch_manager else None
-    if not epoch_after and epoch_manager:
-        epoch_after = epoch_manager.load_state().get("node_epoch")
-    if epoch_after != epoch_before:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=f"EpochDriftError: epoch drifted during batch {epoch_before} -> {epoch_after}",
-        )
-
-    node_sync_state["last_synced_at"] = time.time()
-    node_sync_state["last_client_sync_at"] = time.time()
-    return {
-        "status": "ok",
-        "verified_epoch": epoch_after,
-        "processed": len(results),
-        "results": results,
-    }
-
-
-@app.post("/v1/clients/sync-batch")
-async def sync_clients_batch(
-    req: ClientSyncBatchRequest,
-    _: bool = Depends(verify_api_key),
-) -> Dict[str, Any]:
-    """Batch client synchronization endpoint (single clients.json fsync, non-blocking event loop)."""
-    return await asyncio.to_thread(_sync_clients_batch_sync, req)
 
 
 @app.delete("/v1/clients/{uuid}")

@@ -3,10 +3,6 @@
 # JUST1KNODE - Библиотека управления SSL и маскировкой (lib/ssl.sh)
 # =============================================================================
 
-CERTBOT_DIR="${CERTBOT_DIR:-/var/www/certbot}"
-WWW_HTML_DIR="${WWW_HTML_DIR:-/var/www/html}"
-NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx}"
-
 _cleanup_self_signed_live_dir() {
     local domain="$1"
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"

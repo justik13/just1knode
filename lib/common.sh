@@ -223,48 +223,6 @@ configure_safe_ufw() {
     fi
 }
 
-# Обнаружение активных пользовательских сайтов в Nginx (для предотвращения случайного даунтайма)
-detect_existing_nginx_sites() {
-    local base_dir="${1:-/etc/nginx}"
-    local sites_found=()
-    local conf_dirs=("$base_dir/sites-enabled" "$base_dir/conf.d")
-
-    for cdir in "${conf_dirs[@]}"; do
-        [[ ! -d "$cdir" ]] && continue
-        while IFS= read -r -d '' f; do
-            local fname
-            fname="$(basename "$f")"
-            [[ "$fname" =~ ^(just1k|sub-wl|xhttp).* ]] && continue
-            [[ "$fname" =~ .*\.(bak|old|tmp|disabled)$ ]] && continue
-
-            if [[ "$fname" == "default" ]]; then
-                if grep -Eq '(^|[[:space:]])server_name[[:space:]]+[^_;]' "$f" 2>/dev/null; then
-                    local sname
-                    sname="$(grep -E '(^|[[:space:]])server_name[[:space:]]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
-                    sites_found+=("$fname ($sname)")
-                fi
-                continue
-            fi
-
-            if grep -Eq '(server_name|listen|proxy_pass)[[:space:]]+' "$f" 2>/dev/null; then
-                local sname
-                sname="$(grep -E '(^|[[:space:]])server_name[[:space:]]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*server_name[[:space:]]+//; s/;.*//' || echo "")"
-                if [[ -n "$sname" && "$sname" != "_" ]]; then
-                    sites_found+=("$fname ($sname)")
-                else
-                    sites_found+=("$fname")
-                fi
-            fi
-        done < <(find "$cdir" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
-    done
-
-    if [[ ${#sites_found[@]} -gt 0 ]]; then
-        printf '%s\n' "${sites_found[@]}"
-        return 0
-    fi
-    return 1
-}
-
 validate_ipv4() {
     local ip="${1:-}"
     [[ -z "$ip" ]] && return 1
@@ -278,31 +236,6 @@ validate_ipv4() {
         done
         [[ "$ip" == "0.0.0.0" || "$ip" == "255.255.255.255" ]] && return 1
         return 0
-    fi
-}
-
-check_domain_syntax() {
-    local domain="${1:-}"
-    [[ -z "$domain" ]] && { echo "EMPTY"; return 0; }
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c "
-import sys, re
-d = sys.argv[1].strip()
-if re.search(r'[\u0400-\u04FF]', d):
-    print('CYRILLIC')
-elif not re.match(r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', d):
-    print('INVALID_FQDN')
-else:
-    print('OK')
-" "$domain" 2>/dev/null || echo "OK"
-    else
-        if [[ "$domain" =~ [а-яА-ЯёЁ] ]]; then
-            echo "CYRILLIC"
-        elif [[ ! "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-            echo "INVALID_FQDN"
-        else
-            echo "OK"
-        fi
     fi
 }
 
@@ -874,124 +807,41 @@ except Exception:
 
 detect_node_country_code() {
     local ip="${1:-}"
-    if [[ -z "$ip" ]]; then
+    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
         return 1
     fi
 
+    # Если задано в переменной окружения
+    if [[ -n "${JUST1KNODE_COUNTRY:-}" && "${#JUST1KNODE_COUNTRY}" -eq 2 ]]; then
+        echo "${JUST1KNODE_COUNTRY,,}"
+        return 0
+    fi
+
+    # Последовательный запрос без зависаний
     local c_code=""
     c_code="$(python3 -c "
 import urllib.request, json, sys
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 ip = sys.argv[1]
-
-def fetch_ip_api():
+urls = [f'https://ipwho.is/{ip}', f'https://ipinfo.io/{ip}/json']
+for u in urls:
     try:
-        req = urllib.request.Request(f'http://ip-api.com/json/{ip}?fields=status,countryCode', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
+        req = urllib.request.Request(u, headers={'User-Agent': 'curl/7.88.1'})
+        with urllib.request.urlopen(req, timeout=3.0) as r:
             d = json.loads(r.read().decode('utf-8'))
-            if d.get('status') == 'success':
-                return d.get('countryCode', '').lower()
+            c = d.get('country_code') or d.get('country')
+            if c and len(c) == 2:
+                print(c.lower())
+                sys.exit(0)
     except Exception:
-        pass
-    return None
-
-def fetch_ipwho():
-    try:
-        req = urllib.request.Request(f'https://ipwho.is/{ip}', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
-            d = json.loads(r.read().decode('utf-8'))
-            if d.get('success'):
-                return d.get('country_code', '').lower()
-    except Exception:
-        pass
-    return None
-
-def fetch_ipinfo():
-    try:
-        req = urllib.request.Request(f'https://ipinfo.io/{ip}/json', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
-            d = json.loads(r.read().decode('utf-8'))
-            return d.get('country', '').lower()
-    except Exception:
-        pass
-    return None
-
-results = []
-with ThreadPoolExecutor(max_workers=3) as ex:
-    futures = [ex.submit(fetch_ip_api), ex.submit(fetch_ipwho), ex.submit(fetch_ipinfo)]
-    for f in as_completed(futures):
-        res = f.result()
-        if res and len(res) == 2 and res != 'ru':
-            results.append(res)
-
-if results:
-    counts = Counter(results)
-    most_common, _ = counts.most_common(1)[0]
-    print(most_common)
+        continue
 " "$ip" 2>/dev/null || true)"
 
-    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
+    if [[ -n "$c_code" && "${#c_code}" -eq 2 ]]; then
         echo "$c_code"
         return 0
     fi
 
     return 1
-}
-
-normalize_country_code() {
-    local raw="${1:-}"
-    if [[ "$raw" == *"/"* || "$raw" == *"\\"* || "$raw" == *".."* ]]; then
-        echo ""
-        return 1
-    fi
-    local val="${raw,,}"
-    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
-    case "$val" in
-        de|germany|германия|"de germany"|"de германия") echo "de" ;;
-        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "nl" ;;
-        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "fi" ;;
-        se|sweden|швеция|"se sweden"|"se швеция") echo "se" ;;
-        us|usa|сша|"us usa"|"us сша") echo "us" ;;
-        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "gb" ;;
-        fr|france|франция|"fr france"|"fr франция") echo "fr" ;;
-        tr|turkey|турция|"tr turkey"|"tr турция") echo "tr" ;;
-        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "kz" ;;
-        pl|poland|польша|"pl poland"|"pl польша") echo "pl" ;;
-        at|austria|австрия|"at austria"|"at австрия") echo "at" ;;
-        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "ch" ;;
-        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "ee" ;;
-        es|spain|испания|"es spain"|"es испания") echo "es" ;;
-        it|italy|италия|"it italy"|"it италия") echo "it" ;;
-        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "cz" ;;
-        no|norway|норвегия|"no norway"|"no норвегия") echo "no" ;;
-        dk|denmark|дания|"dk denmark"|"dk дания") echo "dk" ;;
-        is|iceland|исландия|"is iceland"|"is исландия") echo "is" ;;
-        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "lt" ;;
-        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "lv" ;;
-        ro|romania|румыния|"ro romania"|"ro румыния") echo "ro" ;;
-        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "bg" ;;
-        gr|greece|греция|"gr greece"|"gr греция") echo "gr" ;;
-        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "hu" ;;
-        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "sk" ;;
-        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "ie" ;;
-        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "pt" ;;
-        jp|japan|япония|"jp japan"|"jp япония") echo "jp" ;;
-        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "sg" ;;
-        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "ae" ;;
-        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "ge" ;;
-        am|armenia|армения|"am armenia"|"am армения") echo "am" ;;
-        *)
-            if [[ "$val" =~ ^[a-z]{2}$ ]]; then
-                echo "$val"
-            else
-                local clean
-                clean="$(echo "$val" | tr -cd '[:alnum:]')"
-                echo "${clean:0:2}"
-            fi
-            ;;
-    esac
 }
 
 # =============================================================================
@@ -1389,16 +1239,6 @@ is_traffic_limit_exceeded() {
     [[ -f "${state_dir}/traffic_limit_exceeded" ]]
 }
 
-safe_restart_xray() {
-    if is_traffic_limit_exceeded; then
-        warn "Лимит трафика исчерпан (активен флаг traffic_limit_exceeded) — запуск Xray пропущен."
-        return 0
-    fi
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart xray
-    fi
-}
-
 normalize_domain() {
     local raw="${1:-}"
     raw="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|^https\?://||' -e 's|/.*$||')"
@@ -1415,18 +1255,6 @@ validate_fqdn() {
         return 1
     fi
     if [[ ! "$host" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-        return 1
-    fi
-    return 0
-}
-
-validate_sub_prefix() {
-    local prefix="${1:-}"
-    [[ -z "$prefix" ]] && return 1
-    if [[ "$prefix" =~ [[:space:]\;\"\'\$\`\{\}\\\<\>\?\&\*] || "$prefix" =~ \.\. ]]; then
-        return 1
-    fi
-    if [[ ! "$prefix" =~ ^/[a-zA-Z0-9_/-]+$ ]]; then
         return 1
     fi
     return 0

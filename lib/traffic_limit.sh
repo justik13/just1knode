@@ -334,7 +334,7 @@ disable_traffic_limit() {
     remove_traffic_limit_timer
 
     local need_start=0
-    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" || "$(get_state_val "traffic_cutoff_triggered" "false")" == "true" ]]; then
+    if [[ -f "$TRAFFIC_EXCEEDED_FLAG" ]]; then
         need_start=1
     fi
 

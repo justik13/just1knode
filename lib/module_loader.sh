@@ -16,15 +16,6 @@ _modules_transports_dir() {
     echo "${root_dir%/}/modules/transports"
 }
 
-is_module_loaded() {
-    local target="$1"
-    local m
-    for m in "${LOADED_TRANSPORT_MODULES[@]}"; do
-        [[ "$m" == "$target" ]] && return 0
-    done
-    return 1
-}
-
 is_module_broken() {
     local target="$1"
     local m

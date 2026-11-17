@@ -257,25 +257,6 @@ set_state_json_val() {
     _state_mutate_json "set_json" "$1" "$2"
 }
 
-get_state_json_val() {
-    local key="$1"
-    local default_json="${2:-null}"
-    if [[ ! -f "$STATE_FILE" ]]; then
-        echo "$default_json"
-        return 0
-    fi
-    python3 -c "
-import sys, json
-f, k, d = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    with open(f, 'r', encoding='utf-8', errors='replace') as fp:
-        data = json.load(fp)
-    print(json.dumps(data[k], ensure_ascii=False) if k in data else d)
-except Exception:
-    print(d)
-" "$STATE_FILE" "$key" "$default_json"
-}
-
 is_module_enabled() {
     local mod_name="$1"
     [[ -f "$STATE_FILE" ]] || return 1
@@ -341,23 +322,6 @@ except Exception:
 " "$STATE_FILE"
 }
 
-get_links_json() {
-    local lf="${LINKS_FILE:-${STATE_DIR}/links.json}"
-    if [[ ! -f "$lf" ]]; then
-        echo "{}"
-        return 0
-    fi
-    python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as fp:
-        d = json.load(fp)
-    print(json.dumps(d if isinstance(d, dict) else {}, ensure_ascii=False))
-except Exception:
-    print("{}")
-' "$lf"
-}
-
 save_links_json() {
     local payload_json="$1"
     init_state_dir
@@ -398,13 +362,4 @@ finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
     os.close(lock_fd)
 ' "$lf" "$payload_json"
-}
-
-has_active_xray_config() {
-    local role
-    role="$(get_state_val "role" "unconfigured")"
-    if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
-        return 0
-    fi
-    return 1
 }

@@ -613,7 +613,7 @@ if role == "ru_hub":
                 "skipFallback": True,
             },
             {
-                "address": "195.208.4.1",
+                "address": "77.88.8.1",
                 "port": 53,
                 "domains": ru_domains,
                 "skipFallback": True,
