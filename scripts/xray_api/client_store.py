@@ -125,11 +125,6 @@ class ClientStore:
             except Exception:
                 pass
 
-    def save_clients(self, clients: Set[str]) -> bool:
-        """Backward-compatible save using set of active UUIDs."""
-        entries = {u: {"is_active": True, "version": 1, "updated_at": time.time()} for u in clients}
-        return self.save_client_entries(entries)
-
     def _acquire_lock(self):
         if fcntl is None:
             return None
@@ -366,28 +361,6 @@ class ClientStore:
             )
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deactivation to disk: {client_uuid}")
-        finally:
-            self._release_lock(lock_fd)
-
-    def apply_clients_batch(self, ops: list[Dict[str, Any]]) -> None:
-        """Apply multiple add/remove mutations under a single file lock and single disk fsync."""
-        if not ops:
-            return
-        self._ensure_dir()
-        lock_fd = self._acquire_lock()
-        try:
-            entries = self.load_client_entries()
-            for op in ops:
-                self._mutate_entry(
-                    entries,
-                    str(op["client_id"]),
-                    active=bool(op.get("active", True)),
-                    version=op.get("version"),
-                    email=op.get("email"),
-                    service=op.get("service"),
-                )
-            if not self.save_client_entries(entries):
-                raise IOError(f"Failed to persist batch of {len(ops)} client mutations")
         finally:
             self._release_lock(lock_fd)
 

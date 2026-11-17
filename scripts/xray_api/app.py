@@ -1315,17 +1315,6 @@ def update_node_links(
     }
 
 
-@app.get("/v1/clients/list")
-def list_clients(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
-    """Returns list of currently active clients persisted on the node."""
-    clients = list(client_store.load_clients())
-    return {
-        "status": "ok",
-        "count": len(clients),
-        "clients": clients,
-    }
-
-
 def _get_host_net_bytes() -> tuple[int, int]:
     """Reads cumulative host interface traffic (tx, rx) excluding loopback and virtual interfaces."""
     tx_raw = 0

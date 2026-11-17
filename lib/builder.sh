@@ -855,8 +855,6 @@ if role == "ru_hub":
         use_xri = False
         for ck in active_cdns:
             sp = CDN_PROVIDER_SPECS[ck]
-            if sp.get("options_rewrite"):
-                map_needed = True
             if sp.get("real_ip_header") == "X-Forwarded-For":
                 use_xff = True
             else:
@@ -879,13 +877,11 @@ if role == "ru_hub":
             )
         def make_xhttp_loc(c_path_raw, upstream_name, sp):
             cp = c_path_raw.rstrip("/")
-            opt_line = "        proxy_method $xhttp_proxy_method;\n" if sp.get("options_rewrite") else ""
             return (
                 f"    location ^~ {cp} {{\n"
                 f"        rewrite ^{re.escape(cp)}/?$ {cp}/ break;\n"
                 f"        proxy_pass http://{upstream_name};\n"
-                + opt_line
-                + "        proxy_http_version 1.1;\n"
+                "        proxy_http_version 1.1;\n"
                 '        proxy_set_header Connection "";\n'
                 "        proxy_pass_request_headers on;\n"
                 "        proxy_set_header Host $host;\n"
@@ -947,9 +943,6 @@ if role == "ru_hub":
         )
         with open(out_nginx_path, "w", encoding="utf-8") as nfp:
             nfp.write(nginx_text)
-        if map_needed:
-            with open(out_map_path, "w", encoding="utf-8") as mfp:
-                mfp.write("map $request_method $xhttp_proxy_method {\n    OPTIONS POST;\n    default $request_method;\n}\n")
 
 elif role == "eu_hub":
     c_file, k_file = cert_pair(domain)
@@ -1184,13 +1177,7 @@ print(
         if [[ -e "${nginx_dir}/sites-enabled/default" && ! -f "${nginx_dir}/sites-available/default.user.bak" ]]; then
             cp -L "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-available/default.user.bak" 2>/dev/null || true
         fi
-        rm -f "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
-        if [[ "$map_needed" == "true" ]]; then
-            cp -f "$tmp_map" "${nginx_dir}/conf.d/xhttp-map.conf"
-            chmod 644 "${nginx_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
-        else
-            rm -f "${nginx_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
-        fi
+        rm -f "${nginx_dir}/sites-enabled/default" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" "${nginx_dir}/conf.d/xhttp-map.conf" 2>/dev/null || true
         sync_xhttp_upstreams_conf || true
     else
         rm -f "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/conf.d/xhttp-map.conf" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
