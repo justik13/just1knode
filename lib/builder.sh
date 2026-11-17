@@ -113,20 +113,19 @@ assemble_v2_hub_config() {
         fi
     fi
 
-    local tmp_xray tmp_nginx tmp_map tmp_stream meta_tmp
+    local tmp_xray tmp_nginx tmp_stream meta_tmp
     tmp_xray="$(mktemp "${cfg_file}.tmp.XXXXXX.json" 2>/dev/null || mktemp --suffix=.json "${cfg_file}.tmp.XXXXXX" 2>/dev/null || mktemp)"
     if [[ "$tmp_xray" != *.json ]]; then
         mv "$tmp_xray" "${tmp_xray}.json" 2>/dev/null || true
         tmp_xray="${tmp_xray}.json"
     fi
     tmp_nginx="$(mktemp "/tmp/just1k-ru-hub.tmp.XXXXXX" 2>/dev/null || mktemp)"
-    tmp_map="$(mktemp "/tmp/just1k-map.tmp.XXXXXX" 2>/dev/null || mktemp)"
     tmp_stream="$(mktemp "/tmp/just1k-stream.tmp.XXXXXX" 2>/dev/null || mktemp)"
     meta_tmp="$(mktemp "/tmp/just1k-meta.tmp.XXXXXX" 2>/dev/null || mktemp)"
 
     if ! python3 - \
         "$state_file" "$clients_file" "$links_file" \
-        "$cfg_file" "$tmp_xray" "$tmp_nginx" "$tmp_map" "$tmp_stream" \
+        "$cfg_file" "$tmp_xray" "$tmp_nginx" "$tmp_stream" \
         "$xray_tls_dir" "$le_dir" "$cdn_specs_json" \
         "$broken_csv" "$nginx_stream_avail" "$ssl_reject_avail" > "$meta_tmp" <<'PYEOF'
 import ipaddress
@@ -149,7 +148,6 @@ except ImportError:
     cur_cfg_path,
     out_xray_path,
     out_nginx_path,
-    out_map_path,
     out_stream_path,
     xray_tls_dir,
     le_dir,
@@ -157,7 +155,7 @@ except ImportError:
     broken_csv,
     nginx_stream_avail_str,
     ssl_reject_avail_str,
-) = sys.argv[1:15]
+) = sys.argv[1:14]
 
 nginx_stream_avail = nginx_stream_avail_str == "true"
 ssl_reject_avail = ssl_reject_avail_str == "true"
@@ -618,6 +616,7 @@ if role == "ru_hub":
                 "domains": ru_domains,
                 "skipFallback": True,
             },
+            "77.88.8.8",
         ],
         "queryStrategy": "UseIPv4",
     }
@@ -1128,7 +1127,7 @@ print(json.dumps({
 }))
 PYEOF
     then
-        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_map" "$tmp_stream" "$meta_tmp" 2>/dev/null || true
+        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_stream" "$meta_tmp" 2>/dev/null || true
         return 1
     fi
 
@@ -1158,7 +1157,7 @@ print(
     ensure_xray_config_permissions "$tmp_xray"
     if ! "$XRAY_BIN" run -test -format json -config "$tmp_xray" >/dev/null 2>&1; then
         "$XRAY_BIN" run -test -format json -config "$tmp_xray" || true
-        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_map" "$tmp_stream" 2>/dev/null || true
+        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_stream" 2>/dev/null || true
         warn "Ошибка валидации сгенерированной конфигурации Xray."
         return 1
     fi
@@ -1196,7 +1195,7 @@ print(
         _sync_nginx_main_stream_include "false"
         rm -f "${nginx_dir}/just1k-stream443.conf" 2>/dev/null || true
     fi
-    rm -f "$tmp_nginx" "$tmp_map" "$tmp_stream" 2>/dev/null || true
+    rm -f "$tmp_nginx" "$tmp_stream" 2>/dev/null || true
 
     setup_base_api_nginx || return 1
     return 0

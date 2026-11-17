@@ -29,7 +29,6 @@ cdn_yandex_spec() {
   "uplinkDataKey": "data",
   "xPaddingPlacement": "queryInHeader",
   "real_ip_header": "X-Real-IP",
-  "options_rewrite": true,
   "primary_cdn_default": true,
   "cidrs": [
     "5.63.111.80/28", "5.187.84.32/28", "31.135.225.72/29", "37.17.118.240/28",

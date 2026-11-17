@@ -219,10 +219,6 @@ apply_v2_hub_configuration() {
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
     fi
 
-    if [[ "$role" == "exit_node" || "$role" == "ru_hub" ]]; then
-        apply_antiabuse_protection >/dev/null 2>&1 || true
-    fi
-
     heal_node_firewall_and_stealth
     return 0
 }

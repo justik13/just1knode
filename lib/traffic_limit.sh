@@ -187,7 +187,8 @@ Description=Just1kNode Traffic Limit Watchdog Timer (every 15 min)
 
 [Timer]
 OnBootSec=15s
-OnUnitActiveSec=15min
+OnCalendar=*:0/15
+Persistent=true
 Unit=just1knode-traffic-limit.service
 
 [Install]
