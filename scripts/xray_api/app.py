@@ -1517,6 +1517,17 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
 async def _sync_client_internal(
     req: ClientSyncRequest, client_uuid: str, desired_state: str
 ) -> Dict[str, Any]:
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
+        return {
+            "status": "success",
+            "message": f"Client synchronization is a no-op on {node_role} node",
+            "inbounds": [],
+            "running_epoch": curr_ep,
+        }
+
     effective_service = resolve_effective_service(req.service)
     target_inbounds = get_target_inbounds(service=effective_service)
     if not target_inbounds:
@@ -1930,6 +1941,17 @@ async def delete_client(
             status_code=422,
             detail=f"Invalid UUID: {uuid}",
         ) from None
+
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
+        return {
+            "status": "success",
+            "message": f"Client deprovision is a no-op on {node_role} node",
+            "inbounds": [],
+            "running_epoch": curr_ep,
+        }
 
     target_inbounds = get_all_managed_inbounds()
     if not target_inbounds:

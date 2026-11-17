@@ -1319,32 +1319,40 @@ apply_antiabuse_protection() {
     fi
 }
 
+_iptables_delete_all() {
+    while iptables -C "$@" 2>/dev/null; do
+        iptables -D "$@" 2>/dev/null || break
+    done
+}
+
 remove_antiabuse_protection() {
     log "Очистка правил сетевой защиты Anti-Abuse..."
-    iptables -D FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    _iptables_delete_all FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset
+    _iptables_delete_all OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        _iptables_delete_all DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset
+    fi
 
-    iptables -D FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
+    _iptables_delete_all FORWARD -p tcp --dport 6881:6889 -j DROP
+    _iptables_delete_all FORWARD -p udp --dport 6881:6889 -j DROP
+    _iptables_delete_all OUTPUT -p tcp --dport 6881:6889 -j DROP
+    _iptables_delete_all OUTPUT -p udp --dport 6881:6889 -j DROP
 
-    iptables -D FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+    _iptables_delete_all FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP
+    _iptables_delete_all FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP
+    _iptables_delete_all FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP
 
-    iptables -D OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || true
+    _iptables_delete_all OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP
+    _iptables_delete_all OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP
+    _iptables_delete_all OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP
+    _iptables_delete_all OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP
+    _iptables_delete_all OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP
+    _iptables_delete_all OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP
 
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -D DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+        _iptables_delete_all DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP
+        _iptables_delete_all DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP
+        _iptables_delete_all DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP
     fi
 
     # Удаление из /etc/ufw/before.rules

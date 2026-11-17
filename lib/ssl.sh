@@ -57,6 +57,26 @@ systemctl reload nginx 2>/dev/null || true
 if [ -f /etc/just1knode/traffic_limit_exceeded ]; then
     exit 0
 fi
+
+# Sync renewed certs to Xray TLS directory
+XRAY_TLS_DIR="/usr/local/etc/xray/tls"
+if [[ -d "$XRAY_TLS_DIR" ]]; then
+    for live_dir in /etc/letsencrypt/live/*; do
+        if [[ -d "$live_dir" && -f "$live_dir/fullchain.pem" && -f "$live_dir/privkey.pem" ]]; then
+            dom=$(basename "$live_dir")
+            install -m 644 "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem" 2>/dev/null || cp -f "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/fullchain.pem"
+            install -m 640 "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem" 2>/dev/null || cp -f "$live_dir/privkey.pem" "$XRAY_TLS_DIR/privkey.pem"
+            install -m 644 "$live_dir/fullchain.pem" "$XRAY_TLS_DIR/${dom}_fullchain.pem" 2>/dev/null || true
+            install -m 640 "$live_dir/privkey.pem" "$XRAY_TLS_DIR/${dom}_privkey.pem" 2>/dev/null || true
+        fi
+    done
+    if getent group xrayapi >/dev/null 2>&1; then
+        chown -R root:xrayapi "$XRAY_TLS_DIR" 2>/dev/null || true
+        chmod 640 "$XRAY_TLS_DIR"/*privkey.pem 2>/dev/null || true
+        chmod 644 "$XRAY_TLS_DIR"/*fullchain.pem 2>/dev/null || true
+    fi
+fi
+
 systemctl restart xray 2>/dev/null || true
 if [[ -f /etc/systemd/system/xray-api.service ]]; then
     sleep 1

@@ -137,6 +137,11 @@ import secrets
 import sys
 import uuid as uuid_lib
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 (
     state_path,
     clients_path,
@@ -166,13 +171,28 @@ except Exception:
     CDN_PROVIDER_SPECS = {}
 
 def load_json(path, default):
-    if path and os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fp:
-                return json.load(fp)
-        except Exception:
-            pass
-    return default
+    if not path or not os.path.exists(path):
+        return default
+    lock_file = path + ".lock"
+    lock_fd = None
+    try:
+        if fcntl is not None and os.path.exists(lock_file):
+            try:
+                lock_fd = open(lock_file, "a")
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
+            except Exception:
+                lock_fd = None
+        with open(path, "r", encoding="utf-8", errors="replace") as fp:
+            return json.load(fp)
+    except Exception:
+        return default
+    finally:
+        if lock_fd:
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
 
 def is_valid_ipv4(val):
     try:
@@ -512,9 +532,10 @@ if role == "ru_hub":
     # Локационные XHTTP инбаунды: автоматическая матрица (каждая локация x каждый активный CDN)
     seen_loc_codes = set()
     loc_sources = []
-    if isinstance(bi_cfg.get("locations"), list):
+    if isinstance(bi_cfg.get("locations"), list) and bi_cfg["locations"]:
         loc_sources.extend(bi_cfg["locations"])
-    loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
+    else:
+        loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
 
     used_ports = {ib.get("port") for ib in cfg["inbounds"] if ib.get("port")}
     next_port = 8005
@@ -741,9 +762,12 @@ if role == "ru_hub":
     all_client_inbounds = list(dict.fromkeys(std_inbounds + sni_route_inbounds + bi_inbounds))
     rules = [api_rule] + antiabuse_rules()
     if all_client_inbounds:
-        # Строго доменный direct для РФ + AsIs: зарубежные запросы уходят в мосты по FQDN без DNS в РФ
+        # Строго прямой выход для РФ-трафика (домены РФ + GeoIP RU)
         rules.append(
             {"type": "field", "inboundTag": all_client_inbounds, "domain": ru_domains, "outboundTag": "just1k-wl-direct"}
+        )
+        rules.append(
+            {"type": "field", "inboundTag": all_client_inbounds, "ip": ["geoip:ru"], "outboundTag": "just1k-wl-direct"}
         )
     rules.extend(sni_route_rules)
 
