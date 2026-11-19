@@ -1535,6 +1535,9 @@ class ClientBatchSyncRequest(BaseModel):
     clients: List[ClientBatchSyncItem] = Field(default_factory=list, max_length=2000)
 
 
+_batch_sync_lock = asyncio.Lock()
+
+
 @app.post("/v1/clients/batch-sync")
 async def batch_sync_clients(
     req: ClientBatchSyncRequest,
@@ -1555,7 +1558,7 @@ async def batch_sync_clients(
 
     succeeded: List[str] = []
     failed: Dict[str, str] = {}
-    async with sync_lock:
+    async with _batch_sync_lock:
         for item in req.clients:
             try:
                 clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
