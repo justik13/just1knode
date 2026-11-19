@@ -187,6 +187,7 @@ _sync_all_role_certs() {
     if [[ -n "$domain" && "$domain" != "-" ]]; then
         sync_xray_tls_cert_files "$domain" 2>/dev/null || true
     fi
+    deploy_certbot_renewal_hook 2>/dev/null || true
 }
 
 apply_v2_hub_configuration() {

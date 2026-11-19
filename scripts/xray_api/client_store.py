@@ -29,7 +29,7 @@ class ClientStore:
 
     def __init__(self, file_path: Path):
         self.file_path = Path(file_path)
-        self.lock_path = self.file_path.with_suffix(".lock")
+        self.lock_path = Path(f"{self.file_path}.lock")
 
     def _ensure_dir(self) -> None:
         try:

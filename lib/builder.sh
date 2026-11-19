@@ -168,21 +168,21 @@ try:
 except Exception:
     CDN_PROVIDER_SPECS = {}
 
-def load_json(path, default):
+def load_json(path, default, fail_closed=False):
     if not path or not os.path.exists(path):
         return default
     lock_file = path + ".lock"
     lock_fd = None
     try:
-        if fcntl is not None and os.path.exists(lock_file):
-            try:
-                lock_fd = open(lock_file, "a")
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
-            except Exception:
-                lock_fd = None
+        if fcntl is not None:
+            lock_fd = open(lock_file, "a")
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
         with open(path, "r", encoding="utf-8", errors="replace") as fp:
             return json.load(fp)
-    except Exception:
+    except Exception as exc:
+        if fail_closed:
+            sys.stderr.write(f"ERROR: failed to read {path}: {exc}\n")
+            sys.exit(1)
         return default
     finally:
         if lock_fd:
@@ -218,11 +218,11 @@ def clean_code(val, fallback):
     c = re.sub(r"[^a-z0-9_-]", "", str(val or "").strip().lower())
     return c or fallback
 
-state = load_json(state_path, {})
+state = load_json(state_path, {}, fail_closed=True)
 if not isinstance(state, dict):
     state = {}
 
-links = load_json(links_path, {})
+links = load_json(links_path, {}, fail_closed=True)
 if not isinstance(links, dict):
     links = {}
 
@@ -247,18 +247,9 @@ def mod_on(name):
     m = modules.get(name)
     return isinstance(m, dict) and m.get("enabled") is True
 
-# Сохраняем действующих клиентов из clients.json и текущего config.json (только для ru_hub).
+# Единственный локальный источник клиентов — clients.json (без воскрешения удалённых из cur_cfg).
 # ClientStore хранит структуру {"clients": {uuid: meta}, ...}; исключаем отозванных/disabled.
-cur_cfg = load_json(cur_cfg_path, {})
-existing_clients_by_tag = {}
-if isinstance(cur_cfg, dict):
-    for ib in cur_cfg.get("inbounds", []):
-        tag = ib.get("tag")
-        cls = ib.get("settings", {}).get("clients", [])
-        if tag and isinstance(cls, list):
-            existing_clients_by_tag[tag] = cls
-
-clients_db = load_json(clients_path, {})
+clients_db = load_json(clients_path, {}, fail_closed=True)
 vless_clients = {}
 wl_clients = {}
 revoked_vless = set()
@@ -287,23 +278,17 @@ for cid, meta in raw_clients_entries.items():
         else:
             revoked_wl.add(cid)
 
-def merged_clients(tag, primary_map, flow_val="", revoked_set=None):
+def active_clients_list(primary_map, flow_val="", revoked_set=None):
     revoked = revoked_set or set()
-    merged = {}
-    for c in existing_clients_by_tag.get(tag, []):
-        if isinstance(c, dict) and c.get("id") and c["id"] not in revoked:
-            item = {"id": c["id"], "email": str(c["id"])}
-            if flow_val:
-                item["flow"] = flow_val
-            merged[c["id"]] = item
+    result = []
     for cid, c in primary_map.items():
         if cid in revoked:
             continue
         item = dict(c)
         if flow_val:
             item["flow"] = flow_val
-        merged[cid] = item
-    return list(merged.values())
+        result.append(item)
+    return result
 
 def cert_pair(target_dom=None):
     t_dom = (target_dom or domain or "").strip().lower().lstrip("*.")
@@ -451,7 +436,7 @@ resolved_tunnel_uuid = ""
 api_rule = {"type": "field", "inboundTag": ["just1k-wl-api-grpc"], "outboundTag": "api"}
 
 if role == "ru_hub":
-    cfg["routing"]["domainStrategy"] = "IPIfNonMatch"
+    cfg["routing"]["domainStrategy"] = "AsIs"
     has_vless_tls = mod_on("vless_tls")
     has_xhttp = mod_on("vless_xhttp")
     active_cdns = [k for k in CDN_PROVIDER_SPECS if mod_on(k)] if has_xhttp else []
@@ -502,7 +487,7 @@ if role == "ru_hub":
             "port": tls_port,
             "protocol": "vless",
             "settings": {
-                "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision", revoked_vless),
+                "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
                 "decryption": "none",
                 "fallbacks": [{"dest": fb_dest}],
             },
@@ -522,7 +507,7 @@ if role == "ru_hub":
         if mod_cfg.get("xPaddingPlacement"):
             spec_eff["xPaddingPlacement"] = str(mod_cfg["xPaddingPlacement"])
         cfg["inbounds"].append(
-            build_xhttp_inbound(c_tag, c_port, c_path, spec_eff, merged_clients(c_tag, wl_clients, "", revoked_wl))
+            build_xhttp_inbound(c_tag, c_port, c_path, spec_eff, active_clients_list(wl_clients, "", revoked_wl))
         )
         bi_inbounds.append(c_tag)
 
@@ -590,7 +575,7 @@ if role == "ru_hub":
                 r_path = "/" + r_path
 
             cfg["inbounds"].append(
-                build_xhttp_inbound(r_tag, r_port, r_path, spec_eff, merged_clients(r_tag, wl_clients, "", revoked_wl))
+                build_xhttp_inbound(r_tag, r_port, r_path, spec_eff, active_clients_list(wl_clients, "", revoked_wl))
             )
             bi_inbounds.append(r_tag)
             bi_loc_inbounds_by_target.setdefault(target_bridge, []).append(r_tag)
@@ -615,7 +600,6 @@ if role == "ru_hub":
                 "domains": ru_domains,
                 "skipFallback": True,
             },
-            "77.88.8.8",
         ],
         "queryStrategy": "UseIPv4",
     }
@@ -717,7 +701,7 @@ if role == "ru_hub":
                 "port": r_port,
                 "protocol": "vless",
                 "settings": {
-                    "clients": merged_clients("just1k-vless-direct", vless_clients, "xtls-rprx-vision", revoked_vless),
+                    "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
                     "decryption": "none",
                     "fallbacks": [{"dest": "127.0.0.1:8080" if has_xhttp else "127.0.0.1:80"}],
                 },
