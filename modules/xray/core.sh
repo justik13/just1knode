@@ -103,6 +103,7 @@ update_xray_core() {
     download_and_verify_xray "$tmp_zip"
 
     unzip -q -o "$tmp_zip" xray -d "${tmp_extract}/"
+    unzip -q -o "$tmp_zip" geoip.dat geosite.dat -d "${tmp_extract}/" 2>/dev/null || true
     chmod +x "${tmp_extract}/xray"
 
     log "Проверка текущей конфигурации новым бинарником..."
@@ -113,6 +114,13 @@ update_xray_core() {
 
         log "Применение обновления..."
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
+        local xray_asset_dir
+        xray_asset_dir="$(dirname "$XRAY_BIN")"
+        for dat_f in geoip.dat geosite.dat; do
+            if [[ -f "${tmp_extract}/${dat_f}" ]]; then
+                install -m 644 "${tmp_extract}/${dat_f}" "${xray_asset_dir}/${dat_f}" 2>/dev/null || true
+            fi
+        done
         if is_traffic_limit_exceeded; then
             warn "Лимит трафика исчерпан — бинарник Xray обновлён без запуска службы."
             log "Обновление бинарника завершено! Версия: $($XRAY_BIN version | head -n 1)"
@@ -436,7 +444,9 @@ update_node() {
                 ensure_xrayapi_user
                 chown -R root:xrayapi "$api_dir" 2>/dev/null || true
                 chmod -R 750 "$api_dir" 2>/dev/null || true
-                if [[ -f "${api_dir}/xray-api.service" ]]; then
+                if declare -F deploy_xray_api_systemd_unit >/dev/null 2>&1; then
+                    deploy_xray_api_systemd_unit || true
+                elif [[ -f "${api_dir}/xray-api.service" ]]; then
                     cp "${api_dir}/xray-api.service" /etc/systemd/system/xray-api.service 2>/dev/null || true
                     systemctl daemon-reload 2>/dev/null || true
                 fi

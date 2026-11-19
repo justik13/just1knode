@@ -325,7 +325,7 @@ Group=xrayapi
 UMask=0007
 WorkingDirectory=${XRAY_API_DIR}
 EnvironmentFile=${XRAY_API_CONFIG_ENV}
-ExecStart=${XRAY_API_DIR}/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5001 --workers 1 --log-level info
+ExecStart=${XRAY_API_DIR}/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5001 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1 --log-level info
 Restart=always
 RestartSec=3
 LimitNOFILE=65535

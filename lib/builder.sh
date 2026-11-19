@@ -3,38 +3,17 @@
 # JUST1KNODE v2 - Единый сборщик Xray, Nginx HTTP/Stream и UFW для ролей v2
 # =============================================================================
 
-_nginx_has_stream_module() {
-    command -v nginx >/dev/null 2>&1 || return 1
-    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
-        return 0
-    fi
-    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|=dynamic|$)'; then
-        if ! nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-_sync_nginx_main_stream_include() {
-    local enable_stream="$1" # true | false
+_cleanup_legacy_stream443() {
     local nginx_dir="${NGINX_CONF_DIR:-/etc/nginx}"
     local main_conf="${nginx_dir}/nginx.conf"
     local stream_conf="${nginx_dir}/just1k-stream443.conf"
+    rm -f "$stream_conf" "${nginx_dir}/conf.d/just1k-stream443.conf" "${nginx_dir}/streams-enabled/just1k-stream443.conf" 2>/dev/null || true
     [[ -f "$main_conf" ]] || return 0
-
-    create_backup "$main_conf" 2>/dev/null || true
-    python3 - "$main_conf" "$stream_conf" "$enable_stream" <<'PYEOF'
+    python3 - "$main_conf" <<'PYEOF'
 import os, re, sys, tempfile
-
-main_conf, stream_conf, enable_str = sys.argv[1:4]
-enable = enable_str == "true"
-
+main_conf = sys.argv[1]
 with open(main_conf, "r", encoding="utf-8", errors="replace") as f:
     text = f.read()
-
-start_mark = "# JUST1KNODE STREAM443 START"
-end_mark = "# JUST1KNODE STREAM443 END"
 cleaned = re.sub(
     r"\n?# JUST1KNODE STREAM443 START.*?# JUST1KNODE STREAM443 END\n?",
     "\n",
@@ -48,24 +27,11 @@ cleaned = re.sub(
     count=1,
     flags=re.DOTALL,
 )
-
-if enable:
-    block = (
-        f"\n{start_mark}\n"
-        "stream {\n"
-        f"    include {stream_conf};\n"
-        "}\n"
-        f"{end_mark}\n"
-    )
-    new_text = cleaned.rstrip() + "\n" + block
-else:
-    new_text = cleaned.rstrip() + "\n"
-
-if new_text != text:
+if cleaned != text:
     d = os.path.dirname(os.path.abspath(main_conf))
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(new_text)
+        f.write(cleaned)
         f.flush()
     os.chmod(tmp, 0o644)
     os.replace(tmp, main_conf)
@@ -91,19 +57,6 @@ assemble_v2_hub_config() {
         broken_csv="$(IFS=,; echo "${BROKEN_MODULE_IDS[*]}")"
     fi
 
-    local cur_role=""
-    cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
-    if [[ "$cur_role" == "ru_hub" ]] && is_module_enabled "vless_tls" 2>/dev/null; then
-        if declare -F ensure_nginx_stream_module >/dev/null 2>&1; then
-            ensure_nginx_stream_module >/dev/null 2>&1 || true
-        fi
-    fi
-
-    local nginx_stream_avail="false"
-    if _nginx_has_stream_module 2>/dev/null; then
-        nginx_stream_avail="true"
-    fi
-
     local ssl_reject_avail="false"
     if command -v nginx >/dev/null 2>&1; then
         local ngx_ver=""
@@ -113,21 +66,20 @@ assemble_v2_hub_config() {
         fi
     fi
 
-    local tmp_xray tmp_nginx tmp_stream meta_tmp
+    local tmp_xray tmp_nginx meta_tmp
     tmp_xray="$(mktemp "${cfg_file}.tmp.XXXXXX.json" 2>/dev/null || mktemp --suffix=.json "${cfg_file}.tmp.XXXXXX" 2>/dev/null || mktemp)"
     if [[ "$tmp_xray" != *.json ]]; then
         mv "$tmp_xray" "${tmp_xray}.json" 2>/dev/null || true
         tmp_xray="${tmp_xray}.json"
     fi
     tmp_nginx="$(mktemp "/tmp/just1k-ru-hub.tmp.XXXXXX" 2>/dev/null || mktemp)"
-    tmp_stream="$(mktemp "/tmp/just1k-stream.tmp.XXXXXX" 2>/dev/null || mktemp)"
     meta_tmp="$(mktemp "/tmp/just1k-meta.tmp.XXXXXX" 2>/dev/null || mktemp)"
 
     if ! python3 - \
-        "$state_file" "$clients_file" "$links_file" \
-        "$cfg_file" "$tmp_xray" "$tmp_nginx" "$tmp_stream" \
+        "$state_file" "$clients_file" "$links_path_dummy" "$links_file" \
+        "$cfg_file" "$tmp_xray" "$tmp_nginx" \
         "$xray_tls_dir" "$le_dir" "$cdn_specs_json" \
-        "$broken_csv" "$nginx_stream_avail" "$ssl_reject_avail" > "$meta_tmp" <<'PYEOF'
+        "$broken_csv" "$ssl_reject_avail" > "$meta_tmp" <<'PYEOF'
 import ipaddress
 import json
 import os
@@ -144,20 +96,18 @@ except ImportError:
 (
     state_path,
     clients_path,
+    _unused_arg,
     links_path,
     cur_cfg_path,
     out_xray_path,
     out_nginx_path,
-    out_stream_path,
     xray_tls_dir,
     le_dir,
     cdn_specs_raw,
     broken_csv,
-    nginx_stream_avail_str,
     ssl_reject_avail_str,
-) = sys.argv[1:14]
+) = sys.argv[1:13]
 
-nginx_stream_avail = nginx_stream_avail_str == "true"
 ssl_reject_avail = ssl_reject_avail_str == "true"
 broken_modules = {x.strip() for x in broken_csv.split(",") if x.strip()}
 
@@ -268,41 +218,36 @@ for cid, meta in raw_clients_entries.items():
     st_v = ss.get("vless")
     if isinstance(st_v, dict):
         if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
-            vless_clients[cid] = {"id": cid, "email": email, "flow": "xtls-rprx-vision"}
+            vless_clients[cid] = {"id": cid, "email": f"{cid}:std", "flow": "xtls-rprx-vision"}
         else:
             revoked_vless.add(cid)
     st_w = ss.get("white_internet")
     if isinstance(st_w, dict):
         if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
-            wl_clients[cid] = {"id": cid, "email": email}
+            wl_clients[cid] = {"id": cid, "email": f"{cid}:wi"}
         else:
             revoked_wl.add(cid)
 
-def active_clients_list(primary_map, flow_val="", revoked_set=None):
+def active_clients_list(primary_map, flow_val=None, revoked_set=None):
     revoked = revoked_set or set()
     result = []
     for cid, c in primary_map.items():
         if cid in revoked:
             continue
         item = dict(c)
-        if flow_val:
-            item["flow"] = flow_val
+        if flow_val is not None:
+            if flow_val:
+                item["flow"] = flow_val
+            else:
+                item.pop("flow", None)
         result.append(item)
     return result
 
 def cert_pair(target_dom=None):
     t_dom = (target_dom or domain or "").strip().lower().lstrip("*.")
-    candidates = []
     if t_dom:
-        candidates.append(t_dom)
-        parts = t_dom.split(".")
-        for i in range(1, max(1, len(parts) - 1)):
-            parent_zone = ".".join(parts[i:])
-            if "." in parent_zone:
-                candidates.append(parent_zone)
-    for cand in candidates:
-        le_pem = os.path.join(le_dir, "live", cand, "fullchain.pem")
-        le_key = os.path.join(le_dir, "live", cand, "privkey.pem")
+        le_pem = os.path.join(le_dir, "live", t_dom, "fullchain.pem")
+        le_key = os.path.join(le_dir, "live", t_dom, "privkey.pem")
         if os.path.exists(le_pem) and os.path.exists(le_key):
             return le_pem, le_key
     pem = os.path.join(xray_tls_dir, "fullchain.pem")
@@ -447,44 +392,39 @@ if role == "ru_hub":
     std_bridges_raw = std_cfg.get("bridges") if isinstance(std_cfg.get("bridges"), list) else []
     bi_bridges_raw = bi_cfg.get("bridges") if isinstance(bi_cfg.get("bridges"), list) else []
 
-    sni_routes_raw = std_cfg.get("sni_routes") if isinstance(std_cfg.get("sni_routes"), list) else []
-    valid_sni_routes = []
-    if has_vless_tls and nginx_stream_avail:
-        seen_sni = set()
-        for r in sni_routes_raw:
-            if not isinstance(r, dict):
-                continue
-            r_sni = str(r.get("sni") or "").strip().lower().rstrip(".")
-            b_code = clean_code(r.get("bridge_code") or r.get("code"), "")
-            if is_valid_fqdn(r_sni) and b_code and r_sni not in seen_sni:
-                seen_sni.add(r_sni)
-                valid_sni_routes.append({"sni": r_sni, "bridge_code": b_code})
-
-    stream_needed = has_vless_tls and len(valid_sni_routes) > 0
-
     std_inbounds = []
     bi_inbounds = []
+    used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
 
+    std_loc_codes = []
+    seen_std_locs = set()
+    for p in std_bridges_raw:
+        if not isinstance(p, dict):
+            continue
+        lc = clean_code(p.get("location_code") or p.get("code"), "")
+        if lc and lc not in seen_std_locs:
+            seen_std_locs.add(lc)
+            std_loc_codes.append(lc)
+
+    std_location_routes = []
+    std_location_rules = []
     if has_vless_tls:
         c_file, k_file = cert_pair(domain)
-        fb_dest = "127.0.0.1:8080" if has_xhttp else "127.0.0.1:80"
-        if not has_xhttp:
+        will_need_nginx = has_xhttp or len(std_loc_codes) > 0
+        fb_dest = "127.0.0.1:8080" if will_need_nginx else "127.0.0.1:80"
+        if not will_need_nginx:
             fallback80_needed = True
 
-        tls_listen = "127.0.0.1" if stream_needed else "0.0.0.0"
-        tls_port = 8445 if stream_needed else 443
         ss_tls = {
             "network": "tcp",
             "security": "tls",
             "tlsSettings": build_tls_settings(c_file, k_file, domain),
         }
-        if stream_needed:
-            ss_tls["sockopt"] = {"acceptProxyProtocol": True}
 
         cfg["inbounds"].append({
             "tag": "just1k-vless-direct",
-            "listen": tls_listen,
-            "port": tls_port,
+            "listen": "0.0.0.0",
+            "port": 443,
             "protocol": "vless",
             "settings": {
                 "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
@@ -495,6 +435,27 @@ if role == "ru_hub":
             "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
         })
         std_inbounds.append("just1k-vless-direct")
+
+        std_next_port = 8105
+        std_xhttp_spec = {
+            "uplinkHTTPMethod": "POST",
+            "uplinkDataPlacement": "body",
+            "xPaddingPlacement": "header",
+        }
+        std_active_clients = active_clients_list(vless_clients, "", revoked_vless)
+        for lc in std_loc_codes:
+            while std_next_port in used_ports:
+                std_next_port += 1
+            s_port = std_next_port
+            used_ports.add(s_port)
+            s_tag = f"just1k-vless-loc-{lc}"
+            s_path = f"/std/{lc}"
+            cfg["inbounds"].append(
+                build_xhttp_inbound(s_tag, s_port, s_path, std_xhttp_spec, std_active_clients)
+            )
+            std_inbounds.append(s_tag)
+            std_location_routes.append((s_path, f"xray_std_loc_{lc}", s_port))
+            std_location_rules.append((lc, s_tag))
 
     # CDN XHTTP инбаунды (БИ)
     for cdn_key in active_cdns:
@@ -519,7 +480,7 @@ if role == "ru_hub":
     else:
         loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
 
-    used_ports = {ib.get("port") for ib in cfg["inbounds"] if ib.get("port")}
+    used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
     next_port = 8005
     location_nginx_routes = []
     bi_loc_inbounds_by_target = {}
@@ -676,71 +637,14 @@ if role == "ru_hub":
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
     ])
 
-    # Пер-SNI маршруты Стандарта (если включён nginx stream ssl_preread)
-    stream_map_entries = []
-    stream_upstream_blocks = []
-    sni_route_inbounds = []
-    sni_route_rules = []
-    if stream_needed:
-        route_port_base = 8450
-        for r_idx, rt in enumerate(valid_sni_routes):
-            b_code = rt["bridge_code"]
-            loc_tags = std_tags_by_loc.get(b_code) or ([std_outbounds[b_code]] if b_code in std_outbounds else [])
-            if not loc_tags:
-                continue
-            r_sni = rt["sni"]
-            r_port = route_port_base + r_idx
-            while r_port in used_ports:
-                r_port += 1
-            used_ports.add(r_port)
-            r_tag = f"just1k-vless-route-{r_idx}-{b_code}"
-            rc_file, rk_file = cert_pair(r_sni)
-            cfg["inbounds"].append({
-                "tag": r_tag,
-                "listen": "127.0.0.1",
-                "port": r_port,
-                "protocol": "vless",
-                "settings": {
-                    "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
-                    "decryption": "none",
-                    "fallbacks": [{"dest": "127.0.0.1:8080" if has_xhttp else "127.0.0.1:80"}],
-                },
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "tls",
-                    "sockopt": {"acceptProxyProtocol": True},
-                    "tlsSettings": build_tls_settings(rc_file, rk_file, r_sni),
-                },
-                "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
-            })
-            sni_route_inbounds.append(r_tag)
-            target_kw = _route_target_for_tags(f"bal-std-{b_code}", loc_tags, "just1k-wl-block")
-            sni_route_rules.append({"type": "field", "inboundTag": [r_tag], **target_kw})
-            stream_map_entries.append(f"    {r_sni} just1k_sni_route_{r_idx};")
-            stream_upstream_blocks.append(
-                f"upstream just1k_sni_route_{r_idx} {{\n    server 127.0.0.1:{r_port};\n}}"
-            )
+    std_loc_rules = []
+    for lc, s_tag in std_location_rules:
+        loc_tags = std_tags_by_loc.get(lc) or ([std_outbounds[lc]] if lc in std_outbounds else [])
+        if loc_tags:
+            target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
+            std_loc_rules.append({"type": "field", "inboundTag": [s_tag], **target_kw})
 
-        stream_text = (
-            "map $ssl_preread_server_name $just1k_sni_backend {\n"
-            + "\n".join(stream_map_entries) + "\n"
-            + "    default just1k_sni_default;\n"
-            + "}\n\n"
-            + "upstream just1k_sni_default {\n"
-            + "    server 127.0.0.1:8445;\n"
-            + "}\n\n"
-            + "\n\n".join(stream_upstream_blocks) + "\n\n"
-            + "server {\n"
-            + "    listen 443 reuseport;\n"
-            + "    ssl_preread on;\n"
-            + "    proxy_protocol on;\n"
-            + "    proxy_pass $just1k_sni_backend;\n"
-            + "}\n"
-        )
-        with open(out_stream_path, "w", encoding="utf-8") as sfp:
-            sfp.write(stream_text)
-
-    all_client_inbounds = list(dict.fromkeys(std_inbounds + sni_route_inbounds + bi_inbounds))
+    all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
     rules = [api_rule] + antiabuse_rules()
     if all_client_inbounds:
         # Строго прямой выход для РФ-трафика (домены РФ + GeoIP RU)
@@ -750,7 +654,7 @@ if role == "ru_hub":
         rules.append(
             {"type": "field", "inboundTag": all_client_inbounds, "ip": ["geoip:ru"], "outboundTag": "just1k-wl-direct"}
         )
-    rules.extend(sni_route_rules)
+    rules.extend(std_loc_rules)
 
     # Локационные БИ-правила (все CDN-инбаунды локации -> балансировщик или мост bridge-bi-<code>)
     for b_code, loc_tags in bi_loc_inbounds_by_target.items():
@@ -788,8 +692,8 @@ if role == "ru_hub":
 
     cfg["routing"]["rules"] = rules
 
-    # Nginx HTTP конфигурация для XHTTP / /sub/ на ru_hub
-    if has_xhttp:
+    # Nginx HTTP конфигурация для XHTTP (Стандарт + БИ) / /sub/ на ru_hub
+    if has_xhttp or std_location_routes:
         nginx_needed = True
         c_file, k_file = cert_pair(domain)
         listen_block = (
@@ -897,6 +801,15 @@ if role == "ru_hub":
             if cp and cp not in seen_loc_paths:
                 seen_loc_paths.add(cp)
                 loc_blocks.append(make_xhttp_loc(cp, r_upstream, r_sp))
+        std_upstream_blocks = []
+        for s_path, s_upstream, s_port in std_location_routes:
+            cp = str(s_path).rstrip("/")
+            std_upstream_blocks.append(
+                f"upstream {s_upstream} {{\n    server 127.0.0.1:{s_port};\n    keepalive 32;\n}}\n"
+            )
+            if cp and cp not in seen_loc_paths:
+                seen_loc_paths.add(cp)
+                loc_blocks.append(make_xhttp_loc(cp, s_upstream, {}))
         cdn_doms = [str(state.get("cdn_domain") or "").strip()]
         for ck in active_cdns:
             m_cfg = modules.get(ck, {})
@@ -904,7 +817,8 @@ if role == "ru_hub":
                 cdn_doms.append(str(m_cfg.get("cdn_domain") or m_cfg.get("domain") or "").strip())
         srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms) if x and x != "-"]) or (domain or "localhost")
         nginx_text = (
-            catchall_block
+            "\n".join(std_upstream_blocks)
+            + catchall_block
             + "server {\n"
             + listen_block
             + f"    server_name {srv_names};\n"
@@ -1100,29 +1014,27 @@ with open(out_xray_path, "w", encoding="utf-8") as xfp:
 print(json.dumps({
     "nginx_needed": nginx_needed,
     "fallback80_needed": fallback80_needed,
-    "stream_needed": stream_needed,
     "secret_base_path": secret_base,
     "tunnel_uuid": resolved_tunnel_uuid,
 }))
 PYEOF
     then
-        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_stream" "$meta_tmp" 2>/dev/null || true
+        rm -f "$tmp_xray" "$tmp_nginx" "$meta_tmp" 2>/dev/null || true
         return 1
     fi
 
-    local nginx_needed="false" fallback80_needed="false" stream_needed="false" resolved_secret="" resolved_tunnel_uuid=""
-    read -r nginx_needed fallback80_needed stream_needed resolved_secret resolved_tunnel_uuid < <(python3 -c "
+    local nginx_needed="false" fallback80_needed="false" resolved_secret="" resolved_tunnel_uuid=""
+    read -r nginx_needed fallback80_needed resolved_secret resolved_tunnel_uuid < <(python3 -c "
 import json, sys
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
     m = json.load(f)
 print(
     'true' if m.get('nginx_needed') else 'false',
     'true' if m.get('fallback80_needed') else 'false',
-    'true' if m.get('stream_needed') else 'false',
     m.get('secret_base_path') or '-',
     m.get('tunnel_uuid') or '-',
 )
-" "$meta_tmp" 2>/dev/null || echo "false false false - -")
+" "$meta_tmp" 2>/dev/null || echo "false false - -")
     rm -f "$meta_tmp" 2>/dev/null || true
 
     if [[ -n "$resolved_secret" && "$resolved_secret" != "-" ]]; then
@@ -1135,16 +1047,26 @@ print(
     ensure_xray_config_permissions "$tmp_xray"
     if ! "$XRAY_BIN" run -test -format json -config "$tmp_xray" >/dev/null 2>&1; then
         "$XRAY_BIN" run -test -format json -config "$tmp_xray" || true
-        rm -f "$tmp_xray" "$tmp_nginx" "$tmp_stream" 2>/dev/null || true
+        rm -f "$tmp_xray" "$tmp_nginx" 2>/dev/null || true
         warn "Ошибка валидации сгенерированной конфигурации Xray."
         return 1
     fi
 
+    local prev_xray_bak=""
+    if [[ -f "$cfg_file" ]]; then
+        prev_xray_bak="$(mktemp "${cfg_file}.bak.XXXXXX" 2>/dev/null || mktemp)"
+        cp -f "$cfg_file" "$prev_xray_bak" 2>/dev/null || true
+    fi
     mv -f "$tmp_xray" "$cfg_file"
     ensure_xray_config_permissions "$cfg_file"
 
     install_nginx_if_missing
     mkdir -p "${nginx_dir}/sites-available" "${nginx_dir}/sites-enabled" "${nginx_dir}/conf.d"
+    local prev_ngx_bak=""
+    if [[ -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" ]]; then
+        prev_ngx_bak="$(mktemp "/tmp/just1k-ru-hub.bak.XXXXXX" 2>/dev/null || mktemp)"
+        cp -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" "$prev_ngx_bak" 2>/dev/null || true
+    fi
     if [[ "$nginx_needed" == "true" ]]; then
         # Atomically retire legacy origin.conf if present
         rm -f "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
@@ -1164,16 +1086,23 @@ print(
             rm -f "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
         fi
     fi
+    _cleanup_legacy_stream443
+    rm -f "$tmp_nginx" 2>/dev/null || true
 
-    if [[ "$stream_needed" == "true" ]]; then
-        cp -f "$tmp_stream" "${nginx_dir}/just1k-stream443.conf"
-        chmod 644 "${nginx_dir}/just1k-stream443.conf" 2>/dev/null || true
-        _sync_nginx_main_stream_include "true"
-    else
-        _sync_nginx_main_stream_include "false"
-        rm -f "${nginx_dir}/just1k-stream443.conf" 2>/dev/null || true
+    if ! nginx -t >/dev/null 2>&1; then
+        nginx -t || true
+        if [[ -n "$prev_ngx_bak" && -f "$prev_ngx_bak" ]]; then
+            cp -f "$prev_ngx_bak" "${nginx_dir}/sites-available/just1k-ru-hub.conf" 2>/dev/null || true
+        fi
+        if [[ -n "$prev_xray_bak" && -f "$prev_xray_bak" ]]; then
+            cp -f "$prev_xray_bak" "$cfg_file" 2>/dev/null || true
+            ensure_xray_config_permissions "$cfg_file"
+        fi
+        rm -f "$prev_ngx_bak" "$prev_xray_bak" 2>/dev/null || true
+        warn "Ошибка валидации Nginx (nginx -t); конфигурация откатана."
+        return 1
     fi
-    rm -f "$tmp_nginx" "$tmp_stream" 2>/dev/null || true
+    rm -f "$prev_ngx_bak" "$prev_xray_bak" 2>/dev/null || true
 
     setup_base_api_nginx || return 1
     return 0

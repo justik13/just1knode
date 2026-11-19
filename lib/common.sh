@@ -40,6 +40,9 @@ warn() {
 
 error() {
     echo -e "${RED}[✗] ОШИБКА:${NC} $1" >&2
+    if [[ "${JUST1KNODE_INTERACTIVE:-0}" == "1" ]]; then
+        return 1
+    fi
     exit 1
 }
 
@@ -941,9 +944,25 @@ apply_antiabuse_protection() {
         if [[ -f /etc/ufw/after.init ]] && grep -Fq "# START JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null; then
             sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
         fi
-        if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
-            rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
+        local unit_file="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-antiabuse.service"
+        local bin_path="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+        if [[ -d "$(dirname "$unit_file")" && -x "$bin_path" ]]; then
+            cat > "$unit_file" <<EOF
+[Unit]
+Description=Just1kNode Anti-Abuse iptables Rules
+After=network-pre.target ufw.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${bin_path} --apply-antiabuse
+
+[Install]
+WantedBy=multi-user.target
+EOF
             systemctl daemon-reload 2>/dev/null || true
+            systemctl enable just1knode-antiabuse.service 2>/dev/null || true
         fi
         log "✔ Цепочка JUST1KNODE-ANTIABUSE успешно активирована."
         set_state_val "abuse_protection" "enabled"

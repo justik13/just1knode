@@ -8,6 +8,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
@@ -757,23 +758,41 @@ node_sync_state: Dict[str, Any] = {
 
 def get_inbound_flow(tag: str) -> str:
     """Returns protocol flow for given inbound tag. Direct VLESS TLS requires xtls-rprx-vision."""
-    if tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
+    if tag == "just1k-vless-direct":
         return "xtls-rprx-vision"
     return ""
 
 
-def restore_persisted_clients_to_xray() -> int:
+def _xray_email_for_inbound(client_uuid: str, tag: str, service: Optional[str] = None) -> str:
+    """Return service-scoped Xray user email so QueryStats never mixes Standard and WI traffic."""
+    if is_wl_inbound_tag(tag):
+        return f"{client_uuid}:wi"
+    if tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
+        return f"{client_uuid}:std"
+    eff = resolve_effective_service(service) if service else None
+    if eff == "white_internet":
+        return f"{client_uuid}:wi"
+    if eff == "vless":
+        return f"{client_uuid}:std"
+    return client_uuid
+
+
+_epoch_sync_lock = threading.RLock()
+
+
+def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     """Restores active persisted clients from disk into Xray RAM as temporary crash-recovery hint.
 
-    The node remains in 'unsynchronized' state until Central DB reconciliation runs.
+    Returns (restored_unique_count, had_failures).
     """
     entries = client_store.load_client_entries()
     if not entries:
         logger.info("No active persisted clients to restore.")
-        return 0
+        return 0, False
 
     restored_unique = 0
     restored_registrations = 0
+    had_failures = False
     for client_uuid, meta in entries.items():
         if not isinstance(meta, dict):
             continue
@@ -791,55 +810,56 @@ def restore_persisted_clients_to_xray() -> int:
         if not active_services:
             continue
 
-        target_inbounds: List[str] = []
-        for s in active_services:
-            for tag in get_target_inbounds(service=s):
-                if tag not in target_inbounds:
-                    target_inbounds.append(tag)
-
         user_restored = False
-        for tag in target_inbounds:
-            try:
-                grpc_client.add_user(tag, client_uuid, flow=get_inbound_flow(tag))
-                restored_registrations += 1
-                user_restored = True
-            except Exception as e:
-                logger.warning(
-                    "Failed to restore client %s on inbound %s: %s", _mask_uuid(client_uuid), tag, e
-                )
-        if user_restored or not target_inbounds:
+        for s in active_services:
+            tags = get_target_inbounds(service=s)
+            for tag in tags:
+                try:
+                    grpc_client.add_user(
+                        tag,
+                        client_uuid,
+                        flow=get_inbound_flow(tag),
+                        email=_xray_email_for_inbound(client_uuid, tag, s),
+                    )
+                    restored_registrations += 1
+                    user_restored = True
+                except Exception as e:
+                    had_failures = True
+                    logger.warning(
+                        "Failed to restore client %s on inbound %s: %s", _mask_uuid(client_uuid), tag, e
+                    )
+        if user_restored:
             restored_unique += 1
 
     logger.info(
-        "Restored %d active client registrations across services as ephemeral hints.",
+        "Restored %d active client registrations across services as ephemeral hints (had_failures=%s).",
         restored_registrations,
+        had_failures,
     )
-    return restored_unique
+    return restored_unique, had_failures
 
 
 def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
-    """Ensures in-memory active users set is aligned with current Xray epoch.
-
-    If epoch changes (Xray restart), clears in-memory active users and restores
-    valid persisted clients from client_store into Xray RAM once gRPC is healthy.
-    """
+    """Ensures in-memory active users set is aligned with current Xray epoch."""
     if not current_epoch:
         return
-    if grpc_client._active_users_epoch != current_epoch:
-        if grpc_client.is_healthy():
-            logger.info(
-                "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
-                grpc_client._active_users_epoch,
-                current_epoch,
-            )
-            grpc_client.clear_active_users()
-            restore_persisted_clients_to_xray()
-            grpc_client._active_users_epoch = current_epoch
-        else:
-            logger.debug(
-                "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
-                current_epoch,
-            )
+    with _epoch_sync_lock:
+        if grpc_client._active_users_epoch != current_epoch:
+            if grpc_client.is_healthy():
+                logger.info(
+                    "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
+                    grpc_client._active_users_epoch,
+                    current_epoch,
+                )
+                grpc_client.clear_active_users()
+                _restored, had_failures = restore_persisted_clients_to_xray()
+                if not had_failures:
+                    grpc_client._active_users_epoch = current_epoch
+            else:
+                logger.debug(
+                    "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
+                    current_epoch,
+                )
 
 
 @asynccontextmanager
@@ -890,7 +910,12 @@ async def track_bot_activity_middleware(request: Request, call_next):
         req_key = request.headers.get("X-API-Key")
         if expected_key and req_key and secrets.compare_digest(req_key, expected_key):
             try:
-                _record_bot_activity(request.client.host if request.client else "")
+                client_ip = request.client.host if request.client else ""
+                if client_ip in ("", "127.0.0.1", "::1"):
+                    xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+                    xri = (request.headers.get("X-Real-IP") or "").strip()
+                    client_ip = xri or xff or client_ip
+                _record_bot_activity(client_ip)
             except Exception:
                 pass
     return await call_next(request)
@@ -1050,10 +1075,15 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     domain = str(node_meta.get("domain") or "")
     role = str(node_meta.get("role") or "")
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    has_wl_module = any(
+    has_cdn_module = any(
         isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
         for k in modules
-        if k == "vless_xhttp" or str(k).startswith("cdn_")
+        if str(k).startswith("cdn_")
+    )
+    has_wl_module = (
+        isinstance(modules.get("vless_xhttp"), dict)
+        and bool(modules["vless_xhttp"].get("enabled"))
+        and has_cdn_module
     )
     has_vless_module = isinstance(modules.get("vless_tls"), dict) and bool(
         modules["vless_tls"].get("enabled")
@@ -1414,12 +1444,37 @@ async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, A
 
         if epoch1 == epoch2 and pid1 == pid2 and starttime1 == starttime2 and boot_id1 == boot_id2:
             tx_bytes, rx_bytes = _get_host_net_bytes()
+            users_by_service: Dict[str, Dict[str, Dict[str, int]]] = {
+                "vless": {},
+                "white_internet": {},
+            }
+            merged_users: Dict[str, Dict[str, int]] = {}
+            for raw_email, st_vals in users_stats.items():
+                up_v = int((st_vals or {}).get("uplink", 0) or 0)
+                dn_v = int((st_vals or {}).get("downlink", 0) or 0)
+                if raw_email.endswith(":std"):
+                    base_uid = raw_email[:-4]
+                    svc_bucket = users_by_service["vless"].setdefault(base_uid, {"uplink": 0, "downlink": 0})
+                    svc_bucket["uplink"] += up_v
+                    svc_bucket["downlink"] += dn_v
+                elif raw_email.endswith(":wi"):
+                    base_uid = raw_email[:-3]
+                    svc_bucket = users_by_service["white_internet"].setdefault(base_uid, {"uplink": 0, "downlink": 0})
+                    svc_bucket["uplink"] += up_v
+                    svc_bucket["downlink"] += dn_v
+                else:
+                    base_uid = raw_email
+                m_bucket = merged_users.setdefault(base_uid, {"uplink": 0, "downlink": 0})
+                m_bucket["uplink"] += up_v
+                m_bucket["downlink"] += dn_v
+
             return {
                 "node_epoch": epoch1,
                 "boot_id": boot_id1,
                 "starttime": starttime1,
                 "timestamp": int(time.time()),
-                "users": users_stats,
+                "users": merged_users,
+                "users_by_service": users_by_service,
                 "host_tx_bytes": tx_bytes,
                 "host_rx_bytes": rx_bytes,
             }
@@ -1558,17 +1613,57 @@ async def batch_sync_clients(
 
     succeeded: List[str] = []
     failed: Dict[str, str] = {}
+    pending_mutations: List[tuple[str, bool, Optional[int], Optional[str], str]] = []
     async with _batch_sync_lock:
         for item in req.clients:
             try:
                 clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
-                desired_state = "active" if item.is_active else "disabled"
-                await _sync_client_internal(item, clean_uuid, desired_state)
+                desired_state = (
+                    "active"
+                    if (
+                        item.desired_state == "active"
+                        or (item.desired_state is None and item.is_active is True)
+                    )
+                    else "disabled"
+                )
+                await _sync_client_internal(
+                    item, clean_uuid, desired_state, persist_to_store=False
+                )
+                eff_svc = resolve_effective_service(item.service)
+                pending_mutations.append(
+                    (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
+                )
                 succeeded.append(clean_uuid)
             except HTTPException as exc:
                 failed[str(item.uuid)] = str(exc.detail)
             except Exception as exc:
                 failed[str(item.uuid)] = str(exc)
+
+        if pending_mutations:
+            lock_fd = None
+            try:
+                client_store._ensure_dir()
+                lock_fd = client_store._acquire_lock()
+                entries = client_store.load_client_entries()
+                for c_uid, is_act, ver, em, svc in pending_mutations:
+                    client_store._mutate_entry(
+                        entries, c_uid, active=is_act, version=ver, email=em, service=svc
+                    )
+                if not client_store.save_client_entries(entries):
+                    raise IOError("Failed to persist batch client entries")
+            except Exception as exc:
+                logger.error("Batch client_store persist failed: %s", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to persist batch client state: {exc}",
+                ) from exc
+            finally:
+                if lock_fd is not None:
+                    client_store._release_lock(lock_fd)
+
+    if not failed:
+        node_sync_state["status"] = "synchronized"
+        node_sync_state["last_synced_at"] = time.time()
 
     return {
         "status": "ok" if not failed else "partial",
@@ -1578,7 +1673,25 @@ async def batch_sync_clients(
 
 
 async def _sync_client_internal(
-    req: ClientSyncRequest, client_uuid: str, desired_state: str
+    req: ClientSyncRequest,
+    client_uuid: str,
+    desired_state: str,
+    *,
+    persist_to_store: bool = True,
+) -> Dict[str, Any]:
+    uuid_lock = await _get_inflight_op_lock(f"uuid:{client_uuid}")
+    async with uuid_lock:
+        return await _sync_client_unlocked(
+            req, client_uuid, desired_state, persist_to_store=persist_to_store
+        )
+
+
+async def _sync_client_unlocked(
+    req: ClientSyncRequest,
+    client_uuid: str,
+    desired_state: str,
+    *,
+    persist_to_store: bool = True,
 ) -> Dict[str, Any]:
     node_meta = get_node_state_metadata()
     node_role = str(node_meta.get("role") or "").strip().lower()
@@ -1750,7 +1863,8 @@ async def _sync_client_internal(
     initial_states: Dict[str, str] = {}
     for tag in target_inbounds:
         try:
-            initial_states[tag] = "active" if grpc_client.probe_user_presence(tag, client_uuid) else "disabled"
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
+            initial_states[tag] = "active" if grpc_client.probe_user_presence(tag, client_uuid, email=em) else "disabled"
         except Exception:
             initial_states[tag] = "disabled"
 
@@ -1759,8 +1873,9 @@ async def _sync_client_internal(
     failed_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
             grpc_client.ensure_user_state(
-                tag, client_uuid, desired_state=desired_state, flow=get_inbound_flow(tag)
+                tag, client_uuid, desired_state=desired_state, flow=get_inbound_flow(tag), email=em
             )
             succeeded_inbounds.append(tag)
         except Exception as e:
@@ -1774,8 +1889,9 @@ async def _sync_client_internal(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
+                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
                 grpc_client.ensure_user_state(
-                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
+                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
             except Exception as rb_exc:
                 logger.error(
@@ -1810,10 +1926,11 @@ async def _sync_client_internal(
     unverified_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
             if desired_state == "active":
-                is_verified = grpc_client.probe_user_presence(tag, client_uuid)
+                is_verified = grpc_client.probe_user_presence(tag, client_uuid, email=em)
             else:
-                is_verified = grpc_client.verify_user_absent(tag, client_uuid)
+                is_verified = grpc_client.verify_user_absent(tag, client_uuid, email=em)
             if is_verified:
                 verified_inbounds.append(tag)
             else:
@@ -1832,8 +1949,9 @@ async def _sync_client_internal(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
+                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
                 grpc_client.ensure_user_state(
-                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
+                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
             except Exception as rb_exc:
                 logger.error(
@@ -1848,40 +1966,43 @@ async def _sync_client_internal(
         )
 
     # Update local persistent client store with monotonic version scoped to service
-    effective_ver = (
-        max(curr_ver or 0, req.version or 0)
-        if curr_ver is not None and req.version is not None
-        else req.version
-    )
-    try:
-        if desired_state == "active":
-            client_store.add_client(
-                client_uuid, version=effective_ver, email=req.email, service=effective_service
-            )
-        else:
-            client_store.remove_client(client_uuid, version=effective_ver, service=effective_service)
-    except Exception as e:
-        logger.error("Failed to persist client state to disk: %s", e)
-        # Rollback Xray RAM state to exact initial states so RAM does not diverge from disk
-        for rb_tag in succeeded_inbounds:
-            try:
-                init_st = initial_states.get(rb_tag, "disabled")
-                grpc_client.ensure_user_state(
-                    rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag)
+    if persist_to_store:
+        effective_ver = (
+            max(curr_ver or 0, req.version or 0)
+            if curr_ver is not None and req.version is not None
+            else req.version
+        )
+        try:
+            if desired_state == "active":
+                client_store.add_client(
+                    client_uuid, version=effective_ver, email=req.email, service=effective_service
                 )
-            except Exception as rb_exc:
-                logger.error(
-                    "Rollback after persistence failure failed for %s on %s: %s",
-                    _mask_uuid(client_uuid),
-                    rb_tag,
-                    rb_exc,
-                )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to persist client state: {str(e)}",
-        ) from e
+            else:
+                client_store.remove_client(client_uuid, version=effective_ver, service=effective_service)
+        except Exception as e:
+            logger.error("Failed to persist client state to disk: %s", e)
+            # Rollback Xray RAM state to exact initial states so RAM does not diverge from disk
+            for rb_tag in succeeded_inbounds:
+                try:
+                    init_st = initial_states.get(rb_tag, "disabled")
+                    em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
+                    grpc_client.ensure_user_state(
+                        rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
+                    )
+                except Exception as rb_exc:
+                    logger.error(
+                        "Rollback after persistence failure failed for %s on %s: %s",
+                        _mask_uuid(client_uuid),
+                        rb_tag,
+                        rb_exc,
+                    )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to persist client state: {str(e)}",
+            ) from e
 
     # Update synchronization state
+    node_sync_state["status"] = "synchronized"
     node_sync_state["last_synced_at"] = time.time()
     node_sync_state["last_client_sync_at"] = time.time()
 
@@ -1909,10 +2030,11 @@ async def _sync_client_internal(
 async def delete_client(
     uuid: str,
     version: Optional[int] = None,
+    service: Optional[str] = None,
     _: bool = Depends(verify_api_key),
 ) -> Dict[str, Any]:
     """
-    Deletes client from all inbounds and records a tombstone in local persistent storage with version fencing.
+    Deletes client from managed inbounds (optionally scoped by service) with lock & epoch fencing.
     """
     try:
         clean_uuid = str(uuid_lib.UUID(uuid.strip())).lower()
@@ -1922,114 +2044,114 @@ async def delete_client(
             detail=f"Invalid UUID: {uuid}",
         ) from None
 
-    node_meta = get_node_state_metadata()
-    node_role = str(node_meta.get("role") or "").strip().lower()
-    if node_role in ("eu_hub", "exit_node"):
-        curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
-        return {
-            "status": "success",
-            "message": f"Client deprovision is a no-op on {node_role} node",
-            "inbounds": [],
-            "running_epoch": curr_ep,
-        }
+    uuid_lock = await _get_inflight_op_lock(f"uuid:{clean_uuid}")
+    async with uuid_lock:
+        node_meta = get_node_state_metadata()
+        node_role = str(node_meta.get("role") or "").strip().lower()
+        if node_role in ("eu_hub", "exit_node"):
+            curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
+            return {
+                "status": "success",
+                "message": f"Client deprovision is a no-op on {node_role} node",
+                "inbounds": [],
+                "running_epoch": curr_ep,
+            }
 
-    target_inbounds = get_all_managed_inbounds()
-    if not target_inbounds:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No managed Xray inbounds configured on node",
-        )
-
-    current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
-    if not current_epoch and epoch_manager:
-        current_epoch = epoch_manager.load_state().get("node_epoch")
-    if not current_epoch:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
-        )
-
-    # Monotonic version check
-    if version is not None:
-        entries = client_store.load_client_entries()
-        curr_entry = entries.get(clean_uuid)
-        if curr_entry:
-            curr_ver = curr_entry.get("version")
-            is_tombstone = curr_entry.get("tombstone", False)
-
-            # Idempotent delete retry: already tombstoned with same version
-            if curr_ver is not None and version == curr_ver and is_tombstone:
-                logger.info(
-                    "Idempotent delete retry for %s: version %d already tombstoned",
-                    _mask_uuid(clean_uuid),
-                    version,
-                )
-                return {
-                    "status": "ok",
-                    "client_id": clean_uuid,
-                    "result": "applied",
-                    "state": "disabled",
-                    "version": curr_ver,
-                    "idempotent": True,
-                    "tombstone": True,
-                    "inbounds": target_inbounds,
-                }
-
-            if curr_ver is not None and (
-                version < curr_ver or (is_tombstone and version <= curr_ver)
-            ):
-                logger.warning(
-                    "Stale delete request for %s: version %d <= stored %d (tombstone=%s). Fencing.",
-                    _mask_uuid(clean_uuid),
-                    version,
-                    curr_ver,
-                    is_tombstone,
-                )
-                return {
-                    "status": "ok",
-                    "client_id": clean_uuid,
-                    "result": "already_newer",
-                    "fenced": True,
-                    "version": curr_ver,
-                    "inbounds": target_inbounds,
-                }
-
-    failed_inbounds: List[str] = []
-    for tag in target_inbounds:
-        try:
-            grpc_client.remove_user(tag, clean_uuid)
-        except Exception as e:
-            logger.error(
-                "Failed to delete user %s from inbound %s: %s", _mask_uuid(clean_uuid), tag, e
+        eff_service = resolve_effective_service(service) if service else None
+        target_inbounds = get_target_inbounds(service=eff_service) if eff_service else get_all_managed_inbounds()
+        if not target_inbounds:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No managed Xray inbounds configured on node",
             )
-            failed_inbounds.append(tag)
 
-    if failed_inbounds:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to remove user from inbounds: {failed_inbounds}",
-        )
+        current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
+        if not current_epoch and epoch_manager:
+            current_epoch = epoch_manager.load_state().get("node_epoch")
+        if not current_epoch:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
+            )
+        sync_active_users_with_epoch(current_epoch)
 
-    try:
-        client_store.delete_client(clean_uuid, version=version)
-    except Exception as e:
-        logger.error("Could not delete client tombstone from store: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to persist client tombstone to disk",
-        ) from e
+        # Monotonic version check
+        if version is not None:
+            entries = client_store.load_client_entries()
+            curr_entry = entries.get(clean_uuid)
+            if curr_entry:
+                curr_ver = curr_entry.get("version")
+                is_tombstone = curr_entry.get("tombstone", False)
 
-    completed_idempotent_ops.evict_by_client_id(clean_uuid)
+                if curr_ver is not None and version == curr_ver and is_tombstone and not eff_service:
+                    return {
+                        "status": "ok",
+                        "client_id": clean_uuid,
+                        "result": "applied",
+                        "state": "disabled",
+                        "version": curr_ver,
+                        "idempotent": True,
+                        "tombstone": True,
+                        "inbounds": target_inbounds,
+                    }
 
-    return {
-        "status": "ok",
-        "client_id": clean_uuid,
-        "result": "applied",
-        "action": "deleted",
-        "fenced": False,
-        "version": version,
-        "inbounds": target_inbounds,
-    }
+                if not eff_service and curr_ver is not None and (
+                    version < curr_ver or (is_tombstone and version <= curr_ver)
+                ):
+                    return {
+                        "status": "ok",
+                        "client_id": clean_uuid,
+                        "result": "already_newer",
+                        "fenced": True,
+                        "version": curr_ver,
+                        "inbounds": target_inbounds,
+                    }
+
+        failed_inbounds: List[str] = []
+        for tag in target_inbounds:
+            try:
+                em = _xray_email_for_inbound(clean_uuid, tag, eff_service)
+                grpc_client.remove_user(tag, clean_uuid, email=em)
+            except Exception as e:
+                logger.error(
+                    "Failed to delete user %s from inbound %s: %s", _mask_uuid(clean_uuid), tag, e
+                )
+                failed_inbounds.append(tag)
+
+        if failed_inbounds:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to remove user from inbounds: {failed_inbounds}",
+            )
+
+        epoch_after = epoch_manager.get_current_running_epoch() if epoch_manager else current_epoch
+        if epoch_after != current_epoch:
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail="epoch_drift_during_mutation: Xray instance changed during delete",
+            )
+
+        try:
+            client_store.delete_client(clean_uuid, version=version, service=eff_service)
+        except Exception as e:
+            logger.error("Could not delete client tombstone from store: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to persist client tombstone to disk",
+            ) from e
+
+        completed_idempotent_ops.evict_by_client_id(clean_uuid)
+
+        return {
+            "status": "ok",
+            "client_id": clean_uuid,
+            "result": "applied",
+            "action": "deleted",
+            "fenced": False,
+            "version": version,
+            "service": eff_service,
+            "inbounds": target_inbounds,
+        }
 
 
 @app.post("/v1/clients/inventory")
@@ -2082,9 +2204,11 @@ async def get_clients_inventory(
             continue
 
         inbound_presence: Dict[str, bool] = {}
+        eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
         for tag in target_inbounds:
             try:
-                present = grpc_client.probe_user_presence(tag, clean_cid)
+                em = _xray_email_for_inbound(clean_cid, tag, eff_req_svc)
+                present = grpc_client.probe_user_presence(tag, clean_cid, email=em)
                 inbound_presence[tag] = present
             except Exception as e:
                 logger.warning("Probe error for %s on %s: %s", _mask_uuid(clean_cid), tag, e)
