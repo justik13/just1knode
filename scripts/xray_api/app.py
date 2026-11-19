@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import ipaddress
 import json
 import logging
@@ -264,24 +265,31 @@ def _module_errors_path() -> Path:
 
 def _atomic_write_json(path: Path, payload: Any, mode: int = 0o660) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    tmp_path = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            json.dump(payload, fp, indent=2, ensure_ascii=False)
-            fp.write("\n")
-            fp.flush()
+    lock_path = Path(f"{path}.lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_fp:
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
         try:
-            os.chmod(tmp_path, mode)
-        except Exception:
-            pass
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise
+            fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            tmp_path = Path(tmp_str)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                    json.dump(payload, fp, indent=2, ensure_ascii=False)
+                    fp.write("\n")
+                    fp.flush()
+                    os.fsync(fp.fileno())
+                try:
+                    os.chmod(tmp_path, mode)
+                except Exception:
+                    pass
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        finally:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
 def _load_links_data() -> Dict[str, Any]:
@@ -1170,7 +1178,7 @@ def _validate_uuid_strict(value: str) -> str:
     return str(uuid_lib.UUID(str(value or "").strip())).lower()
 
 
-class BridgePeerSpec(BaseModel):
+class BridgeSpec(BaseModel):
     id: Optional[str] = Field(default=None, max_length=64)
     tag: Optional[str] = Field(default=None, max_length=64)
     code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -1184,7 +1192,7 @@ class BridgePeerSpec(BaseModel):
     route_user: Optional[str] = None
 
     @model_validator(mode="after")
-    def validate_peer(self) -> "BridgePeerSpec":
+    def validate_bridge(self) -> "BridgeSpec":
         self.ip = _validate_ipv4_strict(self.ip)
         self.sni = _validate_fqdn_strict(self.sni)
         self.uuid = _validate_uuid_strict(self.uuid)
@@ -1205,14 +1213,14 @@ class SniRouteSpec(BaseModel):
         return self
 
 
-class IncomingPeerSpec(BaseModel):
+class IncomingHubSpec(BaseModel):
     code: Optional[str] = Field(default=None, max_length=32)
     ip: Optional[str] = None
     uuid: Optional[str] = None
     route_user: Optional[str] = None
 
     @model_validator(mode="after")
-    def validate_incoming(self) -> "IncomingPeerSpec":
+    def validate_incoming(self) -> "IncomingHubSpec":
         if self.ip is not None and self.ip.strip():
             self.ip = _validate_ipv4_strict(self.ip)
         if self.uuid is not None and self.uuid.strip():
@@ -1236,7 +1244,7 @@ class HubRouteSpec(BaseModel):
 
 
 class NodeLinksSectionSpec(BaseModel):
-    bridges: List[BridgePeerSpec] = Field(default_factory=list)
+    bridges: List[BridgeSpec] = Field(default_factory=list)
     sni_routes: List[SniRouteSpec] = Field(default_factory=list)
     locations: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -1244,11 +1252,11 @@ class NodeLinksSectionSpec(BaseModel):
 class NodeLinksUpdateRequest(BaseModel):
     standard: Optional[NodeLinksSectionSpec] = None
     bi: Optional[NodeLinksSectionSpec] = None
-    exit_nodes: Optional[List[BridgePeerSpec]] = None
+    exit_nodes: Optional[List[BridgeSpec]] = None
     allowed_ru_ips: Optional[List[str]] = None
     allowed_hub_ips: Optional[List[str]] = None
-    incoming_ru_hubs: Optional[List[IncomingPeerSpec]] = None
-    incoming_hubs: Optional[List[IncomingPeerSpec]] = None
+    incoming_ru_hubs: Optional[List[IncomingHubSpec]] = None
+    incoming_hubs: Optional[List[IncomingHubSpec]] = None
     routes: Optional[List[HubRouteSpec]] = None
 
     @model_validator(mode="after")
@@ -1346,8 +1354,26 @@ def _get_host_net_bytes() -> tuple[int, int]:
 async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """
     Returns traffic stats aggregated by UUID/email with double-checked epoch atomicity.
+    On transit roles (eu_hub, exit_node), skips user gRPC stats and returns host network counters.
     Fail-closed: requires genuine running process, valid starttime, boot_id, and matching epoch.
     """
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        tx_bytes, rx_bytes = _get_host_net_bytes()
+        pid, starttime, boot_id, epoch = (
+            epoch_manager.get_process_and_epoch() if epoch_manager else (None, None, None, None)
+        )
+        return {
+            "node_epoch": epoch or "",
+            "boot_id": boot_id or "",
+            "starttime": starttime or 0,
+            "timestamp": int(time.time()),
+            "users": {},
+            "host_tx_bytes": tx_bytes,
+            "host_rx_bytes": rx_bytes,
+        }
+
     if not grpc_client.is_healthy():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1499,6 +1525,56 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
             return await _sync_client_internal(req, client_uuid, desired_state)
 
     return await _sync_client_internal(req, client_uuid, desired_state)
+
+
+class ClientBatchSyncItem(ClientSyncRequest):
+    uuid: str
+
+
+class ClientBatchSyncRequest(BaseModel):
+    clients: List[ClientBatchSyncItem] = Field(default_factory=list, max_length=2000)
+
+
+_batch_sync_lock = asyncio.Lock()
+
+
+@app.post("/v1/clients/batch-sync")
+async def batch_sync_clients(
+    req: ClientBatchSyncRequest,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """Batch-synchronizes a list of clients with per-UUID result tracking."""
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
+        return {
+            "status": "ok",
+            "message": f"Client synchronization is a no-op on {node_role} node",
+            "running_epoch": curr_ep,
+            "succeeded": [item.uuid for item in req.clients],
+            "failed": {},
+        }
+
+    succeeded: List[str] = []
+    failed: Dict[str, str] = {}
+    async with _batch_sync_lock:
+        for item in req.clients:
+            try:
+                clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
+                desired_state = "active" if item.is_active else "disabled"
+                await _sync_client_internal(item, clean_uuid, desired_state)
+                succeeded.append(clean_uuid)
+            except HTTPException as exc:
+                failed[str(item.uuid)] = str(exc.detail)
+            except Exception as exc:
+                failed[str(item.uuid)] = str(exc)
+
+    return {
+        "status": "ok" if not failed else "partial",
+        "succeeded": succeeded,
+        "failed": failed,
+    }
 
 
 async def _sync_client_internal(

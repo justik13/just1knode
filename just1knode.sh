@@ -1056,10 +1056,10 @@ PYEOF
     fi
 
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" ]]; then
-        log "7. Проверка доступности подключенных пиров и связей (${role})..."
-        local peer_probe_res
-        peer_probe_res=$(python3 - "${LINKS_FILE:-/etc/just1knode/links.json}" "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
-import json, os, socket, sys, time
+        log "7. Проверка доступности подключенных мостов и транзитных узлов (${role})..."
+        local bridge_probe_res
+        bridge_probe_res=$(python3 - "${LINKS_FILE:-/etc/just1knode/links.json}" "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
+import json, os, socket, ssl, sys, time
 links_path, state_path = sys.argv[1], sys.argv[2]
 targets = []
 if os.path.exists(links_path):
@@ -1075,7 +1075,7 @@ if os.path.exists(links_path):
         for bucket, items in link_groups:
             for item in (items or []):
                 if isinstance(item, dict) and item.get("ip"):
-                    k_tp = (str(item["ip"]).strip(), int(item.get("port") or 443))
+                    k_tp = (str(item["ip"]).strip(), int(item.get("port") or 443), str(item.get("sni") or "").strip())
                     if k_tp in seen_link_keys:
                         continue
                     seen_link_keys.add(k_tp)
@@ -1084,31 +1084,37 @@ if os.path.exists(links_path):
                         item.get("code") or bucket,
                         k_tp[0],
                         k_tp[1],
+                        k_tp[2],
                     ))
     except Exception:
         pass
-for name, code, ip, port in targets:
+ssl_ctx = ssl.create_default_context()
+for name, code, ip, port, sni in targets:
     t0 = time.perf_counter()
     try:
-        s = socket.create_connection((ip, port), timeout=5.0)
+        raw_sock = socket.create_connection((ip, port), timeout=5.0)
+        if sni:
+            with ssl_ctx.wrap_socket(raw_sock, server_hostname=sni) as tls_sock:
+                tls_sock.settimeout(5.0)
+        else:
+            raw_sock.close()
         rtt = round((time.perf_counter() - t0) * 1000, 1)
-        s.close()
         print(f"OK\t{name}\t{code}\t{ip}\t{port}\t{rtt}")
     except Exception as e:
         print(f"FAIL\t{name}\t{code}\t{ip}\t{port}\t{e}")
 PYEOF
         )
-        if [[ -n "$peer_probe_res" ]]; then
+        if [[ -n "$bridge_probe_res" ]]; then
             while IFS=$'\t' read -r p_stat p_name p_code p_ip p_port p_val; do
                 if [[ "$p_stat" == "OK" ]]; then
-                    echo -e "  ${GREEN}✔${NC} Пир '$p_name' ($p_code: $p_ip:$p_port) доступен (RTT: ${p_val}ms)"
+                    echo -e "  ${GREEN}✔${NC} Мост '$p_name' ($p_code: $p_ip:$p_port) доступен (TLS RTT: ${p_val}ms)"
                 else
-                    echo -e "  ${RED}✗${NC} Пир '$p_name' ($p_code: $p_ip:$p_port) НЕ ОТВЕЧАЕТ (${p_val:-timeout})!"
+                    echo -e "  ${RED}✗${NC} Мост '$p_name' ($p_code: $p_ip:$p_port) НЕ ОТВЕЧАЕТ (${p_val:-timeout})!"
                     failed=$((failed + 1))
                 fi
-            done <<< "$peer_probe_res"
+            done <<< "$bridge_probe_res"
         else
-            echo -e "  ${YELLOW}i${NC} Связи (мосты / ноды) для роли $role не настроены"
+            echo -e "  ${YELLOW}i${NC} Связи (мосты / транзитные узлы) для роли $role не настроены"
         fi
     fi
 
