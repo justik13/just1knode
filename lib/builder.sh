@@ -331,7 +331,7 @@ def build_tls_settings(c_file, k_file, target_dom=None):
         if (dc, dk) != (c_file, k_file) and os.path.exists(dc) and os.path.exists(dk):
             certificates.append({"certificateFile": dc, "keyFile": dk})
     return {
-        "rejectUnknownSni": True,
+        "rejectUnknownSni": False,
         "minVersion": "1.2",
         "alpn": ["http/1.1"],
         "certificates": certificates,
@@ -448,7 +448,7 @@ fallback80_needed = False
 stream_needed = False
 resolved_tunnel_uuid = ""
 
-api_rule = {"type": "field", "inboundTag": ["just1k-wl-api-grpc"], "outboundTag": "just1k-wl-api"}
+api_rule = {"type": "field", "inboundTag": ["just1k-wl-api-grpc"], "outboundTag": "api"}
 
 if role == "ru_hub":
     cfg["routing"]["domainStrategy"] = "IPIfNonMatch"
@@ -690,7 +690,6 @@ if role == "ru_hub":
 
     cfg["outbounds"].extend([
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
-        {"tag": "just1k-wl-api", "protocol": "blackhole", "settings": {}},
     ])
 
     # Пер-SNI маршруты Стандарта (если включён nginx stream ssl_preread)
@@ -1054,7 +1053,6 @@ elif role == "eu_hub":
 
     cfg["outbounds"].extend([
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
-        {"tag": "just1k-wl-api", "protocol": "blackhole", "settings": {}},
     ])
     route_rules.append({
         "type": "field",
@@ -1107,7 +1105,6 @@ elif role == "exit_node":
     cfg["outbounds"] = [
         {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
         {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
-        {"tag": "just1k-wl-api", "protocol": "blackhole", "settings": {}},
     ]
     cfg["routing"]["rules"] = [api_rule] + antiabuse_rules() + [
         {"type": "field", "inboundTag": ["just1k-vless-direct"], "outboundTag": "direct"}

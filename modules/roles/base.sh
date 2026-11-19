@@ -47,7 +47,7 @@ ensure_xray_stub_config() {
   ],
   "outbounds": [
     {
-      "tag": "just1k-wl-api",
+      "tag": "just1k-wl-block",
       "protocol": "blackhole",
       "settings": {}
     }
@@ -59,7 +59,7 @@ ensure_xray_stub_config() {
         "inboundTag": [
           "just1k-wl-api-grpc"
         ],
-        "outboundTag": "just1k-wl-api"
+        "outboundTag": "api"
       }
     ]
   }

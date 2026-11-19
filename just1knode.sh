@@ -663,7 +663,9 @@ run_doctor() {
 
     if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
         log "3. Проверка конфигурации Xray..."
-        if [[ -f "$XRAY_CONFIG" ]] && "$XRAY_BIN" run -test -format json -config "$XRAY_CONFIG" 2>/dev/null; then
+        local xray_bin="${XRAY_BIN:-/usr/local/bin/xray}"
+        local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+        if [[ -f "$xray_cfg" ]] && "$xray_bin" run -test -format json -config "$xray_cfg" 2>/dev/null; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
         else
             echo -e "  ${RED}✗${NC} Ошибка конфигурации Xray"
