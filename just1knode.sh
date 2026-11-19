@@ -365,13 +365,20 @@ show_v2_connection_card() {
 
 # Очистка остаточных файлов при отмене или сбое базовой установки (Zero-Residual Bootstrap)
 cleanup_unconfirmed_installation() {
+    local force_cleanup="${1:-0}"
     local node_st
     node_st="$(get_node_status 2>/dev/null || echo "unconfigured")"
     if [[ "$node_st" != "unconfigured" ]]; then
         return 0
     fi
-    if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null || [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
+    if [[ "$force_cleanup" != "1" ]] && (systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null || [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]); then
         return 0
+    fi
+    if [[ "$force_cleanup" == "1" ]]; then
+        systemctl stop xray-api xray 2>/dev/null || true
+        systemctl disable xray-api xray 2>/dev/null || true
+        rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
     fi
 
     local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
@@ -498,7 +505,7 @@ ensure_v2_base_stack_installed() {
     sleep 1
     if ! select_role_wizard; then
         warn "Настройка роли не была завершена. Сервер не может функционировать без роли."
-        cleanup_unconfirmed_installation
+        cleanup_unconfirmed_installation 1
         return 1
     fi
     clear
@@ -1719,6 +1726,7 @@ uninstall_node() {
 # =============================================================================
 main_menu() {
     check_root
+    export JUST1KNODE_INTERACTIVE=1
 
     local init_status
     init_status="$(get_node_status)"
@@ -1754,8 +1762,13 @@ main_menu() {
         local status
         status="$(get_node_status)"
         if [[ "$status" != "ru_hub" && "$status" != "eu_hub" && "$status" != "exit_node" ]]; then
-            warn "Узел не имеет активной роли. Запуск обязательной настройки роли..."
-            select_role_wizard || true
+            if [[ ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+                warn "Стек API не развёрнут (возможен сброс узла). Запуск базовой установки..."
+                ensure_v2_base_stack_installed || true
+            else
+                warn "Узел не имеет активной роли. Запуск обязательной настройки роли..."
+                select_role_wizard || true
+            fi
             status="$(get_node_status)"
         fi
 
@@ -1963,7 +1976,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             set-bot-ip|bot-ip)
                 set_bot_ip "${2:-}"
                 ;;
-            anti-abuse|antiabuse|apply-abuse-protection)
+            --apply-antiabuse|anti-abuse|antiabuse|apply-abuse-protection)
                 check_root
                 apply_antiabuse_protection
                 ;;

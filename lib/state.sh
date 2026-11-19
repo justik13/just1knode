@@ -61,7 +61,11 @@ def safe_arg(val):
 f, k, v = sys.argv[1], safe_arg(sys.argv[2]), safe_arg(sys.argv[3])
 lock_file = f + '.lock'
 open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-lock_fd = os.open(lock_file, open_flags, 0o660)
+old_umask = os.umask(0o007)
+try:
+    lock_fd = os.open(lock_file, open_flags, 0o660)
+finally:
+    os.umask(old_umask)
 try:
     if hasattr(os, 'fchmod'):
         os.fchmod(lock_fd, 0o660)
@@ -203,7 +207,11 @@ except ImportError:
 f, action, arg1, arg2 = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 lock_file = f + '.lock'
 open_flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-lock_fd = os.open(lock_file, open_flags, 0o660)
+old_umask = os.umask(0o007)
+try:
+    lock_fd = os.open(lock_file, open_flags, 0o660)
+finally:
+    os.umask(old_umask)
 if fcntl:
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
 try:

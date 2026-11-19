@@ -46,15 +46,48 @@ _has_valid_domain_cert() {
 LETSENCRYPT_DIR="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
 
 deploy_certbot_renewal_hook() {
-    mkdir -p "${LETSENCRYPT_DIR}/renewal-hooks/deploy"
+    mkdir -p "${LETSENCRYPT_DIR}/renewal-hooks/deploy" "${LETSENCRYPT_DIR}/renewal-hooks/pre" "${LETSENCRYPT_DIR}/renewal-hooks/post"
+
+    cat > "${LETSENCRYPT_DIR}/renewal-hooks/pre/05-just1knode-http80.sh" <<'EOF'
+#!/bin/bash
+FLAG="/run/just1knode_certbot_opened_80"
+rm -f "$FLAG" 2>/dev/null || true
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    if ! ufw status 2>/dev/null | grep -qE "(^|[[:space:]])80/tcp[[:space:]]+ALLOW"; then
+        if ufw allow 80/tcp comment "certbot temp http-01" >/dev/null 2>&1; then
+            touch "$FLAG" 2>/dev/null || true
+        fi
+    fi
+fi
+if systemctl is-active --quiet nginx 2>/dev/null; then
+    if ss -tlnp 2>/dev/null | grep -q ':80[[:space:]].*nginx'; then
+        touch /run/just1knode_certbot_stopped_nginx 2>/dev/null || true
+        systemctl stop nginx 2>/dev/null || true
+    fi
+fi
+EOF
+    chmod +x "${LETSENCRYPT_DIR}/renewal-hooks/pre/05-just1knode-http80.sh"
+
+    cat > "${LETSENCRYPT_DIR}/renewal-hooks/post/05-just1knode-http80.sh" <<'EOF'
+#!/bin/bash
+FLAG="/run/just1knode_certbot_opened_80"
+NGX_FLAG="/run/just1knode_certbot_stopped_nginx"
+if [[ -f "$NGX_FLAG" ]]; then
+    rm -f "$NGX_FLAG" 2>/dev/null || true
+    systemctl start nginx 2>/dev/null || true
+fi
+if [[ -f "$FLAG" ]]; then
+    rm -f "$FLAG" 2>/dev/null || true
+    ufw delete allow 80/tcp >/dev/null 2>&1 || true
+fi
+EOF
+    chmod +x "${LETSENCRYPT_DIR}/renewal-hooks/post/05-just1knode-http80.sh"
+
     cat > "${LETSENCRYPT_DIR}/renewal-hooks/deploy/restart-xray-nginx.sh" <<'EOF'
 #!/bin/bash
 systemctl reload nginx 2>/dev/null || true
-if [ -f /etc/just1knode/traffic_limit_exceeded ]; then
-    exit 0
-fi
 
-# Sync renewed certs to Xray TLS directory
+# Sync renewed certs to Xray TLS directory even if traffic limit is exceeded
 XRAY_TLS_DIR="/usr/local/etc/xray/tls"
 STATE_FILE="/etc/just1knode/state.json"
 PRIMARY_DOMAIN=""
@@ -81,7 +114,9 @@ if [[ -d "$XRAY_TLS_DIR" ]]; then
     fi
 fi
 
-systemctl restart xray 2>/dev/null || true
+if [ ! -f /etc/just1knode/traffic_limit_exceeded ]; then
+    systemctl restart xray 2>/dev/null || true
+fi
 if [[ -f /etc/systemd/system/xray-api.service ]]; then
     sleep 1
     if ! systemctl is-active --quiet xray-api 2>/dev/null; then
