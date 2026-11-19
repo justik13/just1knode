@@ -445,7 +445,6 @@ cfg = {
 
 nginx_needed = False
 fallback80_needed = False
-map_needed = False
 stream_needed = False
 resolved_tunnel_uuid = ""
 
@@ -1120,7 +1119,6 @@ with open(out_xray_path, "w", encoding="utf-8") as xfp:
 print(json.dumps({
     "nginx_needed": nginx_needed,
     "fallback80_needed": fallback80_needed,
-    "map_needed": map_needed,
     "stream_needed": stream_needed,
     "secret_base_path": secret_base,
     "tunnel_uuid": resolved_tunnel_uuid,
@@ -1131,20 +1129,19 @@ PYEOF
         return 1
     fi
 
-    local nginx_needed="false" fallback80_needed="false" map_needed="false" stream_needed="false" resolved_secret="" resolved_tunnel_uuid=""
-    read -r nginx_needed fallback80_needed map_needed stream_needed resolved_secret resolved_tunnel_uuid < <(python3 -c "
+    local nginx_needed="false" fallback80_needed="false" stream_needed="false" resolved_secret="" resolved_tunnel_uuid=""
+    read -r nginx_needed fallback80_needed stream_needed resolved_secret resolved_tunnel_uuid < <(python3 -c "
 import json, sys
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
     m = json.load(f)
 print(
     'true' if m.get('nginx_needed') else 'false',
     'true' if m.get('fallback80_needed') else 'false',
-    'true' if m.get('map_needed') else 'false',
     'true' if m.get('stream_needed') else 'false',
     m.get('secret_base_path') or '-',
     m.get('tunnel_uuid') or '-',
 )
-" "$meta_tmp" 2>/dev/null || echo "false false false false - -")
+" "$meta_tmp" 2>/dev/null || echo "false false false - -")
     rm -f "$meta_tmp" 2>/dev/null || true
 
     if [[ -n "$resolved_secret" && "$resolved_secret" != "-" ]]; then
