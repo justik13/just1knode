@@ -76,7 +76,7 @@ assemble_v2_hub_config() {
     meta_tmp="$(mktemp "/tmp/just1k-meta.tmp.XXXXXX" 2>/dev/null || mktemp)"
 
     if ! python3 - \
-        "$state_file" "$clients_file" "$links_path_dummy" "$links_file" \
+        "$state_file" "$clients_file" "${links_path_dummy:-_}" "$links_file" \
         "$cfg_file" "$tmp_xray" "$tmp_nginx" \
         "$xray_tls_dir" "$le_dir" "$cdn_specs_json" \
         "$broken_csv" "$ssl_reject_avail" > "$meta_tmp" <<'PYEOF'
@@ -394,7 +394,7 @@ if role == "ru_hub":
 
     std_inbounds = []
     bi_inbounds = []
-    used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
+    used_ports = set(); used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
 
     std_loc_codes = []
     seen_std_locs = set()
@@ -480,7 +480,7 @@ if role == "ru_hub":
     else:
         loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
 
-    used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
+    used_ports = set(); used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
     next_port = 8005
     location_nginx_routes = []
     bi_loc_inbounds_by_target = {}
@@ -1045,8 +1045,8 @@ print(
     fi
 
     ensure_xray_config_permissions "$tmp_xray"
-    if ! "$XRAY_BIN" run -test -format json -config "$tmp_xray" >/dev/null 2>&1; then
-        "$XRAY_BIN" run -test -format json -config "$tmp_xray" || true
+    if ! "${XRAY_BIN:-/usr/local/bin/xray}" run -test -format json -config "$tmp_xray" >/dev/null 2>&1; then
+        "${XRAY_BIN:-/usr/local/bin/xray}" run -test -format json -config "$tmp_xray" || true
         rm -f "$tmp_xray" "$tmp_nginx" 2>/dev/null || true
         warn "Ошибка валидации сгенерированной конфигурации Xray."
         return 1
