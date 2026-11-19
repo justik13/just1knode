@@ -118,7 +118,7 @@ setup_base_api_nginx() {
     tmp_conf="$(mktemp "${avail}.XXXXXX" 2>/dev/null || mktemp)"
     cat > "$tmp_conf" <<EOF
 server {
-    listen 8444 ssl http2;
+    listen 8444 ssl;
     server_name ${server_name};
 
     ssl_certificate ${cert_path};

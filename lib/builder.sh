@@ -812,7 +812,7 @@ if role == "ru_hub":
         listen_block = (
             "    listen 127.0.0.1:8080;\n"
             if has_vless_tls else
-            f"    listen 443 ssl http2;\n"
+            f"    listen 443 ssl;\n"
             f"    ssl_certificate {c_file};\n"
             f"    ssl_certificate_key {k_file};\n"
             "    ssl_protocols TLSv1.2 TLSv1.3;\n"
@@ -830,7 +830,7 @@ if role == "ru_hub":
         elif ssl_reject_avail:
             catchall_block = (
                 "server {\n"
-                "    listen 443 ssl http2 default_server;\n"
+                "    listen 443 ssl default_server;\n"
                 "    server_name _;\n"
                 "    server_tokens off;\n"
                 "    ssl_reject_handshake on;\n"
@@ -839,7 +839,7 @@ if role == "ru_hub":
         else:
             catchall_block = (
                 "server {\n"
-                "    listen 443 ssl http2 default_server;\n"
+                "    listen 443 ssl default_server;\n"
                 "    server_name _;\n"
                 f"    ssl_certificate {c_file};\n"
                 f"    ssl_certificate_key {k_file};\n"
