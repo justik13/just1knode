@@ -1174,6 +1174,7 @@ class BridgePeerSpec(BaseModel):
     id: Optional[str] = Field(default=None, max_length=64)
     tag: Optional[str] = Field(default=None, max_length=64)
     code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    location_code: Optional[str] = None
     name: Optional[str] = None
     ip: str
     port: int = Field(default=443, ge=1, le=65535)
@@ -1188,6 +1189,8 @@ class BridgePeerSpec(BaseModel):
         self.sni = _validate_fqdn_strict(self.sni)
         self.uuid = _validate_uuid_strict(self.uuid)
         self.code = self.code.strip().lower()
+        if self.location_code is not None:
+            self.location_code = self.location_code.strip().lower() or None
         return self
 
 
