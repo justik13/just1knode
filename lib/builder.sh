@@ -218,13 +218,14 @@ for cid, meta in raw_clients_entries.items():
     st_v = ss.get("vless")
     if isinstance(st_v, dict):
         if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
-            vless_clients[cid] = {"id": cid, "email": f"{cid}:std", "flow": "xtls-rprx-vision"}
+            email_val = meta.get("email") or f"{cid}:std"
+            vless_clients[cid] = {"id": cid, "email": email_val, "flow": "xtls-rprx-vision"}
         else:
             revoked_vless.add(cid)
     st_w = ss.get("white_internet")
     if isinstance(st_w, dict):
         if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
-            wl_clients[cid] = {"id": cid, "email": f"{cid}:wi"}
+            wl_clients[cid] = {"id": cid, "email": meta.get("email") or f"{cid}:wi"}
         else:
             revoked_wl.add(cid)
 
@@ -660,11 +661,23 @@ if role == "ru_hub":
         return {"outboundTag": fallback_tag}
 
     std_loc_rules = []
+    # 1. Локационные XHTTP-правила (по инбаундам /std/{lc})
     for lc, s_tag in std_location_rules:
         loc_tags = std_tags_by_loc.get(lc) or ([std_outbounds[lc]] if lc in std_outbounds else [])
         if loc_tags:
             target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
             std_loc_rules.append({"type": "field", "inboundTag": [s_tag], **target_kw})
+
+    # 2. Локационные правила прямого VLESS TLS (443): строгая маршрутизация по user regex и SNI fallback
+    for lc, loc_tags in std_tags_by_loc.items():
+        if loc_tags:
+            target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
+            std_loc_rules.append({
+                "type": "field",
+                "inboundTag": ["just1k-vless-direct"],
+                "user": [f"regexp::{lc}:std$", f"regexp::{lc}$"],
+                **target_kw,
+            })
             std_loc_rules.append({
                 "type": "field",
                 "inboundTag": ["just1k-vless-direct"],

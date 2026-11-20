@@ -763,8 +763,15 @@ def get_inbound_flow(tag: str) -> str:
     return ""
 
 
-def _xray_email_for_inbound(client_uuid: str, tag: str, service: Optional[str] = None) -> str:
+def _xray_email_for_inbound(
+    client_uuid: str,
+    tag: str,
+    service: Optional[str] = None,
+    explicit_email: Optional[str] = None,
+) -> str:
     """Return service-scoped Xray user email so QueryStats never mixes Standard and WI traffic."""
+    if explicit_email and (":" in explicit_email or "@" in explicit_email):
+        return explicit_email
     if is_wl_inbound_tag(tag):
         return f"{client_uuid}:wi"
     if tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
@@ -819,7 +826,9 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
                         tag,
                         client_uuid,
                         flow=get_inbound_flow(tag),
-                        email=_xray_email_for_inbound(client_uuid, tag, s),
+                        email=_xray_email_for_inbound(
+                            client_uuid, tag, s, explicit_email=meta.get("email")
+                        ),
                     )
                     restored_registrations += 1
                     user_restored = True
@@ -1513,12 +1522,12 @@ async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, A
                 up_v = int((st_vals or {}).get("uplink", 0) or 0)
                 dn_v = int((st_vals or {}).get("downlink", 0) or 0)
                 if raw_email.endswith(":std"):
-                    base_uid = raw_email[:-4]
+                    base_uid = raw_email.split(":")[0]
                     svc_bucket = users_by_service["vless"].setdefault(base_uid, {"uplink": 0, "downlink": 0})
                     svc_bucket["uplink"] += up_v
                     svc_bucket["downlink"] += dn_v
                 elif raw_email.endswith(":wi"):
-                    base_uid = raw_email[:-3]
+                    base_uid = raw_email.split(":")[0]
                     svc_bucket = users_by_service["white_internet"].setdefault(base_uid, {"uplink": 0, "downlink": 0})
                     svc_bucket["uplink"] += up_v
                     svc_bucket["downlink"] += dn_v
@@ -1837,12 +1846,15 @@ async def _sync_client_unlocked(
                 inbounds_healthy = True
                 for tag in target_inbounds:
                     try:
+                        em = _xray_email_for_inbound(
+                            client_uuid, tag, effective_service, explicit_email=getattr(req, "email", None)
+                        )
                         if desired_state == "active":
-                            if not grpc_client.probe_user_presence(tag, client_uuid):
+                            if not grpc_client.probe_user_presence(tag, client_uuid, email=em):
                                 inbounds_healthy = False
                                 break
                         else:
-                            if not grpc_client.verify_user_absent(tag, client_uuid):
+                            if not grpc_client.verify_user_absent(tag, client_uuid, email=em):
                                 inbounds_healthy = False
                                 break
                     except Exception:
@@ -1919,11 +1931,12 @@ async def _sync_client_unlocked(
                     "inbounds": target_inbounds,
                 }
 
+    req_email = getattr(req, "email", None)
     # Capture initial runtime state before mutations for deterministic rollback
     initial_states: Dict[str, str] = {}
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
             initial_states[tag] = "active" if grpc_client.probe_user_presence(tag, client_uuid, email=em) else "disabled"
         except Exception:
             initial_states[tag] = "disabled"
@@ -1933,7 +1946,7 @@ async def _sync_client_unlocked(
     failed_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
             grpc_client.ensure_user_state(
                 tag, client_uuid, desired_state=desired_state, flow=get_inbound_flow(tag), email=em
             )
@@ -1949,7 +1962,7 @@ async def _sync_client_unlocked(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
-                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
+                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
                 grpc_client.ensure_user_state(
                     rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
@@ -1986,7 +1999,7 @@ async def _sync_client_unlocked(
     unverified_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service)
+            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
             if desired_state == "active":
                 is_verified = grpc_client.probe_user_presence(tag, client_uuid, email=em)
             else:
@@ -2009,7 +2022,7 @@ async def _sync_client_unlocked(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
-                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
+                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
                 grpc_client.ensure_user_state(
                     rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
@@ -2045,7 +2058,7 @@ async def _sync_client_unlocked(
             for rb_tag in succeeded_inbounds:
                 try:
                     init_st = initial_states.get(rb_tag, "disabled")
-                    em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service)
+                    em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
                     grpc_client.ensure_user_state(
                         rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                     )
@@ -2167,10 +2180,12 @@ async def delete_client(
                         "inbounds": target_inbounds,
                     }
 
+        entries_for_del = client_store.load_client_entries()
+        del_email = (entries_for_del.get(clean_uuid) or {}).get("email")
         failed_inbounds: List[str] = []
         for tag in target_inbounds:
             try:
-                em = _xray_email_for_inbound(clean_uuid, tag, eff_service)
+                em = _xray_email_for_inbound(clean_uuid, tag, eff_service, explicit_email=del_email)
                 grpc_client.remove_user(tag, clean_uuid, email=em)
             except Exception as e:
                 logger.error(
@@ -2265,9 +2280,10 @@ async def get_clients_inventory(
 
         inbound_presence: Dict[str, bool] = {}
         eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
+        probe_email = (entries.get(clean_cid) or {}).get("email") if isinstance(entries, dict) else None
         for tag in target_inbounds:
             try:
-                em = _xray_email_for_inbound(clean_cid, tag, eff_req_svc)
+                em = _xray_email_for_inbound(clean_cid, tag, eff_req_svc, explicit_email=probe_email)
                 present = grpc_client.probe_user_presence(tag, clean_cid, email=em)
                 inbound_presence[tag] = present
             except Exception as e:
