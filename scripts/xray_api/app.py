@@ -2261,15 +2261,21 @@ async def get_clients_inventory(
     client_ids = req.client_ids if req and req.client_ids else None
     if client_ids and len(client_ids) > 1000:
         client_ids = client_ids[:1000]
+
+    stored_entries = {}
+    try:
+        stored_entries = await asyncio.to_thread(client_store.load_client_entries)
+    except ClientStoreCorruptedError as e:
+        logger.critical("Inventory cannot load entries from corrupt store: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Client store corrupted: {e}",
+        ) from e
+    except Exception as e:
+        logger.warning("Could not load stored client entries for inventory: %s", e)
+
     if not client_ids:
-        try:
-            client_ids = list((await asyncio.to_thread(client_store.load_client_entries)).keys())
-        except ClientStoreCorruptedError as e:
-            logger.critical("Inventory cannot load entries from corrupt store: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Client store corrupted: {e}",
-            ) from e
+        client_ids = list(stored_entries.keys())
 
     inventory: Dict[str, Any] = {}
     for cid in client_ids:
@@ -2280,7 +2286,7 @@ async def get_clients_inventory(
 
         inbound_presence: Dict[str, bool] = {}
         eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
-        probe_email = (entries.get(clean_cid) or {}).get("email") if isinstance(entries, dict) else None
+        probe_email = (stored_entries.get(clean_cid) or {}).get("email") if isinstance(stored_entries, dict) else None
         for tag in target_inbounds:
             try:
                 em = _xray_email_for_inbound(clean_cid, tag, eff_req_svc, explicit_email=probe_email)

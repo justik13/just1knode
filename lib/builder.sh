@@ -668,7 +668,7 @@ if role == "ru_hub":
             target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
             std_loc_rules.append({"type": "field", "inboundTag": [s_tag], **target_kw})
 
-    # 2. Локационные правила прямого VLESS TLS (443): строгая маршрутизация по user regex и SNI fallback
+    # 2. Локационные правила прямого VLESS TLS (443): строгая маршрутизация по user regex
     for lc, loc_tags in std_tags_by_loc.items():
         if loc_tags:
             target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
@@ -676,12 +676,6 @@ if role == "ru_hub":
                 "type": "field",
                 "inboundTag": ["just1k-vless-direct"],
                 "user": [f"regexp::{lc}:std$", f"regexp::{lc}$"],
-                **target_kw,
-            })
-            std_loc_rules.append({
-                "type": "field",
-                "inboundTag": ["just1k-vless-direct"],
-                "serverName": [f"{lc}.*", f"*.{lc}.*"],
                 **target_kw,
             })
 
