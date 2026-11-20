@@ -47,7 +47,7 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
                 [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
             fi
         fi
-        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
+        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
         
         local_archive_urls=()
         if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -171,12 +171,12 @@ print_node_version_box_line() {
 check_node_update_on_entry() {
     local repo_url ref
     repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-    ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}"
+    ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
     if [[ -z "$ref" && -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
         ref="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
         [[ "$ref" == "HEAD" ]] && ref=""
     fi
-    ref="${ref:-$(get_state_val "repo_ref" "main")}"
+    ref="${ref:-$(get_state_val "repo_ref" "dev")}"
     if [[ "$repo_url" != "https://github.com/justik13/just1knode" ]]; then
         return 0
     fi

@@ -180,12 +180,12 @@ update_node() {
     info "1/4. Загрузка исходных модулей из репозитория GitHub..."
     local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
     local node_dir="${INSTALL_DIR:-/opt/just1knode}"
-    local ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}"
+    local ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
     if [[ -z "$ref" && -d "${node_dir}/.git" ]] && command -v git >/dev/null 2>&1; then
         ref="$(git -C "$node_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
         [[ "$ref" == "HEAD" ]] && ref=""
     fi
-    ref="${ref:-$(get_state_val "repo_ref" "main")}"
+    ref="${ref:-$(get_state_val "repo_ref" "dev")}"
     local tmp_tar
     tmp_tar="$(mktemp /tmp/just1knode_update.XXXXXX.tar.gz 2>/dev/null || mktemp)"
     local tmp_dir

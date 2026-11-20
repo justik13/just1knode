@@ -19,7 +19,7 @@ if [[ -z "${JUST1KNODE_REF:-}" ]]; then
         [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
     fi
 fi
-JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
+JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
 
 ensure_xrayapi_user() {
     if ! getent group xrayapi >/dev/null 2>&1; then
