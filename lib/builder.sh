@@ -302,7 +302,7 @@ def build_xhttp_inbound(tag, port, path, spec, clients_list):
         "sniffing": {
             "enabled": True,
             "destOverride": ["tls", "http", "quic"],
-            "routeOnly": False,
+            "routeOnly": True,
         },
     }
 
@@ -332,7 +332,7 @@ def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision"):
                 "usage": "verify",
             }]
             break
-    return {
+    ob = {
         "tag": ob_tag,
         "protocol": "vless",
         "settings": {
@@ -352,6 +352,16 @@ def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision"):
             },
         },
     }
+    if not flow:
+        ob["mux"] = {
+            "enabled": True,
+            "concurrency": 8,
+            "xudpConcurrency": 16,
+            "xudpProxyUDP443": "reject",
+        }
+        ob["streamSettings"]["sockopt"]["tcpFastOpen"] = True
+        ob["streamSettings"]["sockopt"]["tcpKeepAliveIdle"] = 300
+    return ob
 
 def antiabuse_rules():
     return [
@@ -442,7 +452,7 @@ if role == "ru_hub":
                 "fallbacks": [{"dest": fb_dest}],
             },
             "streamSettings": ss_tls,
-            "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
+            "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": True},
         })
         std_inbounds.append("just1k-vless-direct")
 
@@ -655,6 +665,12 @@ if role == "ru_hub":
         if loc_tags:
             target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
             std_loc_rules.append({"type": "field", "inboundTag": [s_tag], **target_kw})
+            std_loc_rules.append({
+                "type": "field",
+                "inboundTag": ["just1k-vless-direct"],
+                "serverName": [f"{lc}.*", f"*.{lc}.*"],
+                **target_kw,
+            })
 
     all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
     rules = [api_rule] + antiabuse_rules()
@@ -893,7 +909,7 @@ elif role == "eu_hub":
             "security": "tls",
             "tlsSettings": build_tls_settings(c_file, k_file, domain),
         },
-        "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
+        "sniffing": {"enabled": False},
     })
 
     # СТРОГО без freedom: только выходы на Выходные НОДЫ (links.json v2) + blackhole
