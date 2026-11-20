@@ -306,13 +306,25 @@ def build_xhttp_inbound(tag, port, path, spec, clients_list):
         },
     }
 
-def build_bridge_outbound(ob_tag, peer):
+def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision"):
     ip = str(peer.get("ip") or "").strip()
     uid = str(peer.get("uuid") or "").strip()
     sni = str(peer.get("sni") or "").strip()
     port = int(peer.get("port") or 443)
     if not is_valid_ipv4(ip) or not is_valid_uuid(uid) or not is_valid_fqdn(sni):
         return None
+    user_cfg = {
+        "id": uid,
+        "encryption": "none",
+    }
+    tls_cfg = {
+        "serverName": sni,
+        "allowInsecure": False,
+        "alpn": ["http/1.1"],
+    }
+    if flow:
+        user_cfg["flow"] = flow
+        tls_cfg["fingerprint"] = "firefox"
     return {
         "tag": ob_tag,
         "protocol": "vless",
@@ -320,22 +332,13 @@ def build_bridge_outbound(ob_tag, peer):
             "vnext": [{
                 "address": ip,
                 "port": port,
-                "users": [{
-                    "id": uid,
-                    "encryption": "none",
-                    "flow": "xtls-rprx-vision",
-                }],
+                "users": [user_cfg],
             }]
         },
         "streamSettings": {
             "network": "tcp",
             "security": "tls",
-            "tlsSettings": {
-                "serverName": sni,
-                "fingerprint": "firefox",
-                "alpn": ["http/1.1"],
-                "allowInsecure": False,
-            },
+            "tlsSettings": tls_cfg,
             "sockopt": {
                 "tcpKeepAliveIdle": 60,
                 "tcpKeepAliveInterval": 15,
@@ -901,7 +904,7 @@ elif role == "eu_hub":
         ob_tag = explicit_tag if (explicit_tag and re.fullmatch(r"[a-zA-Z0-9_-]+", explicit_tag)) else f"exit-{p_code}"
         if ob_tag in seen_exits:
             ob_tag = f"exit-{p_code}-{idx+1}"
-        ob = build_bridge_outbound(ob_tag, p)
+        ob = build_bridge_outbound(ob_tag, p, flow="")
         if ob is None:
             continue
         seen_exits[ob_tag] = ob
@@ -967,11 +970,11 @@ elif role == "exit_node":
         t_uuid = str(uuid_lib.uuid4())
         resolved_tunnel_uuid = t_uuid
 
-    # СТРОГО ТОЛЬКО bridge UUID от хабов — НИКАКИХ пользовательских vless_clients на выходной ноде!
+    # СТРОГО ТОЛЬКО bridge UUID от хабов — чистый VLESS TLS без избыточного flow (нет ТСПУ в ЕС)
     bridge_clients = {}
     def add_exit_bridge(uid, email):
         if is_valid_uuid(uid) and uid not in bridge_clients:
-            bridge_clients[uid] = {"id": uid, "email": email, "flow": "xtls-rprx-vision"}
+            bridge_clients[uid] = {"id": uid, "email": email}
 
     add_exit_bridge(t_uuid, "hub-bridge@just1k")
     for arr_k in ("incoming_hubs", "incoming_eu_hubs", "allowed_hubs"):
@@ -991,14 +994,12 @@ elif role == "exit_node":
         "settings": {
             "clients": list(bridge_clients.values()),
             "decryption": "none",
-            "fallbacks": [{"dest": "127.0.0.1:80"}],
         },
         "streamSettings": {
             "network": "tcp",
             "security": "tls",
             "tlsSettings": build_tls_settings(c_file, k_file, domain),
         },
-        "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": False},
     })
     cfg["outbounds"] = [
         {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
