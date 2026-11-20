@@ -197,6 +197,15 @@ setup_xray_api_venv() {
         return 1
     fi
 
+    # Автоматическая компиляция protobuf proto-файлов для gRPC
+    if [[ -f "${XRAY_API_DIR}/compile_proto.py" ]]; then
+        log "Компиляция gRPC protobuf файлов..."
+        "${venv_py}" "${XRAY_API_DIR}/compile_proto.py" >/dev/null 2>&1 || {
+            warn "Предупреждение: ошибка компиляции proto-файлов через compile_proto.py"
+            "${venv_py}" "${XRAY_API_DIR}/compile_proto.py" || true
+        }
+    fi
+
     # Гарантия прав доступа для пользователя xrayapi (защита от umask 027)
     chown -R root:xrayapi "${venv_dir}" 2>/dev/null || true
     chmod -R 755 "${venv_dir}" 2>/dev/null || true
