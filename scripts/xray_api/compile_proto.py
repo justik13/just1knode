@@ -9,6 +9,12 @@ def compile_protos():
     proto_dir = base_dir / "proto"
     out_dir = base_dir / "generated"
 
+    try:
+        import grpc_tools.protoc  # noqa: F401
+    except ImportError:
+        print("grpc_tools not installed, keeping existing pre-compiled proto files.")
+        return
+
     # Remove old generated dir if exists
     if out_dir.exists():
         shutil.rmtree(out_dir)

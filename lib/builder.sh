@@ -325,6 +325,13 @@ def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision"):
     if flow:
         user_cfg["flow"] = flow
         tls_cfg["fingerprint"] = "firefox"
+    for ca_path in ("/usr/local/share/ca-certificates/just1k-internal-ca.crt", "/etc/just1knode/ca.crt"):
+        if os.path.isfile(ca_path):
+            tls_cfg["certificates"] = [{
+                "certificateFile": ca_path,
+                "usage": "verify",
+            }]
+            break
     return {
         "tag": ob_tag,
         "protocol": "vless",
@@ -567,6 +574,12 @@ if role == "ru_hub":
         ],
         "queryStrategy": "UseIPv4",
     }
+    # outbounds[0] MUST be blackhole: guarantees zero-leak fallback if balancers or bridges are unreachable
+    cfg["outbounds"].append({
+        "tag": "just1k-wl-block",
+        "protocol": "blackhole",
+        "settings": {},
+    })
     cfg["outbounds"].append({
         "tag": "just1k-wl-direct",
         "protocol": "freedom",
@@ -636,10 +649,6 @@ if role == "ru_hub":
             return {"outboundTag": tags[0]}
         return {"outboundTag": fallback_tag}
 
-    cfg["outbounds"].extend([
-        {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
-    ])
-
     std_loc_rules = []
     for lc, s_tag in std_location_rules:
         loc_tags = std_tags_by_loc.get(lc) or ([std_outbounds[lc]] if lc in std_outbounds else [])
@@ -688,8 +697,8 @@ if role == "ru_hub":
         cfg["routing"]["balancers"] = balancers
         cfg["observatory"] = {
             "subjectSelector": sorted(observed_tags),
-            "probeUrl": "https://www.google.com/generate_204",
-            "probeInterval": "30s",
+            "probeURL": "https://www.google.com/generate_204",
+            "probeInterval": "10s",
             "enableConcurrency": True,
         }
 
