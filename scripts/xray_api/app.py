@@ -1053,6 +1053,62 @@ def healthcheck(response: Response) -> Dict[str, Any]:
     }
 
 
+def _get_system_load_info(disk_usage_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Lightweight host load telemetry (CPU, RAM, Disk) with zero external dependencies."""
+    load_1m = 0.0
+    cpu_cores = os.cpu_count() or 1
+    try:
+        if hasattr(os, "getloadavg"):
+            load_1m = round(float(os.getloadavg()[0]), 2)
+        elif os.path.exists("/proc/loadavg"):
+            with open("/proc/loadavg", "r", encoding="ascii", errors="replace") as f:
+                load_1m = round(float(f.read().split()[0]), 2)
+    except Exception:
+        load_1m = 0.0
+
+    cpu_percent = round(min(100.0, max(0.0, (load_1m / cpu_cores) * 100.0)), 1)
+
+    ram_used_percent = 0.0
+    try:
+        proc_mem = "/proc/meminfo"
+        if os.path.exists(proc_mem):
+            mem: Dict[str, int] = {}
+            with open(proc_mem, "r", encoding="ascii", errors="replace") as f:
+                for line in f:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        parts = v.strip().split()
+                        if parts:
+                            mem[k.strip()] = int(parts[0])
+            total_kb = mem.get("MemTotal", 0)
+            avail_kb = mem.get("MemAvailable", 0)
+            if total_kb > 0:
+                ram_used_percent = round(max(0.0, min(100.0, ((total_kb - avail_kb) / total_kb) * 100.0)), 1)
+    except Exception:
+        ram_used_percent = 0.0
+
+    disk_pct = 0.0
+    if isinstance(disk_usage_info, dict):
+        try:
+            disk_pct = float(disk_usage_info.get("used_percent") or 0.0)
+        except (ValueError, TypeError):
+            disk_pct = 0.0
+    else:
+        try:
+            total, used, _ = shutil.disk_usage("/")
+            disk_pct = round((used / total) * 100, 1) if total > 0 else 0.0
+        except Exception:
+            disk_pct = 0.0
+
+    return {
+        "cpu_percent": cpu_percent,
+        "ram_percent": ram_used_percent,
+        "disk_percent": disk_pct,
+        "load_1m": load_1m,
+        "cpu_cores": cpu_cores,
+    }
+
+
 @app.get("/v1/health")
 def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """
@@ -1145,6 +1201,8 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
     except Exception as e:
         logger.debug("Failed to read disk usage: %s", e)
 
+    system_load_info = _get_system_load_info(disk_usage_info)
+
     bot_status = get_bot_status()
     module_errors = _load_module_errors()
     links_data = _load_links_data()
@@ -1180,6 +1238,7 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         "synchronized": node_sync_state.get("status") == "synchronized",
         "last_synced_at": node_sync_state.get("last_synced_at"),
         "disk_usage": disk_usage_info,
+        "system_load": system_load_info,
     }
 
 
@@ -1324,6 +1383,7 @@ def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any
         "traffic_limit": _load_traffic_limit_summary(),
         "bot_connected": bool(bot_status.get("connected")),
         "bot_last_seen_at": bot_status.get("last_seen_at"),
+        "system_load": _get_system_load_info(),
     }
 
 
