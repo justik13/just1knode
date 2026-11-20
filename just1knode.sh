@@ -41,7 +41,13 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         fi
     else
         JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
+        if [[ -z "${JUST1KNODE_REF:-}" ]]; then
+            if [[ -d "${INSTALL_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+                JUST1KNODE_REF="$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+                [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
+            fi
+        fi
+        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
         
         local_archive_urls=()
         if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -97,7 +103,7 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         fi
         bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-            bootstrap_sha="$(timeout 5s git ls-remote "https://github.com/justik13/just1knode" "refs/heads/main" 2>/dev/null | awk '{print $1}' || true)"
+            bootstrap_sha="$(timeout 5s git ls-remote "${JUST1KNODE_REPO_URL:-https://github.com/justik13/just1knode}" "refs/heads/${JUST1KNODE_REF:-main}" 2>/dev/null | awk '{print $1}' || true)"
         fi
         if [[ "$bootstrap_sha" =~ ^[0-9a-f]{40}$ ]]; then
             printf '%s\n' "$bootstrap_sha" > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
@@ -165,8 +171,13 @@ print_node_version_box_line() {
 check_node_update_on_entry() {
     local repo_url ref
     repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-    ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-main}}"
-    if [[ "$repo_url" != "https://github.com/justik13/just1knode" || "$ref" != "main" ]]; then
+    ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}"
+    if [[ -z "$ref" && -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+        ref="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        [[ "$ref" == "HEAD" ]] && ref=""
+    fi
+    ref="${ref:-$(get_state_val "repo_ref" "main")}"
+    if [[ "$repo_url" != "https://github.com/justik13/just1knode" ]]; then
         return 0
     fi
 
@@ -193,7 +204,7 @@ check_node_update_on_entry() {
     # Fallback на проверку VERSION через curl (для чистых установок без файла COMMIT и без git)
     command -v curl >/dev/null 2>&1 || return 0
     local remote_ver newest
-    remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    remote_ver="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/justik13/just1knode/${ref}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
     [[ "$remote_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     [[ "$JUST1KNODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
     newest="$(printf '%s\n%s\n' "$JUST1KNODE_VERSION" "$remote_ver" | sort -V | tail -n 1)"

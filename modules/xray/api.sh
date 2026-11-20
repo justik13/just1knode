@@ -13,6 +13,12 @@ STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
 
 JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
+if [[ -z "${JUST1KNODE_REF:-}" ]]; then
+    if [[ -d "${INSTALL_DIR:-/opt/just1knode}/.git" ]] && command -v git >/dev/null 2>&1; then
+        JUST1KNODE_REF="$(git -C "${INSTALL_DIR:-/opt/just1knode}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
+    fi
+fi
 JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
 
 ensure_xrayapi_user() {

@@ -179,7 +179,13 @@ update_node() {
 
     info "1/4. Загрузка исходных модулей из репозитория GitHub..."
     local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-    local ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-$(get_state_val "repo_ref" "main")}}"
+    local node_dir="${INSTALL_DIR:-/opt/just1knode}"
+    local ref="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}"
+    if [[ -z "$ref" && -d "${node_dir}/.git" ]] && command -v git >/dev/null 2>&1; then
+        ref="$(git -C "$node_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        [[ "$ref" == "HEAD" ]] && ref=""
+    fi
+    ref="${ref:-$(get_state_val "repo_ref" "main")}"
     local tmp_tar
     tmp_tar="$(mktemp /tmp/just1knode_update.XXXXXX.tar.gz 2>/dev/null || mktemp)"
     local tmp_dir
@@ -300,7 +306,7 @@ update_node() {
 
                 # Откат just1knode
                 if [[ -n "$node_backup" && -d "$node_backup" ]]; then
-                    find "$node_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+                    find "$node_dir" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} + 2>/dev/null || true
                     if ! cp -a "$node_backup"/. "${node_dir}/" 2>/dev/null; then
                         warn "Критическая ошибка: не удалось восстановить файлы ${node_dir} из бэкапа!"
                         rb_ok=false
@@ -358,7 +364,7 @@ update_node() {
             # 3. Установка обновлений just1knode
             if [[ -n "$node_src_dir" ]]; then
                 mkdir -p "$node_dir"
-                find "$node_dir" -mindepth 1 -maxdepth 1 ! -name 'scripts' -exec rm -rf {} + 2>/dev/null || true
+                find "$node_dir" -mindepth 1 -maxdepth 1 ! -name 'scripts' ! -name '.git' -exec rm -rf {} + 2>/dev/null || true
                 local copy_ok=1
                 if [[ "$node_src_dir" == "${tmp_dir}/just1knode" ]]; then
                     cp -a "${node_src_dir}/." "${node_dir}/" 2>/dev/null || copy_ok=0
