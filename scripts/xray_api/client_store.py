@@ -161,9 +161,13 @@ class ClientStore:
         if fcntl is not None and lock_fd is not None:
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def canonicalize_service(service: Optional[str]) -> Optional[str]:

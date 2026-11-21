@@ -147,6 +147,7 @@ detect_host_port80_container() {
 }
 
 # Безопасная настройка UFW с детекцией SSH
+# shellcheck disable=SC2120
 configure_safe_ufw() {
     local ports=("$@")
     if ! command -v ufw >/dev/null 2>&1; then
@@ -529,6 +530,7 @@ heal_node_firewall_and_stealth() {
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        # shellcheck disable=SC2119
         configure_safe_ufw || {
             error "КРИТИЧЕСКАЯ ОШИБКА: Не удалось безопасно инициализировать UFW во избежание потери SSH."
             return 1

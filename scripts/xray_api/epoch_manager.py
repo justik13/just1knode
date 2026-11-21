@@ -306,9 +306,13 @@ class EpochManager:
             if fcntl is not None and lock_fd is not None:
                 try:
                     fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                    lock_fd.close()
                 except Exception:
                     pass
+                finally:
+                    try:
+                        lock_fd.close()
+                    except Exception:
+                        pass
 
     def get_current_running_epoch(self) -> Optional[str]:
         """
