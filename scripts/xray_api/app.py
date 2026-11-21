@@ -1,10 +1,8 @@
 import asyncio
 import fcntl
-import ipaddress
 import json
 import logging
 import os
-import re
 import secrets
 import shutil
 import tempfile
@@ -13,202 +11,20 @@ import time
 import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field, model_validator
-
-import sqlite3
 
 from client_store import ClientStore, ClientStoreCorruptedError
 from epoch_manager import EpochManager
+from idempotency_store import DurableIdempotencyStore, _resolve_idempotency_db_path
+from schemas import (
+    ClientBatchSyncRequest,
+    ClientSyncRequest,
+    InventoryRequest,
+    NodeLinksUpdateRequest,
+)
 from xray_grpc import XrayGrpcClient
-
-
-class DurableIdempotencyStore:
-    """Persistent SQLite-backed store for durable idempotent operations.
-
-    Ensures idempotent operation records survive process restarts, crashes, and OOM kills.
-    """
-
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        self._init_db()
-
-    def _get_conn(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
-
-    def _init_db(self) -> None:
-        try:
-            with self._get_conn() as conn:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS idempotent_ops (
-                        idempotency_key TEXT PRIMARY KEY,
-                        response_json TEXT NOT NULL,
-                        created_at REAL NOT NULL,
-                        client_id TEXT
-                    )
-                    """
-                )
-                try:
-                    conn.execute("ALTER TABLE idempotent_ops ADD COLUMN client_id TEXT")
-                except sqlite3.OperationalError:
-                    pass
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_idempotent_ops_created ON idempotent_ops(created_at)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_idempotent_ops_client_id ON idempotent_ops(client_id)"
-                )
-            try:
-                self.db_path.chmod(0o660)
-            except Exception:
-                pass
-        except Exception as e:
-            logging.getLogger("xray_api").warning(
-                "Failed to initialize idempotency db at %s: %s", self.db_path, e
-            )
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            with self._get_conn() as conn:
-                cur = conn.execute(
-                    "SELECT response_json FROM idempotent_ops WHERE idempotency_key = ?",
-                    (key,),
-                )
-                row = cur.fetchone()
-                if row:
-                    return json.loads(row[0])
-        except Exception as e:
-            logging.getLogger("xray_api").warning("Failed to read idempotent op %s: %s", key, e)
-        return default
-
-    def set(self, key: str, response: Dict[str, Any]) -> None:
-        try:
-            now_ts = time.time()
-            data_str = json.dumps(response)
-            client_id_val = None
-            if isinstance(response, dict):
-                raw_cid = response.get("client_id")
-                if raw_cid:
-                    try:
-                        client_id_val = str(uuid_lib.UUID(str(raw_cid).strip())).lower()
-                    except Exception:
-                        client_id_val = str(raw_cid).strip().lower()
-
-            with self._get_conn() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO idempotent_ops (idempotency_key, response_json, created_at, client_id)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(idempotency_key) DO UPDATE SET
-                        response_json=excluded.response_json,
-                        created_at=excluded.created_at,
-                        client_id=excluded.client_id
-                    """,
-                    (key, data_str, now_ts, client_id_val),
-                )
-                cur = conn.execute("SELECT COUNT(*) FROM idempotent_ops")
-                count = cur.fetchone()[0]
-                if count > 2000:
-                    conn.execute(
-                        """
-                        DELETE FROM idempotent_ops WHERE idempotency_key IN (
-                            SELECT idempotency_key FROM idempotent_ops
-                            ORDER BY created_at ASC LIMIT 500
-                        )
-                        """
-                    )
-        except Exception as e:
-            logging.getLogger("xray_api").warning("Failed to persist idempotent op %s: %s", key, e)
-
-    def __contains__(self, key: str) -> bool:
-        return self.get(key) is not None
-
-    def __getitem__(self, key: str) -> Dict[str, Any]:
-        val = self.get(key)
-        if val is None:
-            raise KeyError(key)
-        return val
-
-    def __setitem__(self, key: str, response: Dict[str, Any]) -> None:
-        self.set(key, response)
-
-    def __len__(self) -> int:
-        try:
-            with self._get_conn() as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM idempotent_ops")
-                return cur.fetchone()[0]
-        except Exception:
-            return 0
-
-    def keys(self) -> list[str]:
-        try:
-            with self._get_conn() as conn:
-                cur = conn.execute("SELECT idempotency_key FROM idempotent_ops ORDER BY created_at ASC")
-                return [row[0] for row in cur.fetchall()]
-        except Exception:
-            return []
-
-    def items(self) -> list[tuple[str, Dict[str, Any]]]:
-        try:
-            with self._get_conn() as conn:
-                cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
-                res = []
-                for k, v_str in cur.fetchall():
-                    try:
-                        res.append((k, json.loads(v_str)))
-                    except Exception:
-                        pass
-                return res
-        except Exception:
-            return []
-
-    def evict_by_client_id(self, client_id: str) -> None:
-        try:
-            norm_target = str(uuid_lib.UUID(client_id.strip())).lower()
-        except Exception:
-            norm_target = client_id.strip().lower()
-
-        try:
-            with self._get_conn() as conn:
-                conn.execute(
-                    "DELETE FROM idempotent_ops WHERE client_id = ?",
-                    (norm_target,),
-                )
-        except Exception as e:
-            logging.getLogger("xray_api").warning("Failed to evict idempotent ops for client %s: %s", client_id, e)
-
-    def pop(self, key: str, default: Any = None) -> Any:
-        try:
-            val = self.get(key)
-            if val is not None:
-                with self._get_conn() as conn:
-                    conn.execute("DELETE FROM idempotent_ops WHERE idempotency_key = ?", (key,))
-                return val
-        except Exception:
-            pass
-        return default
-
-
-def _resolve_idempotency_db_path() -> Path:
-    env_path = os.getenv("IDEMPOTENCY_DB_PATH")
-    if env_path:
-        return Path(env_path)
-    if os.getenv("CLIENTS_FILE_PATH"):
-        return Path(os.getenv("CLIENTS_FILE_PATH")).parent / "idempotency.db"
-    default_path = Path("/etc/just1knode/idempotency.db")
-    try:
-        default_path.parent.mkdir(parents=True, exist_ok=True)
-        return default_path
-    except (PermissionError, OSError):
-        import tempfile
-        return Path(tempfile.gettempdir()) / "xray_idempotency.db"
 
 
 # Configure logging
@@ -384,7 +200,7 @@ def _record_bot_activity(bot_ip: Optional[str] = None) -> None:
     if not STATE_FILE_PATH.parent.exists():
         return
     status_path = STATE_FILE_PATH.parent / "bot_status.json"
-    tmp_path = STATE_FILE_PATH.parent / "bot_status.json.tmp"
+    tmp_path = STATE_FILE_PATH.parent / f"bot_status.{uuid_lib.uuid4().hex[:8]}.tmp"
     payload = {
         "connected": True,
         "last_seen_at": int(now),
@@ -400,6 +216,8 @@ def _record_bot_activity(bot_ip: Optional[str] = None) -> None:
         _last_bot_status_ts = now
         _last_bot_status_ip = clean_ip
     except Exception:
+        pass
+    finally:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
@@ -429,7 +247,26 @@ _inflight_op_locks: Dict[str, asyncio.Lock] = {}
 _inflight_master_lock = asyncio.Lock()
 
 
-async def _get_inflight_op_lock(key: str) -> asyncio.Lock:
+class _InflightLock:
+    def __init__(self, key: str, lock: asyncio.Lock):
+        self.key = key
+        self.lock = lock
+
+    async def __aenter__(self):
+        await self.lock.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.lock.release()
+        finally:
+            async with _inflight_master_lock:
+                waiters = getattr(self.lock, "_waiters", None)
+                if not waiters and not self.lock.locked():
+                    _inflight_op_locks.pop(self.key, None)
+
+
+async def _get_inflight_op_lock(key: str) -> _InflightLock:
     async with _inflight_master_lock:
         if key not in _inflight_op_locks:
             if len(_inflight_op_locks) > 1000:
@@ -437,7 +274,7 @@ async def _get_inflight_op_lock(key: str) -> asyncio.Lock:
                 for k in unlocked_keys:
                     _inflight_op_locks.pop(k, None)
             _inflight_op_locks[key] = asyncio.Lock()
-        return _inflight_op_locks[key]
+        return _InflightLock(key, _inflight_op_locks[key])
 
 
 def _mask_uuid(val: str) -> str:
@@ -785,6 +622,8 @@ def _xray_email_for_inbound(
 
 
 _epoch_sync_lock = threading.RLock()
+_last_restore_attempt_ts = 0.0
+_RESTORE_FAILURE_COOLDOWN_SEC = 60.0
 
 
 def restore_persisted_clients_to_xray() -> tuple[int, bool]:
@@ -800,13 +639,15 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     restored_unique = 0
     restored_registrations = 0
     had_failures = False
+    has_active_entries = False
     for client_uuid, meta in entries.items():
         if not isinstance(meta, dict):
             continue
         service_states = meta.get("service_states")
         if isinstance(service_states, dict) and service_states:
             active_services = [
-                s for s, st in service_states.items()
+                s
+                for s, st in service_states.items()
                 if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
             ]
         else:
@@ -816,6 +657,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
 
         if not active_services:
             continue
+        has_active_entries = True
 
         user_restored = False
         for s in active_services:
@@ -840,6 +682,9 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
         if user_restored:
             restored_unique += 1
 
+    if has_active_entries and restored_registrations == 0:
+        had_failures = True
+
     logger.info(
         "Restored %d active client registrations across services as ephemeral hints (had_failures=%s).",
         restored_registrations,
@@ -850,10 +695,18 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
 
 def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
     """Ensures in-memory active users set is aligned with current Xray epoch."""
+    global _last_restore_attempt_ts
     if not current_epoch:
         return
     with _epoch_sync_lock:
         if grpc_client._active_users_epoch != current_epoch:
+            now = time.time()
+            if (now - _last_restore_attempt_ts) < _RESTORE_FAILURE_COOLDOWN_SEC:
+                logger.debug(
+                    "Skipping client restoration due to recent failure cooldown (%.1fs remaining)",
+                    _RESTORE_FAILURE_COOLDOWN_SEC - (now - _last_restore_attempt_ts),
+                )
+                return
             if grpc_client.is_healthy():
                 logger.info(
                     "Xray instance epoch changed (%s -> %s). Invalidating active users cache and restoring active persisted clients.",
@@ -864,6 +717,9 @@ def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
                 _restored, had_failures = restore_persisted_clients_to_xray()
                 if not had_failures:
                     grpc_client._active_users_epoch = current_epoch
+                    _last_restore_attempt_ts = 0.0
+                else:
+                    _last_restore_attempt_ts = now
             else:
                 logger.debug(
                     "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
@@ -878,6 +734,7 @@ async def lifespan(app: FastAPI):
     node_sync_state["last_synced_at"] = None
     target_inbounds = get_target_inbounds()
     logger.info("Starting Just1kBot Xray API Agent on inbounds: %s", target_inbounds)
+    bg_task = None
     try:
         retries = 5
         while retries > 0:
@@ -892,12 +749,31 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(1)
         else:
             logger.warning(
-                "Xray gRPC is not immediately available at startup. Clients will sync on demand."
+                "Xray gRPC is not immediately available at startup. Spawning background retry task."
             )
+
+            async def _background_retry_sync():
+                while True:
+                    await asyncio.sleep(5)
+                    try:
+                        if grpc_client.is_healthy():
+                            curr_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
+                            if not curr_epoch and epoch_manager:
+                                curr_epoch = epoch_manager.load_state().get("node_epoch")
+                            sync_active_users_with_epoch(curr_epoch)
+                            if grpc_client._active_users_epoch == curr_epoch:
+                                logger.info("Background startup client restoration succeeded.")
+                                break
+                    except Exception as exc:
+                        logger.debug("Background startup retry attempt failed: %s", exc)
+
+            bg_task = asyncio.create_task(_background_retry_sync())
     except Exception as e:
         logger.error("Startup client restoration error: %s", e)
     yield
     # Shutdown
+    if bg_task is not None and not bg_task.done():
+        bg_task.cancel()
     grpc_client.close()
 
 
@@ -950,65 +826,6 @@ def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
     return True
 
 
-# Models
-class ClientSyncRequest(BaseModel):
-    client_id: Optional[str] = Field(None, description="Client UUID")
-    uuid: Optional[str] = Field(None, description="Client UUID alias")
-    desired_state: Optional[str] = Field(None, description="Target state: 'active' or 'disabled'")
-    is_active: Optional[bool] = Field(None, description="Target state boolean alias")
-    state: Optional[str] = Field(None, description="Target state alias")
-    version: Optional[int] = Field(None, description="Monotonic desired version")
-    email: Optional[str] = Field(None, description="Optional client email/identifier")
-    expected_node_epoch: Optional[str] = Field(None, description="Optional node epoch fencing")
-    idempotency_key: Optional[str] = Field(
-        None, description="Optional idempotency key for durable retry"
-    )
-    service: Optional[Literal["vless", "white_internet", "wl"]] = Field(
-        None, description="Optional service filter: 'vless' or 'white_internet'"
-    )
-
-    @property
-    def effective_state(self) -> str:
-        return self.desired_state or "active"
-
-    @model_validator(mode="before")
-    @classmethod
-    def resolve_fields(cls, values: Any) -> Any:
-        if isinstance(values, dict):
-            cid = values.get("client_id") or values.get("uuid")
-            if not cid:
-                raise ValueError("client_id or uuid is required")
-            try:
-                parsed_uuid = uuid_lib.UUID(str(cid).strip())
-                values["client_id"] = str(parsed_uuid).lower()
-            except ValueError:
-                raise ValueError(f"Invalid UUID format: {cid}") from None
-
-            state = values.get("desired_state") or values.get("state")
-            is_act = values.get("is_active")
-            if state is not None:
-                s = str(state).strip().lower()
-                if s not in ("active", "disabled"):
-                    raise ValueError("desired_state must be 'active' or 'disabled'")
-                values["desired_state"] = s
-                values["state"] = s
-            elif is_act is not None:
-                resolved = "active" if bool(is_act) else "disabled"
-                values["desired_state"] = resolved
-                values["state"] = resolved
-            else:
-                values["desired_state"] = "active"
-                values["state"] = "active"
-
-            srv = values.get("service")
-            if srv is not None:
-                s_str = str(srv).strip().lower()
-                if s_str not in ("vless", "white_internet", "wl"):
-                    raise ValueError(f"Invalid service '{srv}'. Must be 'vless' or 'white_internet'")
-                values["service"] = s_str
-        return values
-
-
 def get_node_state_metadata() -> Dict[str, Any]:
     """Load node state.json metadata safely without locking."""
     if STATE_FILE_PATH.exists():
@@ -1022,15 +839,6 @@ def get_node_state_metadata() -> Dict[str, Any]:
     return {}
 
 
-class InventoryRequest(BaseModel):
-    client_ids: Optional[List[str]] = Field(
-        None, description="Optional list of client UUIDs to probe"
-    )
-    service: Optional[Literal["vless", "white_internet", "wl"]] = Field(
-        None, description="Optional service filter: 'vless' or 'white_internet'"
-    )
-
-
 # Endpoints
 @app.get("/healthz")
 @app.get("/health")
@@ -1038,7 +846,7 @@ def healthcheck(response: Response) -> Dict[str, Any]:
     """
     Lightweight liveness and readiness probe for external monitoring (e.g. Uptime Kuma, Prometheus, Consul).
     Does not require an API key and does not expose confidential node metadata or client lists.
-    Fail-closed: returns HTTP 200 when Xray core is running and gRPC responds, or HTTP 503 otherwise.
+    Fail-closed: returns HTTP 200 when Xray core is running, gRPC responds, and active users epoch matches, or HTTP 503 otherwise.
     """
     grpc_ok = grpc_client.is_healthy()
     pid, starttime, boot_id, running_epoch = (
@@ -1051,14 +859,20 @@ def healthcheck(response: Response) -> Dict[str, Any]:
         and starttime is not None
         and boot_id is not None
     )
-    if not is_running:
+    epoch_synced = True
+    if running_epoch and grpc_client._active_users_epoch != running_epoch:
+        epoch_synced = False
+
+    if not is_running or not epoch_synced:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
     return {
-        "ok": is_running,
-        "status": "ok" if is_running else "error",
+        "ok": is_running and epoch_synced,
+        "status": "ok" if (is_running and epoch_synced) else "error",
         "service": "xray-api",
         "xray_running": is_running,
         "grpc_ok": bool(grpc_ok),
+        "epoch_synced": epoch_synced,
     }
 
 
@@ -1118,6 +932,67 @@ def _get_system_load_info(disk_usage_info: Dict[str, Any] | None = None) -> Dict
     }
 
 
+def _build_node_status_payload(
+    *,
+    is_running: bool = True,
+    grpc_ok: bool = True,
+    active_clients_count: Optional[int] = None,
+    services: Optional[List[str]] = None,
+    capabilities: Optional[List[str]] = None,
+    running_epoch: Optional[str] = None,
+    boot_id: Optional[str] = None,
+    starttime: Optional[int] = None,
+    disk_usage_info: Optional[Dict[str, Any]] = None,
+    system_load_info: Optional[Dict[str, Any]] = None,
+    include_health_fields: bool = False,
+) -> Dict[str, Any]:
+    node_meta = get_node_state_metadata()
+    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
+    bot_status = get_bot_status()
+    links_data = _load_links_data()
+    load_info = system_load_info if system_load_info is not None else _get_system_load_info(disk_usage_info)
+
+    payload: Dict[str, Any] = {
+        "status": "ok" if is_running else "error",
+        "role": str(node_meta.get("role") or ""),
+        "country_code": str(node_meta.get("country_code") or ""),
+        "domain": str(node_meta.get("domain") or ""),
+        "cdn_domain": get_cdn_domain(),
+        "cdn_domains": get_cdn_domains(),
+        "sub_path_prefix": get_sub_path_prefix(),
+        "secret_base_path": get_secret_base_path(),
+        "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
+        "modules": modules,
+        "module_errors": _load_module_errors(),
+        "links": links_data,
+        "sni_routes": _get_sni_routes(links_data),
+        "xhttp_locations": _get_xhttp_location_routes(),
+        "inbounds": get_all_managed_inbounds(),
+        "traffic_limit": _load_traffic_limit_summary(),
+        "bot_connected": bool(bot_status.get("connected")),
+        "bot_last_seen_at": bot_status.get("last_seen_at"),
+        "system_load": load_info,
+    }
+
+    if include_health_fields:
+        payload.update({
+            "xray_running": is_running,
+            "grpc_ok": bool(grpc_ok),
+            "active_clients_count": active_clients_count if active_clients_count is not None else 0,
+            "services": services or [],
+            "capabilities": capabilities or [],
+            "node_epoch": running_epoch if is_running else None,
+            "boot_id": boot_id if is_running else None,
+            "starttime": starttime if is_running else None,
+            "sync_status": node_sync_state.get("status", "unsynchronized"),
+            "synchronized": node_sync_state.get("status") == "synchronized",
+            "last_synced_at": node_sync_state.get("last_synced_at"),
+            "disk_usage": disk_usage_info or {},
+        })
+
+    return payload
+
+
 @app.get("/v1/health")
 def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """
@@ -1134,10 +1009,8 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         store_corrupted = True
 
     target_inbounds = get_all_managed_inbounds()
-    secret_path = get_secret_base_path()
 
     node_meta = get_node_state_metadata()
-    domain = str(node_meta.get("domain") or "")
     role = str(node_meta.get("role") or "")
     modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
     has_cdn_module = any(
@@ -1212,188 +1085,25 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
 
     system_load_info = _get_system_load_info(disk_usage_info)
 
-    bot_status = get_bot_status()
-    module_errors = _load_module_errors()
-    links_data = _load_links_data()
-    traffic_limit = _load_traffic_limit_summary()
-
-    return {
-        "status": "ok" if is_running else "error",
-        "xray_running": is_running,
-        "grpc_ok": bool(grpc_ok),
-        "active_clients_count": len(active_clients),
-        "inbounds": target_inbounds,
-        "services": detected_services,
-        "capabilities": capabilities,
-        "role": role,
-        "domain": domain,
-        "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
-        "modules": modules,
-        "module_errors": module_errors,
-        "links": links_data,
-        "sni_routes": _get_sni_routes(links_data),
-        "xhttp_locations": _get_xhttp_location_routes(),
-        "traffic_limit": traffic_limit,
-        "bot_connected": bool(bot_status.get("connected")),
-        "bot_last_seen_at": bot_status.get("last_seen_at"),
-        "secret_base_path": secret_path,
-        "cdn_domain": get_cdn_domain(),
-        "cdn_domains": get_cdn_domains(),
-        "sub_path_prefix": get_sub_path_prefix(),
-        "node_epoch": running_epoch if is_running else None,
-        "boot_id": boot_id if is_running else None,
-        "starttime": starttime if is_running else None,
-        "sync_status": node_sync_state.get("status", "unsynchronized"),
-        "synchronized": node_sync_state.get("status") == "synchronized",
-        "last_synced_at": node_sync_state.get("last_synced_at"),
-        "disk_usage": disk_usage_info,
-        "system_load": system_load_info,
-    }
-
-
-def _validate_fqdn_strict(value: str) -> str:
-    dom = str(value or "").strip().lower().rstrip(".")
-    if not dom or len(dom) > 253:
-        raise ValueError("SNI domain must be non-empty FQDN")
-    try:
-        ipaddress.IPv4Address(dom)
-        raise ValueError("Bare IP address is forbidden as SNI (Zero-Signature requires FQDN)")
-    except ValueError as e:
-        if "forbidden as SNI" in str(e):
-            raise
-    if not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", dom):
-        raise ValueError(f"Invalid FQDN format for SNI: {dom}")
-    return dom
-
-
-def _validate_ipv4_strict(value: str) -> str:
-    raw = str(value or "").strip()
-    ipaddress.IPv4Address(raw)
-    return raw
-
-
-def _validate_uuid_strict(value: str) -> str:
-    return str(uuid_lib.UUID(str(value or "").strip())).lower()
-
-
-class BridgeSpec(BaseModel):
-    id: Optional[str] = Field(default=None, max_length=64)
-    tag: Optional[str] = Field(default=None, max_length=64)
-    code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
-    location_code: Optional[str] = None
-    name: Optional[str] = None
-    ip: str
-    port: int = Field(default=443, ge=1, le=65535)
-    sni: str
-    uuid: str
-    is_default: bool = False
-    route_user: Optional[str] = None
-
-    @model_validator(mode="after")
-    def validate_bridge(self) -> "BridgeSpec":
-        self.ip = _validate_ipv4_strict(self.ip)
-        self.sni = _validate_fqdn_strict(self.sni)
-        self.uuid = _validate_uuid_strict(self.uuid)
-        self.code = self.code.strip().lower()
-        if self.location_code is not None:
-            self.location_code = self.location_code.strip().lower() or None
-        return self
-
-
-class SniRouteSpec(BaseModel):
-    sni: str
-    bridge_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
-
-    @model_validator(mode="after")
-    def validate_route(self) -> "SniRouteSpec":
-        self.sni = _validate_fqdn_strict(self.sni)
-        self.bridge_code = self.bridge_code.strip().lower()
-        return self
-
-
-class IncomingHubSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
-    ip: Optional[str] = None
-    uuid: Optional[str] = None
-    route_user: Optional[str] = None
-
-    @model_validator(mode="after")
-    def validate_incoming(self) -> "IncomingHubSpec":
-        if self.ip is not None and self.ip.strip():
-            self.ip = _validate_ipv4_strict(self.ip)
-        if self.uuid is not None and self.uuid.strip():
-            self.uuid = _validate_uuid_strict(self.uuid)
-        return self
-
-
-class HubRouteSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
-    ingress_uuid: Optional[str] = None
-    route_user: str = Field(..., min_length=1, max_length=128)
-    exit_id: Optional[str] = Field(default=None, max_length=64)
-    exit_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
-
-    @model_validator(mode="after")
-    def validate_hub_route(self) -> "HubRouteSpec":
-        if self.ingress_uuid is not None and self.ingress_uuid.strip():
-            self.ingress_uuid = _validate_uuid_strict(self.ingress_uuid)
-        self.exit_code = self.exit_code.strip().lower()
-        return self
-
-
-class NodeLinksSectionSpec(BaseModel):
-    bridges: List[BridgeSpec] = Field(default_factory=list)
-    sni_routes: List[SniRouteSpec] = Field(default_factory=list)
-    locations: List[Dict[str, Any]] = Field(default_factory=list)
-
-
-class NodeLinksUpdateRequest(BaseModel):
-    standard: Optional[NodeLinksSectionSpec] = None
-    bi: Optional[NodeLinksSectionSpec] = None
-    exit_nodes: Optional[List[BridgeSpec]] = None
-    allowed_ru_ips: Optional[List[str]] = None
-    allowed_hub_ips: Optional[List[str]] = None
-    incoming_ru_hubs: Optional[List[IncomingHubSpec]] = None
-    incoming_hubs: Optional[List[IncomingHubSpec]] = None
-    routes: Optional[List[HubRouteSpec]] = None
-
-    @model_validator(mode="after")
-    def validate_ip_lists(self) -> "NodeLinksUpdateRequest":
-        if self.allowed_ru_ips is not None:
-            self.allowed_ru_ips = [_validate_ipv4_strict(x) for x in self.allowed_ru_ips]
-        if self.allowed_hub_ips is not None:
-            self.allowed_hub_ips = [_validate_ipv4_strict(x) for x in self.allowed_hub_ips]
-        return self
+    return _build_node_status_payload(
+        is_running=is_running,
+        grpc_ok=grpc_ok,
+        active_clients_count=len(active_clients),
+        services=detected_services,
+        capabilities=capabilities,
+        running_epoch=running_epoch if is_running else None,
+        boot_id=boot_id if is_running else None,
+        starttime=starttime if is_running else None,
+        disk_usage_info=disk_usage_info,
+        system_load_info=system_load_info,
+        include_health_fields=True,
+    )
 
 
 @app.get("/v1/node/status")
 def get_node_status_endpoint(_: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """Read-only v2 hub auto-discovery metadata (role, modules, errors, links, bot)."""
-    node_meta = get_node_state_metadata()
-    modules = node_meta.get("modules") if isinstance(node_meta.get("modules"), dict) else {}
-    bot_status = get_bot_status()
-    links_data = _load_links_data()
-    return {
-        "status": "ok",
-        "role": str(node_meta.get("role") or ""),
-        "country_code": str(node_meta.get("country_code") or ""),
-        "domain": str(node_meta.get("domain") or ""),
-        "cdn_domain": get_cdn_domain(),
-        "cdn_domains": get_cdn_domains(),
-        "sub_path_prefix": get_sub_path_prefix(),
-        "secret_base_path": get_secret_base_path(),
-        "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
-        "modules": modules,
-        "module_errors": _load_module_errors(),
-        "links": links_data,
-        "sni_routes": _get_sni_routes(links_data),
-        "xhttp_locations": _get_xhttp_location_routes(),
-        "inbounds": get_all_managed_inbounds(),
-        "traffic_limit": _load_traffic_limit_summary(),
-        "bot_connected": bool(bot_status.get("connected")),
-        "bot_last_seen_at": bot_status.get("last_seen_at"),
-        "system_load": _get_system_load_info(),
-    }
+    return _build_node_status_payload(include_health_fields=False)
 
 
 @app.put("/v1/node/links")
@@ -1592,12 +1302,16 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
                 effective_svc = resolve_effective_service(req.service)
                 client_id_matches = cached.get("client_id") == client_uuid
                 state_matches = cached.get("state") == desired_state
+                if not client_id_matches or not state_matches:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Idempotency key '{req.idempotency_key}' was previously used with different parameters",
+                    )
+
                 version_matches = (req.version is None) or (cached.get("version") == req.version)
                 service_matches = cached.get("service") in (effective_svc, None) or req.service is None
                 epoch_valid = (
-                    client_id_matches
-                    and state_matches
-                    and version_matches
+                    version_matches
                     and service_matches
                     and bool(cached_epoch)
                     and (cached_epoch == current_epoch)
@@ -1651,14 +1365,6 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
     return await _sync_client_internal(req, client_uuid, desired_state)
 
 
-class ClientBatchSyncItem(ClientSyncRequest):
-    uuid: str
-
-
-class ClientBatchSyncRequest(BaseModel):
-    clients: List[ClientBatchSyncItem] = Field(default_factory=list, max_length=2000)
-
-
 _batch_sync_lock = asyncio.Lock()
 
 
@@ -1684,51 +1390,61 @@ async def batch_sync_clients(
     failed: Dict[str, str] = {}
     pending_mutations: List[tuple[str, bool, Optional[int], Optional[str], str]] = []
     async with _batch_sync_lock:
-        for item in req.clients:
-            try:
-                clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
-                desired_state = (
-                    "active"
-                    if (
-                        item.desired_state == "active"
-                        or (item.desired_state is None and item.is_active is True)
-                    )
-                    else "disabled"
-                )
-                await _sync_client_internal(
-                    item, clean_uuid, desired_state, persist_to_store=False
-                )
-                eff_svc = resolve_effective_service(item.service)
-                pending_mutations.append(
-                    (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
-                )
-                succeeded.append(clean_uuid)
-            except HTTPException as exc:
-                failed[str(item.uuid)] = str(exc.detail)
-            except Exception as exc:
-                failed[str(item.uuid)] = str(exc)
+        try:
+            preloaded_entries = client_store.load_client_entries()
+        except Exception:
+            preloaded_entries = {}
 
-        if pending_mutations:
-            lock_fd = None
-            try:
-                client_store._ensure_dir()
-                lock_fd = client_store._acquire_lock()
-                entries = client_store.load_client_entries()
-                for c_uid, is_act, ver, em, svc in pending_mutations:
-                    client_store._mutate_entry(
-                        entries, c_uid, active=is_act, version=ver, email=em, service=svc
+        try:
+            for item in req.clients:
+                try:
+                    clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
+                    desired_state = (
+                        "active"
+                        if (
+                            item.desired_state == "active"
+                            or (item.desired_state is None and item.is_active is True)
+                        )
+                        else "disabled"
                     )
-                if not client_store.save_client_entries(entries):
-                    raise IOError("Failed to persist batch client entries")
-            except Exception as exc:
-                logger.error("Batch client_store persist failed: %s", exc)
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to persist batch client state: {exc}",
-                ) from exc
-            finally:
-                if lock_fd is not None:
-                    client_store._release_lock(lock_fd)
+                    await _sync_client_internal(
+                        item,
+                        clean_uuid,
+                        desired_state,
+                        persist_to_store=False,
+                        preloaded_entries=preloaded_entries,
+                    )
+                    eff_svc = resolve_effective_service(item.service)
+                    pending_mutations.append(
+                        (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
+                    )
+                    succeeded.append(clean_uuid)
+                except HTTPException as exc:
+                    failed[str(item.uuid)] = str(exc.detail)
+                except Exception as exc:
+                    failed[str(item.uuid)] = str(exc)
+        finally:
+            if pending_mutations:
+                lock_fd = None
+                try:
+                    client_store._ensure_dir()
+                    lock_fd = client_store._acquire_lock()
+                    entries = client_store.load_client_entries()
+                    for c_uid, is_act, ver, em, svc in pending_mutations:
+                        client_store._mutate_entry(
+                            entries, c_uid, active=is_act, version=ver, email=em, service=svc
+                        )
+                    if not client_store.save_client_entries(entries):
+                        logger.error("Failed to persist batch client entries in finally block")
+                except Exception as exc:
+                    logger.error("Batch client_store persist failed: %s", exc)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to persist batch client state: {exc}",
+                    ) from exc
+                finally:
+                    if lock_fd is not None:
+                        client_store._release_lock(lock_fd)
 
     if not failed:
         node_sync_state["status"] = "synchronized"
@@ -1747,11 +1463,16 @@ async def _sync_client_internal(
     desired_state: str,
     *,
     persist_to_store: bool = True,
+    preloaded_entries: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     uuid_lock = await _get_inflight_op_lock(f"uuid:{client_uuid}")
     async with uuid_lock:
         return await _sync_client_unlocked(
-            req, client_uuid, desired_state, persist_to_store=persist_to_store
+            req,
+            client_uuid,
+            desired_state,
+            persist_to_store=persist_to_store,
+            preloaded_entries=preloaded_entries,
         )
 
 
@@ -1761,6 +1482,7 @@ async def _sync_client_unlocked(
     desired_state: str,
     *,
     persist_to_store: bool = True,
+    preloaded_entries: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     node_meta = get_node_state_metadata()
     node_role = str(node_meta.get("role") or "").strip().lower()
@@ -1806,14 +1528,17 @@ async def _sync_client_unlocked(
     # Monotonic version fencing check strictly scoped to target service
     curr_ver: Optional[int] = None
     if req.version is not None:
-        try:
-            entries = client_store.load_client_entries()
-        except ClientStoreCorruptedError as e:
-            logger.critical("Cannot sync client: client store corrupted: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Client store corrupted: {e}",
-            ) from e
+        if preloaded_entries is not None:
+            entries = preloaded_entries
+        else:
+            try:
+                entries = client_store.load_client_entries()
+            except ClientStoreCorruptedError as e:
+                logger.critical("Cannot sync client: client store corrupted: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Client store corrupted: {e}",
+                ) from e
 
         curr_entry = entries.get(client_uuid)
         if curr_entry:
@@ -2153,10 +1878,24 @@ async def delete_client(
             entries = client_store.load_client_entries()
             curr_entry = entries.get(clean_uuid)
             if curr_entry:
-                curr_ver = curr_entry.get("version")
-                is_tombstone = curr_entry.get("tombstone", False)
+                service_states = (
+                    curr_entry.get("service_states")
+                    if isinstance(curr_entry.get("service_states"), dict)
+                    else {}
+                )
+                if eff_service:
+                    curr_svc_state = (
+                        service_states.get(eff_service, {})
+                        if isinstance(service_states.get(eff_service), dict)
+                        else {}
+                    )
+                    curr_ver = curr_svc_state.get("version")
+                    is_tombstone = curr_svc_state.get("tombstone", False)
+                else:
+                    curr_ver = curr_entry.get("version")
+                    is_tombstone = curr_entry.get("tombstone", False)
 
-                if curr_ver is not None and version == curr_ver and is_tombstone and not eff_service:
+                if curr_ver is not None and version == curr_ver and is_tombstone:
                     return {
                         "status": "ok",
                         "client_id": clean_uuid,
@@ -2168,7 +1907,7 @@ async def delete_client(
                         "inbounds": target_inbounds,
                     }
 
-                if not eff_service and curr_ver is not None and (
+                if curr_ver is not None and (
                     version < curr_ver or (is_tombstone and version <= curr_ver)
                 ):
                     return {
@@ -2275,7 +2014,13 @@ async def get_clients_inventory(
         logger.warning("Could not load stored client entries for inventory: %s", e)
 
     if not client_ids:
-        client_ids = list(stored_entries.keys())
+        client_ids = [
+            cid
+            for cid, meta in stored_entries.items()
+            if isinstance(meta, dict)
+            and not meta.get("tombstone", False)
+            and meta.get("is_active", True) is True
+        ]
 
     inventory: Dict[str, Any] = {}
     for cid in client_ids:

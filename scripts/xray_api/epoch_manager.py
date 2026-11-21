@@ -48,11 +48,14 @@ class EpochManager:
 
     def get_system_boot_id(self) -> Optional[str]:
         """Reads kernel random boot_id from /proc, with fallback to machine-id for containers."""
+        if self._last_boot_id:
+            return self._last_boot_id
         boot_id_file = Path("/proc/sys/kernel/random/boot_id")
         if boot_id_file.exists():
             try:
                 val = boot_id_file.read_text(encoding="utf-8").strip()
                 if val:
+                    self._last_boot_id = val
                     return val
             except Exception as e:
                 logger.debug("Failed to read boot_id: %s", e)
@@ -63,7 +66,9 @@ class EpochManager:
                 try:
                     val = p.read_text(encoding="utf-8").strip()
                     if val:
-                        return f"container-{val[:32]}"
+                        cached = f"container-{val[:32]}"
+                        self._last_boot_id = cached
+                        return cached
                 except Exception:
                     pass
         return "container-fallback-boot-id"
@@ -167,10 +172,6 @@ class EpochManager:
                 pass
 
         return False
-
-    def _find_xray_process(self) -> Tuple[Optional[int], Optional[int]]:
-        """Alias for get_xray_process_info for backwards compatibility."""
-        return self.get_xray_process_info()
 
     def get_xray_process_info(self) -> Tuple[Optional[int], Optional[int]]:
         """

@@ -330,6 +330,7 @@ EOF
 Description=Just1kNode Xray API Agent
 After=network.target xray.service
 Wants=xray.service
+PartOf=xray.service
 StartLimitIntervalSec=30
 StartLimitBurst=15
 

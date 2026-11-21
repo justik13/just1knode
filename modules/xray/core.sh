@@ -136,6 +136,7 @@ update_xray_core() {
             if ! ensure_xray_api_healthy; then
                 warn "Внимание: служба xray-api не смогла запуститься после перезапуска Xray!"
             fi
+            curl -sf http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
             log "Обновление завершено успешно! Версия: $($XRAY_BIN version | head -n 1)"
         else
             warn "Xray не запустился после обновления! Выполняем откат на предыдущую версию..."

@@ -218,6 +218,7 @@ apply_v2_hub_configuration() {
             return 1
         fi
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
+        curl -sf http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
     fi
 
     if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then

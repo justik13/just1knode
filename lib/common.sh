@@ -346,6 +346,7 @@ ensure_xray_api_healthy() {
     # 1. Если служба уже активна (systemd автоматически перезапустил её через PartOf=xray.service),
     # повторный restart категорически не вызываем, чтобы не провоцировать start-limit-hit.
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        curl -sf http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
         return 0
     fi
 
@@ -375,6 +376,7 @@ ensure_xray_api_healthy() {
 
     # 5. Проверяем финальный статус: функция возвращает 0 только при реальной активности службы
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        curl -sf http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
         return 0
     fi
     return 1

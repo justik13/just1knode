@@ -75,11 +75,9 @@ class XrayGrpcClient:
                 # 1. Verify StatsService responsiveness
                 stub = stats_grpc.StatsServiceStub(channel)
                 stub.QueryStats(
-                    stats_cmd.QueryStatsRequest(pattern="", reset=False),
+                    stats_cmd.QueryStatsRequest(pattern="health_probe", reset=False),
                     timeout=min(self.timeout, 2.0),
                 )
-                # 2. Verify HandlerService stub connectivity
-                _handler_stub = proxyman_grpc.HandlerServiceStub(channel)
                 return True
             except grpc.RpcError as exc:
                 if exc.code() in (grpc.StatusCode.OK, grpc.StatusCode.NOT_FOUND):
@@ -241,7 +239,7 @@ class XrayGrpcClient:
                     timeout=self.timeout,
                 )
                 result = self._aggregate_query_stats(resp)
-                if result:
+                if result is not None:
                     return result
             except grpc.RpcError as exc:
                 logger.warning("QueryStats(user>>>) failed: %s; trying GetUsersStats", exc)
