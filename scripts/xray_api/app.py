@@ -244,6 +244,7 @@ completed_idempotent_ops = DurableIdempotencyStore(_resolve_idempotency_db_path(
 
 # Concurrency locks for in-flight idempotent operations (prevents check-then-mutate races)
 _inflight_op_locks: Dict[str, asyncio.Lock] = {}
+_inflight_op_refcounts: Dict[str, int] = {}
 _inflight_master_lock = asyncio.Lock()
 
 
@@ -252,28 +253,36 @@ class _InflightLock:
         self.key = key
         self.lock = lock
 
+    async def _release_ref(self) -> None:
+        async with _inflight_master_lock:
+            remaining = _inflight_op_refcounts.get(self.key, 1) - 1
+            if remaining <= 0:
+                _inflight_op_refcounts.pop(self.key, None)
+                if not self.lock.locked():
+                    _inflight_op_locks.pop(self.key, None)
+            else:
+                _inflight_op_refcounts[self.key] = remaining
+
     async def __aenter__(self):
-        await self.lock.acquire()
+        try:
+            await self.lock.acquire()
+        except BaseException:
+            await self._release_ref()
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         try:
             self.lock.release()
         finally:
-            async with _inflight_master_lock:
-                waiters = getattr(self.lock, "_waiters", None)
-                if not waiters and not self.lock.locked():
-                    _inflight_op_locks.pop(self.key, None)
+            await self._release_ref()
 
 
 async def _get_inflight_op_lock(key: str) -> _InflightLock:
     async with _inflight_master_lock:
         if key not in _inflight_op_locks:
-            if len(_inflight_op_locks) > 1000:
-                unlocked_keys = [k for k, v in _inflight_op_locks.items() if not v.locked()]
-                for k in unlocked_keys:
-                    _inflight_op_locks.pop(k, None)
             _inflight_op_locks[key] = asyncio.Lock()
+        _inflight_op_refcounts[key] = _inflight_op_refcounts.get(key, 0) + 1
         return _InflightLock(key, _inflight_op_locks[key])
 
 
@@ -1435,7 +1444,7 @@ async def batch_sync_clients(
                             entries, c_uid, active=is_act, version=ver, email=em, service=svc
                         )
                     if not client_store.save_client_entries(entries):
-                        logger.error("Failed to persist batch client entries in finally block")
+                        raise RuntimeError("save_client_entries returned False")
                 except Exception as exc:
                     logger.error("Batch client_store persist failed: %s", exc)
                     raise HTTPException(

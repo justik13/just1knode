@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 import time
 import uuid as uuid_lib
 from contextlib import contextmanager
@@ -26,7 +28,6 @@ class DurableIdempotencyStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             with conn:
                 yield conn
@@ -36,6 +37,7 @@ class DurableIdempotencyStore:
     def _init_db(self) -> None:
         try:
             with self._get_conn() as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS idempotent_ops (
@@ -155,11 +157,29 @@ class DurableIdempotencyStore:
 
     def pop(self, key: str, default: Any = None) -> Any:
         try:
-            val = self.get(key)
-            if val is not None:
-                with self._get_conn() as conn:
+            with self._get_conn() as conn:
+                cur = conn.execute(
+                    "SELECT response_json FROM idempotent_ops WHERE idempotency_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if row:
                     conn.execute("DELETE FROM idempotent_ops WHERE idempotency_key = ?", (key,))
-                return val
+                    return json.loads(row[0])
         except Exception:
             pass
         return default
+
+
+def _resolve_idempotency_db_path() -> Path:
+    env_path = os.getenv("IDEMPOTENCY_DB_PATH")
+    if env_path:
+        return Path(env_path)
+    if os.getenv("CLIENTS_FILE_PATH"):
+        return Path(os.getenv("CLIENTS_FILE_PATH")).parent / "idempotency.db"
+    default_path = Path("/etc/just1knode/idempotency.db")
+    try:
+        default_path.parent.mkdir(parents=True, exist_ok=True)
+        return default_path
+    except (PermissionError, OSError):
+        return Path(tempfile.gettempdir()) / "xray_idempotency.db"
