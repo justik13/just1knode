@@ -40,23 +40,16 @@ class DurableIdempotencyStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             with conn:
                 yield conn
         finally:
             conn.close()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
-
     def _init_db(self) -> None:
         try:
             with self._connection() as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS idempotent_ops (
@@ -198,11 +191,15 @@ class DurableIdempotencyStore:
 
     def pop(self, key: str, default: Any = None) -> Any:
         try:
-            val = self.get(key)
-            if val is not None:
-                with self._connection() as conn:
+            with self._connection() as conn:
+                cur = conn.execute(
+                    "SELECT response_json FROM idempotent_ops WHERE idempotency_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if row:
                     conn.execute("DELETE FROM idempotent_ops WHERE idempotency_key = ?", (key,))
-                return val
+                    return json.loads(row[0])
         except Exception:
             pass
         return default
@@ -1592,8 +1589,8 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
     if req.idempotency_key:
         op_lock = await _get_inflight_op_lock(req.idempotency_key)
         async with op_lock:
-            if req.idempotency_key in completed_idempotent_ops:
-                cached = completed_idempotent_ops[req.idempotency_key]
+            cached = completed_idempotent_ops.get(req.idempotency_key)
+            if cached is not None:
                 cached_epoch = cached.get("verified_epoch")
                 current_epoch = (
                     epoch_manager.get_current_running_epoch() if epoch_manager else None
