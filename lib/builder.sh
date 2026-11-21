@@ -563,28 +563,11 @@ if role == "ru_hub":
             bi_loc_inbounds_by_target.setdefault(target_bridge, []).append(r_tag)
             location_nginx_routes.append((r_path, f"xray_xhttp_loc_{loc_slug}", spec_eff))
 
-    # DNS и выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; без не-РФ DNS-резолва)
+    # Выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; нативный безопасный резолв хоста AsIs)
     ru_domains = [
         "geosite:category-ru", "geosite:tld-ru",
         "domain:ru", "domain:su", "domain:xn--p1ai",
     ]
-    cfg["dns"] = {
-        "servers": [
-            {
-                "address": "77.88.8.8",
-                "port": 53,
-                "domains": ru_domains,
-                "skipFallback": True,
-            },
-            {
-                "address": "77.88.8.1",
-                "port": 53,
-                "domains": ru_domains,
-                "skipFallback": True,
-            },
-        ],
-        "queryStrategy": "UseIPv4",
-    }
     # outbounds[0] MUST be blackhole: guarantees zero-leak fallback if balancers or bridges are unreachable
     cfg["outbounds"].append({
         "tag": "just1k-wl-block",
@@ -594,7 +577,7 @@ if role == "ru_hub":
     cfg["outbounds"].append({
         "tag": "just1k-wl-direct",
         "protocol": "freedom",
-        "settings": {"domainStrategy": "UseIPv4"},
+        "settings": {},
     })
 
     # Outbounds для Стандарта (std_bridges)
