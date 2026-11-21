@@ -38,9 +38,13 @@ def load_json(path, default, fail_closed=False):
         if lock_fd:
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
 
 
 def is_valid_ipv4(val):
