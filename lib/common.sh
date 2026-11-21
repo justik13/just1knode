@@ -516,7 +516,25 @@ heal_node_firewall_and_stealth() {
     # 1. Применяем системное скрытие (IPv6 leak protection + ICMP stealth)
     apply_node_sysctl_hardening
 
-    if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+    # 2. Авто-активация UFW при необходимости (Zero-Lockout стандарт)
+    if ! command -v ufw >/dev/null 2>&1; then
+        apt-get install -y -qq ufw >/dev/null 2>&1 || true
+    fi
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        warn "Фаервол UFW недоступен в системе. Пропуск настройки правил фаервола."
+        return 0
+    fi
+
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        configure_safe_ufw || {
+            error "КРИТИЧЕСКАЯ ОШИБКА: Не удалось безопасно инициализировать UFW во избежание потери SSH."
+            return 1
+        }
+    fi
+
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        warn "Фаервол UFW не в состоянии active. Пропуск настройки правил."
         return 0
     fi
 
