@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import uuid as uuid_lib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -35,16 +35,21 @@ class DurableIdempotencyStore:
         self.db_path = db_path
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS idempotent_ops (
@@ -76,7 +81,7 @@ class DurableIdempotencyStore:
 
     def get(self, key: str, default: Any = None) -> Any:
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 cur = conn.execute(
                     "SELECT response_json FROM idempotent_ops WHERE idempotency_key = ?",
                     (key,),
@@ -101,7 +106,7 @@ class DurableIdempotencyStore:
                     except Exception:
                         client_id_val = str(raw_cid).strip().lower()
 
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     """
                     INSERT INTO idempotent_ops (idempotency_key, response_json, created_at, client_id)
@@ -141,7 +146,7 @@ class DurableIdempotencyStore:
 
     def __len__(self) -> int:
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 cur = conn.execute("SELECT COUNT(*) FROM idempotent_ops")
                 return cur.fetchone()[0]
         except Exception:
@@ -149,7 +154,7 @@ class DurableIdempotencyStore:
 
     def keys(self) -> list[str]:
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 cur = conn.execute("SELECT idempotency_key FROM idempotent_ops ORDER BY created_at ASC")
                 return [row[0] for row in cur.fetchall()]
         except Exception:
@@ -157,7 +162,7 @@ class DurableIdempotencyStore:
 
     def items(self) -> list[tuple[str, Dict[str, Any]]]:
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 cur = conn.execute("SELECT idempotency_key, response_json FROM idempotent_ops")
                 res = []
                 for k, v_str in cur.fetchall():
@@ -176,7 +181,7 @@ class DurableIdempotencyStore:
             norm_target = client_id.strip().lower()
 
         try:
-            with self._get_conn() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     "DELETE FROM idempotent_ops WHERE client_id = ?",
                     (norm_target,),
@@ -186,11 +191,15 @@ class DurableIdempotencyStore:
 
     def pop(self, key: str, default: Any = None) -> Any:
         try:
-            val = self.get(key)
-            if val is not None:
-                with self._get_conn() as conn:
+            with self._connection() as conn:
+                cur = conn.execute(
+                    "SELECT response_json FROM idempotent_ops WHERE idempotency_key = ?",
+                    (key,),
+                )
+                row = cur.fetchone()
+                if row:
                     conn.execute("DELETE FROM idempotent_ops WHERE idempotency_key = ?", (key,))
-                return val
+                    return json.loads(row[0])
         except Exception:
             pass
         return default
@@ -1580,8 +1589,8 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
     if req.idempotency_key:
         op_lock = await _get_inflight_op_lock(req.idempotency_key)
         async with op_lock:
-            if req.idempotency_key in completed_idempotent_ops:
-                cached = completed_idempotent_ops[req.idempotency_key]
+            cached = completed_idempotent_ops.get(req.idempotency_key)
+            if cached is not None:
                 cached_epoch = cached.get("verified_epoch")
                 current_epoch = (
                     epoch_manager.get_current_running_epoch() if epoch_manager else None

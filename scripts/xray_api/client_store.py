@@ -128,6 +128,7 @@ class ClientStore:
     def _acquire_lock(self):
         if fcntl is None:
             return None
+        lock_fd = None
         try:
             lock_fd = open(self.lock_path, "a")
             try:
@@ -137,6 +138,11 @@ class ClientStore:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             return lock_fd
         except Exception as e:
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
             logger.debug("Could not acquire client store lock: %s", e)
             return None
 
@@ -144,9 +150,13 @@ class ClientStore:
         if fcntl is not None and lock_fd is not None:
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def canonicalize_service(service: Optional[str]) -> Optional[str]:
