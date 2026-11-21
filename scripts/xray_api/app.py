@@ -1299,8 +1299,8 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
     if req.idempotency_key:
         op_lock = await _get_inflight_op_lock(req.idempotency_key)
         async with op_lock:
-            if req.idempotency_key in completed_idempotent_ops:
-                cached = completed_idempotent_ops[req.idempotency_key]
+            cached = completed_idempotent_ops.get(req.idempotency_key)
+            if cached is not None:
                 cached_epoch = cached.get("verified_epoch")
                 current_epoch = (
                     epoch_manager.get_current_running_epoch() if epoch_manager else None
