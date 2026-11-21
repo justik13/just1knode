@@ -255,19 +255,13 @@ print(1 if limit_gb > 0 and total >= limit_gb * (1024 ** 3) else 0)
 ' "$total_bytes" "$limit_gb" 2>/dev/null || echo "0")"
 
     if [[ "$is_exceeded" -eq 1 ]]; then
-        warn "Лимит хостинга исчерпан (${limit_gb} ГБ). Остановка службы Xray..."
+        warn "Лимит хостинга исчерпан (${limit_gb} ГБ). Установка флага исчерпания трафика..."
         touch "$TRAFFIC_EXCEEDED_FLAG" 2>/dev/null || true
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl stop xray 2>/dev/null || true
-        fi
     else
         # Traffic is below limit
         if [[ -f "$TRAFFIC_EXCEEDED_FLAG" ]]; then
-            warn "Лимит трафика восстановлен / наступил новый биллинговый цикл. Запуск Xray..."
+            warn "Лимит трафика восстановлен / наступил новый биллинговый цикл. Снятие флага исчерпания..."
             rm -f "$TRAFFIC_EXCEEDED_FLAG" 2>/dev/null || true
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl start xray 2>/dev/null || true
-            fi
             if declare -f ensure_xray_api_healthy >/dev/null 2>&1; then
                 ensure_xray_api_healthy || true
             fi

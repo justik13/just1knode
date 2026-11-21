@@ -147,6 +147,7 @@ detect_host_port80_container() {
 }
 
 # Безопасная настройка UFW с детекцией SSH
+# shellcheck disable=SC2120
 configure_safe_ufw() {
     local ports=("$@")
     if ! command -v ufw >/dev/null 2>&1; then
@@ -329,6 +330,16 @@ get_public_ipv4() {
     return 1
 }
 
+ping_xray_api_health() {
+    local api_key=""
+    if [[ -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+        api_key="$(grep -m1 '^XRAY_API_KEY=' "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    if [[ -n "$api_key" ]]; then
+        curl -sf -H "X-API-Key: ${api_key}" http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
+    fi
+}
+
 ensure_xray_api_healthy() {
     local force="${1:-0}"
     # Функция вызывается на узлах, где установлен агент xray-api (ru_hub / модульный узел с VLESS).
@@ -346,6 +357,7 @@ ensure_xray_api_healthy() {
     # 1. Если служба уже активна (systemd автоматически перезапустил её через PartOf=xray.service),
     # повторный restart категорически не вызываем, чтобы не провоцировать start-limit-hit.
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        ping_xray_api_health
         return 0
     fi
 
@@ -375,6 +387,7 @@ ensure_xray_api_healthy() {
 
     # 5. Проверяем финальный статус: функция возвращает 0 только при реальной активности службы
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        ping_xray_api_health
         return 0
     fi
     return 1
@@ -527,6 +540,7 @@ heal_node_firewall_and_stealth() {
     fi
 
     if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        # shellcheck disable=SC2119
         configure_safe_ufw || {
             error "КРИТИЧЕСКАЯ ОШИБКА: Не удалось безопасно инициализировать UFW во избежание потери SSH."
             return 1

@@ -84,9 +84,20 @@ class ClientStore:
         temp_path = self.file_path.with_name(
             f"{self.file_path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
         )
+        now_ts = time.time()
+        tombstone_cutoff = now_ts - (14 * 86400.0)
+        pruned_entries = {
+            u: m
+            for u, m in entries.items()
+            if not (m.get("tombstone") is True and float(m.get("updated_at", 0)) < tombstone_cutoff)
+        }
+        if len(pruned_entries) < len(entries):
+            entries.clear()
+            entries.update(pruned_entries)
+
         data = {
             "clients": entries,
-            "updated_at": time.time(),
+            "updated_at": now_ts,
             "count": len(
                 [
                     u
@@ -169,8 +180,12 @@ class ClientStore:
             return "vless"
         return s
 
-    def _detect_default_service(self) -> str:
+    def _detect_default_service(self, service: Optional[str] = None) -> str:
         """Detects default service namespace ('white_internet' or 'vless') based on node configuration."""
+        if service:
+            canon = self.canonicalize_service(service)
+            if canon:
+                return canon
         raw_env = os.getenv("XRAY_INBOUND_TAGS")
         if raw_env:
             tags = [t.strip().lower() for t in raw_env.split(",") if t.strip()]
@@ -277,7 +292,7 @@ class ClientStore:
             svc_name = (
                 self.canonicalize_service(service)
                 or existing_entry.get("service")
-                or self._detect_default_service()
+                or self._detect_default_service(service)
             )
             svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
             new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)

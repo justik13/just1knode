@@ -218,6 +218,7 @@ apply_v2_hub_configuration() {
             return 1
         fi
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
+        ping_xray_api_health
     fi
 
     if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
