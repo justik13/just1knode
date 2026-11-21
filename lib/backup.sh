@@ -98,9 +98,17 @@ restore_node() {
         return 1
     fi
 
+    # Проверка на path traversal и абсолютные пути для защиты от перезаписи системных файлов
+    local bad_paths
+    bad_paths="$(tar -tzf "$bak_file" 2>/dev/null | grep -E '(^|/)\.\.(/|$)|^/' || true)"
+    if [[ -n "$bad_paths" ]]; then
+        error "Архив содержит небезопасные пути (path traversal / absolute paths): $bad_paths"
+        return 1
+    fi
+
     check_root
     log "Восстановление конфигураций узла из $bak_file..."
-    if tar -xzf "$bak_file" -C / 2>/dev/null; then
+    if tar --no-same-owner -xzf "$bak_file" -C / 2>/dev/null; then
         log "✔ Конфигурации успешно восстановлены."
         if declare -f ensure_xray_config_permissions >/dev/null 2>&1; then
             ensure_xray_config_permissions "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
@@ -111,11 +119,15 @@ restore_node() {
             chown root:xrayapi "$state_file" 2>/dev/null || true
         fi
         if command -v systemctl >/dev/null 2>&1; then
-            if systemctl is-active --quiet xray 2>/dev/null || systemctl is-enabled --quiet xray 2>/dev/null; then
-                systemctl restart xray 2>/dev/null || true
-            fi
-            if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null; then
-                systemctl restart xray-api 2>/dev/null || true
+            if is_traffic_limit_exceeded; then
+                warn "Лимит трафика исчерпан — службы Xray не запускаются после восстановления."
+            else
+                if systemctl is-active --quiet xray 2>/dev/null || systemctl is-enabled --quiet xray 2>/dev/null; then
+                    systemctl restart xray 2>/dev/null || true
+                fi
+                if systemctl is-active --quiet xray-api 2>/dev/null || systemctl is-enabled --quiet xray-api 2>/dev/null; then
+                    systemctl restart xray-api 2>/dev/null || true
+                fi
             fi
         fi
         log "✔ Восстановление узла успешно завершено."

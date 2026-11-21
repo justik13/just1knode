@@ -2,7 +2,6 @@
 Description=Just1kNode Xray API Agent
 After=network.target xray.service
 Wants=xray.service
-PartOf=xray.service
 StartLimitIntervalSec=30
 StartLimitBurst=15
 
@@ -23,7 +22,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/xray-api /etc/just1knode /var/lib/xray-api
+ReadWritePaths=/opt/xray-api /etc/just1knode /var/lib/xray-api -/etc/letsencrypt -/usr/local/etc/xray
 
 [Install]
 WantedBy=multi-user.target

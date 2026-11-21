@@ -29,7 +29,7 @@ class ClientStore:
 
     def __init__(self, file_path: Path):
         self.file_path = Path(file_path)
-        self.lock_path = self.file_path.with_suffix(".lock")
+        self.lock_path = Path(f"{self.file_path}.lock")
 
     def _ensure_dir(self) -> None:
         try:
@@ -52,25 +52,12 @@ class ClientStore:
                 if isinstance(data, dict):
                     if len(data) == 0:
                         return {}
-                    if "clients" in data:
-                        clients_val = data["clients"]
-                        if isinstance(clients_val, dict):
-                            return clients_val
-                        if isinstance(clients_val, list):
-                            return {
-                                u: {"is_active": True, "version": 1, "updated_at": time.time()}
-                                for u in clients_val
-                            }
-                        raise ClientStoreCorruptedError(
-                            f"Unexpected clients field in {self.file_path}: {type(clients_val)}"
-                        )
-                    if all(isinstance(v, dict) for v in data.values()):
-                        return data
-                elif isinstance(data, list):
-                    return {
-                        u: {"is_active": True, "version": 1, "updated_at": time.time()}
-                        for u in data
-                    }
+                    clients_val = data.get("clients")
+                    if isinstance(clients_val, dict):
+                        return clients_val
+                    raise ClientStoreCorruptedError(
+                        f"Unexpected clients field in {self.file_path}: {type(clients_val)}"
+                    )
                 raise ClientStoreCorruptedError(
                     f"Unexpected JSON structure in {self.file_path}: {type(data)}"
                 )
@@ -97,9 +84,20 @@ class ClientStore:
         temp_path = self.file_path.with_name(
             f"{self.file_path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
         )
+        now_ts = time.time()
+        tombstone_cutoff = now_ts - (14 * 86400.0)
+        pruned_entries = {
+            u: m
+            for u, m in entries.items()
+            if not (m.get("tombstone") is True and float(m.get("updated_at", 0)) < tombstone_cutoff)
+        }
+        if len(pruned_entries) < len(entries):
+            entries.clear()
+            entries.update(pruned_entries)
+
         data = {
             "clients": entries,
-            "updated_at": time.time(),
+            "updated_at": now_ts,
             "count": len(
                 [
                     u
@@ -138,14 +136,10 @@ class ClientStore:
             except Exception:
                 pass
 
-    def save_clients(self, clients: Set[str]) -> bool:
-        """Backward-compatible save using set of active UUIDs."""
-        entries = {u: {"is_active": True, "version": 1, "updated_at": time.time()} for u in clients}
-        return self.save_client_entries(entries)
-
     def _acquire_lock(self):
         if fcntl is None:
             return None
+        lock_fd = None
         try:
             lock_fd = open(self.lock_path, "a")
             try:
@@ -155,6 +149,11 @@ class ClientStore:
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
             return lock_fd
         except Exception as e:
+            if lock_fd is not None:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
             logger.debug("Could not acquire client store lock: %s", e)
             return None
 
@@ -162,9 +161,13 @@ class ClientStore:
         if fcntl is not None and lock_fd is not None:
             try:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                lock_fd.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    lock_fd.close()
+                except Exception:
+                    pass
 
     @staticmethod
     def canonicalize_service(service: Optional[str]) -> Optional[str]:
@@ -177,13 +180,17 @@ class ClientStore:
             return "vless"
         return s
 
-    def _detect_default_service(self) -> str:
+    def _detect_default_service(self, service: Optional[str] = None) -> str:
         """Detects default service namespace ('white_internet' or 'vless') based on node configuration."""
+        if service:
+            canon = self.canonicalize_service(service)
+            if canon:
+                return canon
         raw_env = os.getenv("XRAY_INBOUND_TAGS")
         if raw_env:
             tags = [t.strip().lower() for t in raw_env.split(",") if t.strip()]
             has_wl = any(
-                t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                t.startswith("just1k-wl-") or t == "just1k-wl-default"
                 for t in tags
             )
             has_vless = any(
@@ -199,7 +206,6 @@ class ClientStore:
             os.getenv("STATE_FILE_PATH"),
             os.getenv("JUST1K_STATE_PATH"),
             "/etc/just1knode/state.json",
-            "/etc/just1k/state.json",
         ]
         for sc in state_candidates:
             if not sc:
@@ -211,8 +217,17 @@ class ClientStore:
                         sdata = json.load(f)
                         if isinstance(sdata, dict):
                             role = sdata.get("role")
-                            has_vless = str(sdata.get("has_vless", "")) == "1"
-                            has_wl = str(sdata.get("has_wl", "")) == "1" or role == "origin"
+                            modules = sdata.get("modules") if isinstance(sdata.get("modules"), dict) else {}
+                            has_xhttp_mod = any(
+                                isinstance(modules.get(k), dict) and bool(modules[k].get("enabled"))
+                                for k in ("vless_xhttp", "cdn_yandex", "cdn_turboflare")
+                            )
+                            has_tls_mod = (
+                                isinstance(modules.get("vless_tls"), dict)
+                                and bool(modules["vless_tls"].get("enabled"))
+                            )
+                            has_vless = has_tls_mod or role == "exit_node"
+                            has_wl = role == "eu_hub" or has_xhttp_mod
                             if has_wl and not has_vless:
                                 return "white_internet"
                             if has_vless and not has_wl:
@@ -237,7 +252,7 @@ class ClientStore:
                         inbounds = cdata.get("inbounds", [])
                         tags = [ib.get("tag", "").lower() for ib in inbounds if isinstance(ib, dict)]
                         has_wl = any(
-                            t.startswith("just1k-wl-") or t.startswith("inbound-") or t in ("just1k-wl-default", "inbound-default")
+                            t.startswith("just1k-wl-") or t == "just1k-wl-default"
                             for t in tags
                         )
                         has_vless = any(
@@ -254,35 +269,91 @@ class ClientStore:
 
         return "vless"
 
-    def _extract_or_migrate_service_states(self, existing_entry: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract existing service_states dict or migrate legacy entry without service_states."""
-        curr_service_states = existing_entry.get("service_states")
-        if isinstance(curr_service_states, dict):
-            return dict(curr_service_states)
+    def _extract_service_states(self, existing_entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract service_states dict from v2 client entry."""
+        curr = existing_entry.get("service_states")
+        return dict(curr) if isinstance(curr, dict) else {}
 
-        curr_service_states = {}
-        if existing_entry:
-            raw_services = existing_entry.get("services") or []
-            if not isinstance(raw_services, list):
-                raw_services = [raw_services] if raw_services else []
-            legacy_services = [s for s in raw_services if s]
-            raw_svc = existing_entry.get("service")
-            if raw_svc and raw_svc not in legacy_services:
-                legacy_services.append(raw_svc)
-            if not legacy_services:
-                legacy_services = [self._detect_default_service()]
-            legacy_act = bool(existing_entry.get("is_active", True)) and not bool(existing_entry.get("tombstone", False))
-            legacy_ver = existing_entry.get("version", 0)
-            legacy_tomb = bool(existing_entry.get("tombstone", False))
-            for s in legacy_services:
-                canon_s = self.canonicalize_service(s) or s
-                if canon_s:
-                    curr_service_states[canon_s] = {
-                        "is_active": legacy_act,
-                        "version": legacy_ver,
-                        "tombstone": legacy_tomb,
-                    }
-        return curr_service_states
+    def _mutate_entry(
+        self,
+        entries: Dict[str, Any],
+        client_uuid: str,
+        *,
+        active: bool,
+        version: Optional[int] = None,
+        email: Optional[str] = None,
+        service: Optional[str] = None,
+    ) -> None:
+        existing_entry = entries.get(client_uuid, {})
+        curr_service_states = self._extract_service_states(existing_entry)
+        now_ts = time.time()
+
+        if active:
+            svc_name = (
+                self.canonicalize_service(service)
+                or existing_entry.get("service")
+                or self._detect_default_service(service)
+            )
+            svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
+            new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+            curr_service_states[svc_name] = {
+                "is_active": True,
+                "version": new_svc_ver,
+                "tombstone": False,
+                "updated_at": now_ts,
+            }
+            active_services = [
+                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+            global_ver = max(
+                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
+                default=new_svc_ver,
+            )
+            entry: Dict[str, Any] = {
+                "is_active": bool(active_services),
+                "version": global_ver,
+                "services": active_services,
+                "service": svc_name,
+                "service_states": curr_service_states,
+                "tombstone": False,
+                "updated_at": now_ts,
+            }
+            if email or existing_entry.get("email"):
+                entry["email"] = email or existing_entry.get("email")
+        else:
+            svc_name = self.canonicalize_service(service)
+            targets = [svc_name] if svc_name else list(curr_service_states.keys())
+            for s in targets:
+                svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
+                new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
+                curr_service_states[s] = {
+                    "is_active": False,
+                    "version": new_svc_ver,
+                    "tombstone": False,
+                    "updated_at": now_ts,
+                }
+            active_services = [
+                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
+            ]
+            global_ver = max(
+                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
+                default=(version or 1),
+            )
+            entry = {
+                "is_active": bool(active_services),
+                "version": global_ver,
+                "services": active_services,
+                "service_states": curr_service_states,
+                "updated_at": now_ts,
+            }
+            if active_services:
+                entry["service"] = active_services[-1]
+            elif existing_entry.get("service"):
+                entry["service"] = existing_entry["service"]
+            if existing_entry.get("email"):
+                entry["email"] = existing_entry["email"]
+
+        entries[client_uuid] = entry
 
     def add_client(
         self,
@@ -295,44 +366,9 @@ class ClientStore:
         lock_fd = self._acquire_lock()
         try:
             entries = self.load_client_entries()
-            existing_entry = entries.get(client_uuid, {})
-            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
-
-            svc_name = (
-                self.canonicalize_service(service)
-                or existing_entry.get("service")
-                or self._detect_default_service()
+            self._mutate_entry(
+                entries, client_uuid, active=True, version=version, email=email, service=service
             )
-            svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
-            new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
-
-            curr_service_states[svc_name] = {
-                "is_active": True,
-                "version": new_svc_ver,
-                "tombstone": False,
-                "updated_at": time.time(),
-            }
-
-            active_services = [
-                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
-            ]
-            global_ver = max(
-                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
-                default=new_svc_ver,
-            )
-
-            entry: Dict[str, Any] = {
-                "is_active": bool(active_services),
-                "version": global_ver,
-                "services": active_services,
-                "service": svc_name,
-                "service_states": curr_service_states,
-                "tombstone": False,
-                "updated_at": time.time(),
-            }
-            if email or existing_entry.get("email"):
-                entry["email"] = email or existing_entry.get("email")
-            entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client addition to disk: {client_uuid}")
         finally:
@@ -345,53 +381,9 @@ class ClientStore:
         lock_fd = self._acquire_lock()
         try:
             entries = self.load_client_entries()
-            existing_entry = entries.get(client_uuid, {})
-            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
-
-            svc_name = self.canonicalize_service(service)
-            if svc_name:
-                svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
-                new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
-                curr_service_states[svc_name] = {
-                    "is_active": False,
-                    "version": new_svc_ver,
-                    "tombstone": False,
-                    "updated_at": time.time(),
-                }
-            else:
-                # Deactivate all known services on unspecified service removal
-                for s in list(curr_service_states.keys()):
-                    svc_curr_ver = curr_service_states[s].get("version", 0)
-                    new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
-                    curr_service_states[s] = {
-                        "is_active": False,
-                        "version": new_svc_ver,
-                        "tombstone": False,
-                        "updated_at": time.time(),
-                    }
-
-            active_services = [
-                s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
-            ]
-            global_ver = max(
-                (st.get("version", 0) for st in curr_service_states.values() if isinstance(st, dict)),
-                default=(version or 1),
+            self._mutate_entry(
+                entries, client_uuid, active=False, version=version, service=service
             )
-
-            entry: Dict[str, Any] = {
-                "is_active": bool(active_services),
-                "version": global_ver,
-                "services": active_services,
-                "service_states": curr_service_states,
-                "updated_at": time.time(),
-            }
-            if active_services:
-                entry["service"] = active_services[-1]
-            elif existing_entry.get("service"):
-                entry["service"] = existing_entry["service"]
-            if existing_entry.get("email"):
-                entry["email"] = existing_entry["email"]
-            entries[client_uuid] = entry
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deactivation to disk: {client_uuid}")
         finally:
@@ -405,7 +397,7 @@ class ClientStore:
         try:
             entries = self.load_client_entries()
             existing_entry = entries.get(client_uuid, {})
-            curr_service_states = self._extract_or_migrate_service_states(existing_entry)
+            curr_service_states = self._extract_service_states(existing_entry)
             svc_name = self.canonicalize_service(service)
             if svc_name:
                 svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)

@@ -11,10 +11,15 @@ SYSTEMD_SYSTEM_DIR="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
 STATE_DIR="${STATE_DIR:-/etc/just1knode}"
 STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
-RELAYS_FILE="${RELAYS_FILE:-${STATE_DIR}/relays.json}"
 
 JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-main}}}"
+if [[ -z "${JUST1KNODE_REF:-}" ]]; then
+    if [[ -d "${INSTALL_DIR:-/opt/just1knode}/.git" ]] && command -v git >/dev/null 2>&1; then
+        JUST1KNODE_REF="$(git -C "${INSTALL_DIR:-/opt/just1knode}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
+    fi
+fi
+JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
 
 ensure_xrayapi_user() {
     if ! getent group xrayapi >/dev/null 2>&1; then
@@ -198,9 +203,59 @@ setup_xray_api_venv() {
         return 1
     fi
 
+    # Автоматическая компиляция protobuf proto-файлов для gRPC
+    if [[ -f "${XRAY_API_DIR}/compile_proto.py" ]]; then
+        log "Компиляция gRPC protobuf файлов..."
+        "${venv_py}" "${XRAY_API_DIR}/compile_proto.py" >/dev/null 2>&1 || {
+            warn "Предупреждение: ошибка компиляции proto-файлов через compile_proto.py"
+            "${venv_py}" "${XRAY_API_DIR}/compile_proto.py" || true
+        }
+    fi
+
     # Гарантия прав доступа для пользователя xrayapi (защита от umask 027)
     chown -R root:xrayapi "${venv_dir}" 2>/dev/null || true
     chmod -R 755 "${venv_dir}" 2>/dev/null || true
+}
+
+deploy_apply_trigger_units() {
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    local src_dir="${SCRIPT_DIR:-${INSTALL_DIR:-/opt/just1knode}}/scripts/systemd"
+    local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+    mkdir -p "$systemd_dir" 2>/dev/null || true
+
+    if [[ -f "${src_dir}/just1knode-apply.path" && -f "${src_dir}/just1knode-apply.service" ]]; then
+        cp -f "${src_dir}/just1knode-apply.path" "${systemd_dir}/just1knode-apply.path"
+        sed "s|/usr/local/bin/just1knode|${global_bin}|g; s|/etc/just1knode|${STATE_DIR}|g" \
+            "${src_dir}/just1knode-apply.service" > "${systemd_dir}/just1knode-apply.service"
+        sed -i "s|/etc/just1knode|${STATE_DIR}|g" "${systemd_dir}/just1knode-apply.path" 2>/dev/null || true
+    else
+        cat > "${systemd_dir}/just1knode-apply.path" <<EOF
+[Unit]
+Description=Just1kNode Pending Configuration Trigger Path
+
+[Path]
+PathExists=${STATE_DIR}/.apply_pending
+Unit=just1knode-apply.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        cat > "${systemd_dir}/just1knode-apply.service" <<EOF
+[Unit]
+Description=Just1kNode Apply Pending Configuration Changes
+After=network.target xray.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=${global_bin} apply-pending
+TimeoutStartSec=90
+EOF
+    fi
+    chmod 644 "${systemd_dir}/just1knode-apply.path" "${systemd_dir}/just1knode-apply.service" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now just1knode-apply.path >/dev/null 2>&1 || true
+    fi
 }
 
 deploy_xray_api_service() {
@@ -223,7 +278,9 @@ XRAY_API_KEY=${api_key}
 XRAY_GRPC_HOST=127.0.0.1
 XRAY_GRPC_PORT=10085
 CLIENTS_FILE_PATH=${STATE_DIR}/clients.json
-RELAYS_FILE_PATH=${STATE_DIR}/relays.json
+LINKS_FILE_PATH=${STATE_DIR}/links.json
+APPLY_PENDING_PATH=${STATE_DIR}/.apply_pending
+MODULE_ERRORS_PATH=${STATE_DIR}/module_errors.json
 EPOCH_FILE_PATH=${XRAY_API_LIB}/epoch.json
 STATE_FILE_PATH=${STATE_FILE}
 CDN_DOMAIN=${cdn_domain}
@@ -235,17 +292,27 @@ EOF
     chown -R xrayapi:xrayapi "${XRAY_API_LIB}" 2>/dev/null || true
     chmod 750 "${XRAY_API_LIB}"
 
-    # Права на чтение конфигурации Xray для пользователя xrayapi
-    chmod 755 /usr/local/etc/xray 2>/dev/null || true
-    chown root:xrayapi /usr/local/etc/xray/config.json 2>/dev/null || true
-    chmod 640 /usr/local/etc/xray/config.json 2>/dev/null || true
+    # Права на чтение/синхронизацию TLS сертификатов и конфигурации Xray для пользователя xrayapi
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local xray_cfg_dir="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
+    mkdir -p "${le_dir}/live" "${xray_cfg_dir}/tls" 2>/dev/null || true
+    chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
+    chmod 755 "$le_dir" 2>/dev/null || true
+    chmod 2775 "${le_dir}/live" 2>/dev/null || true
+    chmod 755 "$xray_cfg_dir" 2>/dev/null || true
+    chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
+    chmod 2775 "${xray_cfg_dir}/tls" 2>/dev/null || true
+    if [[ -f "${xray_cfg_dir}/config.json" ]]; then
+        chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
+        chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
+    fi
 
     # Права на каталог состояния для пользователя xrayapi (SGID 2770)
     chown -R root:xrayapi "${STATE_DIR}" 2>/dev/null || true
     chmod 2770 "${STATE_DIR}"
     [[ -f "${CLIENTS_FILE}" ]] && { chown root:xrayapi "${CLIENTS_FILE}" 2>/dev/null || true; chmod 660 "${CLIENTS_FILE}"; }
-    [[ -f "${RELAYS_FILE}" ]] && { chown root:xrayapi "${RELAYS_FILE}" 2>/dev/null || true; chmod 660 "${RELAYS_FILE}"; }
     [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 660 "${STATE_FILE}"; }
+    [[ -f "${LINKS_FILE:-${STATE_DIR}/links.json}" ]] && { chown root:xrayapi "${LINKS_FILE:-${STATE_DIR}/links.json}" 2>/dev/null || true; chmod 660 "${LINKS_FILE:-${STATE_DIR}/links.json}"; }
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "${STATE_DIR}" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -263,7 +330,6 @@ EOF
 Description=Just1kNode Xray API Agent
 After=network.target xray.service
 Wants=xray.service
-PartOf=xray.service
 StartLimitIntervalSec=30
 StartLimitBurst=15
 
@@ -274,7 +340,7 @@ Group=xrayapi
 UMask=0007
 WorkingDirectory=${XRAY_API_DIR}
 EnvironmentFile=${XRAY_API_CONFIG_ENV}
-ExecStart=${XRAY_API_DIR}/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5001 --workers 1 --log-level info
+ExecStart=${XRAY_API_DIR}/venv/bin/uvicorn app:app --host 127.0.0.1 --port 5001 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1 --log-level info
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -282,7 +348,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
-ReadWritePaths=${STATE_DIR} ${XRAY_API_LIB} /etc/letsencrypt /usr/local/etc/xray
+ReadWritePaths=${STATE_DIR} ${XRAY_API_LIB} -${LETSENCRYPT_DIR:-/etc/letsencrypt} -${XRAY_CONFIG_DIR:-/usr/local/etc/xray}
 
 [Install]
 WantedBy=multi-user.target
@@ -290,4 +356,5 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now xray-api
+    deploy_apply_trigger_units
 }
