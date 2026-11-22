@@ -336,7 +336,6 @@ change_role_guarded() {
     set_state_val "role" "unconfigured"
     set_state_json_val "allowed_ru_ips" "[]"
     save_links_json "{}"
-    _sync_nginx_main_stream_include "false"
     rm -f "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-ru-hub.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/just1k-ru-hub.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-origin.conf" \

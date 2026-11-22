@@ -114,8 +114,8 @@ update_xray_core() {
 
         log "Применение обновления..."
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
-        local xray_asset_dir
-        xray_asset_dir="$(dirname "$XRAY_BIN")"
+        local xray_asset_dir="${XRAY_SHARE_DIR:-/usr/local/share/xray}"
+        mkdir -p "$xray_asset_dir"
         for dat_f in geoip.dat geosite.dat; do
             if [[ -f "${tmp_extract}/${dat_f}" ]]; then
                 install -m 644 "${tmp_extract}/${dat_f}" "${xray_asset_dir}/${dat_f}" 2>/dev/null || true
@@ -451,8 +451,8 @@ update_node() {
                 ensure_xrayapi_user
                 chown -R root:xrayapi "$api_dir" 2>/dev/null || true
                 chmod -R 750 "$api_dir" 2>/dev/null || true
-                if declare -F deploy_xray_api_systemd_unit >/dev/null 2>&1; then
-                    deploy_xray_api_systemd_unit || true
+                if declare -F deploy_xray_api_service >/dev/null 2>&1; then
+                    deploy_xray_api_service || true
                 elif [[ -f "${api_dir}/xray-api.service" ]]; then
                     cp "${api_dir}/xray-api.service" /etc/systemd/system/xray-api.service 2>/dev/null || true
                     systemctl daemon-reload 2>/dev/null || true
