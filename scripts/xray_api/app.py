@@ -1151,6 +1151,16 @@ def update_node_links(
     payload = req.model_dump(exclude_none=True)
 
     lp = _links_file_path()
+    if lp.exists():
+        existing = _load_links_data()
+        if existing == payload:
+            return {
+                "status": "ok",
+                "role": role,
+                "apply_queued": False,
+                "unchanged": True,
+                "links": payload,
+            }
     try:
         _atomic_write_json(lp, payload, mode=0o660)
     except Exception as exc:

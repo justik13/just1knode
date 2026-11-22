@@ -195,10 +195,21 @@ apply_v2_hub_configuration() {
     role="$(get_state_val "role" "unconfigured")"
     [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]] || return 1
 
+    local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+    local xray_cfg_hash_before=""
+    if [[ -f "$xray_cfg" ]]; then
+        xray_cfg_hash_before="$(sha256sum "$xray_cfg" 2>/dev/null | awk '{print $1}')"
+    fi
+
     apply_node_sysctl_hardening
     _sync_all_role_certs
     if ! assemble_v2_hub_config; then
         return 1
+    fi
+
+    local xray_cfg_hash_after=""
+    if [[ -f "$xray_cfg" ]]; then
+        xray_cfg_hash_after="$(sha256sum "$xray_cfg" 2>/dev/null | awk '{print $1}')"
     fi
 
     if ! nginx -t >/dev/null 2>&1; then
@@ -212,6 +223,9 @@ apply_v2_hub_configuration() {
 
     if is_traffic_limit_exceeded; then
         warn "Лимит трафика исчерпан — запуск Xray пропущен (конфигурация обновлена)."
+    elif [[ -n "$xray_cfg_hash_before" && "$xray_cfg_hash_before" == "$xray_cfg_hash_after" ]] && systemctl is-active --quiet xray; then
+        ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
+        ping_xray_api_health
     else
         if ! systemctl restart xray || ! systemctl is-active --quiet xray; then
             warn "Не удалось перезапустить службу Xray с новой конфигурацией!"
