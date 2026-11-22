@@ -23,7 +23,6 @@ uv.lock
 *.key
 *.crt
 *.conf
-!awg0.example.conf
 
 # Editors
 .vscode/

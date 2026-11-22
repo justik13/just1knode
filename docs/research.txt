@@ -60,6 +60,9 @@
   https://telegra.ph/Perehod-na-SelfSteal-SNI-prostaya-i-gramotnaya-nastrojka-dlya-vashego-VPN-09-29
 
 ## Ядро Xray-core: релизы, спецификации и Pull Requests
+- Xray-core v26.11.9 (релиз 09.11.2026: публичный тест XDRIVE для Google Drive PR #7352, uTLS Chrome 155+ по умолчанию для обхода ТСПУ Issue #7259, mux.cool MutexWriter и maxConcurrency 128 коммит bb335c6, golang.org/x/net v0.62.0 PR #7312):
+  https://github.com/XTLS/Xray-core/releases/tag/v26.11.9
+  https://github.com/XTLS/Xray-core/pull/7352
 - Xray-core v26.10.31 (экстренное обновление безопасности: закрытие уязвимости Linux kernel IPv4 MPTCP; v26.10.29 отозван) и PR #5067 (VLESS Native Encryption ML-KEM-768):
   https://github.com/XTLS/Xray-core/releases/tag/v26.10.31
   https://github.com/XTLS/Xray-core/pull/5067

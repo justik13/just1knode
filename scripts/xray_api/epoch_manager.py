@@ -48,11 +48,14 @@ class EpochManager:
 
     def get_system_boot_id(self) -> Optional[str]:
         """Reads kernel random boot_id from /proc, with fallback to machine-id for containers."""
+        if self._last_boot_id:
+            return self._last_boot_id
         boot_id_file = Path("/proc/sys/kernel/random/boot_id")
         if boot_id_file.exists():
             try:
                 val = boot_id_file.read_text(encoding="utf-8").strip()
                 if val:
+                    self._last_boot_id = val
                     return val
             except Exception as e:
                 logger.debug("Failed to read boot_id: %s", e)
@@ -63,7 +66,9 @@ class EpochManager:
                 try:
                     val = p.read_text(encoding="utf-8").strip()
                     if val:
-                        return f"container-{val[:32]}"
+                        cached = f"container-{val[:32]}"
+                        self._last_boot_id = cached
+                        return cached
                 except Exception:
                     pass
         return "container-fallback-boot-id"
@@ -139,31 +144,34 @@ class EpochManager:
 
     @staticmethod
     def _is_xray_process(pid: int) -> bool:
-        """Verify whether a given process ID belongs to an Xray process."""
-        comm_path = Path(f"/proc/{pid}/comm")
-        if comm_path.exists():
-            try:
-                comm = comm_path.read_text(encoding="utf-8", errors="ignore").strip().lower()
-                if "xray" in comm:
-                    return True
-            except Exception:
-                pass
+        """Verify whether a given process ID belongs specifically to the Xray core binary."""
+        if pid <= 1 or pid == os.getpid():
+            return False
 
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         if cmdline_path.exists():
             try:
                 cmdline = cmdline_path.read_text(encoding="utf-8", errors="ignore").lower()
-                parts = cmdline.split("\0")
-                if parts and (parts[0].endswith("/xray") or parts[0] == "xray" or "xray" in parts[0]):
+                parts = [p for p in cmdline.split("\0") if p]
+                if parts:
+                    exe_name = Path(parts[0]).name
+                    if exe_name == "xray":
+                        return True
+                    # Reject wrappers/interpreters whose paths happen to contain "xray" (e.g. xray-api)
+                    return False
+            except Exception:
+                pass
+
+        comm_path = Path(f"/proc/{pid}/comm")
+        if comm_path.exists():
+            try:
+                comm = comm_path.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if comm == "xray":
                     return True
             except Exception:
                 pass
 
         return False
-
-    def _find_xray_process(self) -> Tuple[Optional[int], Optional[int]]:
-        """Alias for get_xray_process_info for backwards compatibility."""
-        return self.get_xray_process_info()
 
     def get_xray_process_info(self) -> Tuple[Optional[int], Optional[int]]:
         """
@@ -298,9 +306,13 @@ class EpochManager:
             if fcntl is not None and lock_fd is not None:
                 try:
                     fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-                    lock_fd.close()
                 except Exception:
                     pass
+                finally:
+                    try:
+                        lock_fd.close()
+                    except Exception:
+                        pass
 
     def get_current_running_epoch(self) -> Optional[str]:
         """

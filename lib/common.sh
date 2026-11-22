@@ -40,6 +40,9 @@ warn() {
 
 error() {
     echo -e "${RED}[✗] ОШИБКА:${NC} $1" >&2
+    if [[ "${JUST1KNODE_INTERACTIVE:-0}" == "1" ]]; then
+        return 1
+    fi
     exit 1
 }
 
@@ -99,10 +102,11 @@ install_base_deps() {
 
 install_nginx_if_missing() {
     if ! command -v nginx >/dev/null 2>&1; then
-        log "Установка Nginx и Certbot..."
+        log "Установка Nginx, mod-stream и Certbot..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
-        apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
+        apt-get install -y -qq nginx libnginx-mod-stream certbot python3-certbot-nginx ca-certificates || \
+            apt-get install -y -qq nginx certbot python3-certbot-nginx ca-certificates
         # Отключаем дефолтный сайт сразу после установки пакета для предотвращения конфликта портов
         local def_site="${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/default"
         if [[ -f "$def_site" || -L "$def_site" ]]; then
@@ -112,6 +116,24 @@ install_nginx_if_missing() {
         systemctl enable nginx 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
     fi
+}
+
+ensure_nginx_stream_module() {
+    install_nginx_if_missing
+    command -v nginx >/dev/null 2>&1 || return 1
+    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
+        return 0
+    fi
+    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|$)'; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        log "Доустановка модуля Nginx Stream (libnginx-mod-stream) для SNI-маршрутизации..."
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 || true
+    fi
+    compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1
 }
 
 # Обнаружение Docker-контейнера, слушающего хостовый TCP-порт 80
@@ -125,6 +147,7 @@ detect_host_port80_container() {
 }
 
 # Безопасная настройка UFW с детекцией SSH
+# shellcheck disable=SC2120
 configure_safe_ufw() {
     local ports=("$@")
     if ! command -v ufw >/dev/null 2>&1; then
@@ -204,48 +227,6 @@ configure_safe_ufw() {
     fi
 }
 
-# Обнаружение активных пользовательских сайтов в Nginx (для предотвращения случайного даунтайма)
-detect_existing_nginx_sites() {
-    local base_dir="${1:-/etc/nginx}"
-    local sites_found=()
-    local conf_dirs=("$base_dir/sites-enabled" "$base_dir/conf.d")
-
-    for cdir in "${conf_dirs[@]}"; do
-        [[ ! -d "$cdir" ]] && continue
-        while IFS= read -r -d '' f; do
-            local fname
-            fname="$(basename "$f")"
-            [[ "$fname" =~ ^(just1k|sub-wl|xhttp).* ]] && continue
-            [[ "$fname" =~ .*\.(bak|old|tmp|disabled)$ ]] && continue
-
-            if [[ "$fname" == "default" ]]; then
-                if grep -Eq '(^|[[:space:]])server_name[[:space:]]+[^_;]' "$f" 2>/dev/null; then
-                    local sname
-                    sname="$(grep -E '(^|[[:space:]])server_name[[:space:]]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*server_name[[:space:]]+//; s/;.*//')"
-                    sites_found+=("$fname ($sname)")
-                fi
-                continue
-            fi
-
-            if grep -Eq '(server_name|listen|proxy_pass)[[:space:]]+' "$f" 2>/dev/null; then
-                local sname
-                sname="$(grep -E '(^|[[:space:]])server_name[[:space:]]+' "$f" 2>/dev/null | head -n1 | sed -E 's/.*server_name[[:space:]]+//; s/;.*//' || echo "")"
-                if [[ -n "$sname" && "$sname" != "_" ]]; then
-                    sites_found+=("$fname ($sname)")
-                else
-                    sites_found+=("$fname")
-                fi
-            fi
-        done < <(find "$cdir" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
-    done
-
-    if [[ ${#sites_found[@]} -gt 0 ]]; then
-        printf '%s\n' "${sites_found[@]}"
-        return 0
-    fi
-    return 1
-}
-
 validate_ipv4() {
     local ip="${1:-}"
     [[ -z "$ip" ]] && return 1
@@ -259,31 +240,6 @@ validate_ipv4() {
         done
         [[ "$ip" == "0.0.0.0" || "$ip" == "255.255.255.255" ]] && return 1
         return 0
-    fi
-}
-
-check_domain_syntax() {
-    local domain="${1:-}"
-    [[ -z "$domain" ]] && { echo "EMPTY"; return 0; }
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c "
-import sys, re
-d = sys.argv[1].strip()
-if re.search(r'[\u0400-\u04FF]', d):
-    print('CYRILLIC')
-elif not re.match(r'^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', d):
-    print('INVALID_FQDN')
-else:
-    print('OK')
-" "$domain" 2>/dev/null || echo "OK"
-    else
-        if [[ "$domain" =~ [а-яА-ЯёЁ] ]]; then
-            echo "CYRILLIC"
-        elif [[ ! "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-            echo "INVALID_FQDN"
-        else
-            echo "OK"
-        fi
     fi
 }
 
@@ -374,24 +330,34 @@ get_public_ipv4() {
     return 1
 }
 
+ping_xray_api_health() {
+    local api_key=""
+    if [[ -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+        api_key="$(grep -m1 '^XRAY_API_KEY=' "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    if [[ -n "$api_key" ]]; then
+        curl -sf -H "X-API-Key: ${api_key}" http://127.0.0.1:5001/v1/health >/dev/null 2>&1 || true
+    fi
+}
+
 ensure_xray_api_healthy() {
     local force="${1:-0}"
-    # Функция вызывается на узлах, где установлен агент xray-api (Origin / модульный узел с VLESS).
+    # Функция вызывается на узлах, где установлен агент xray-api (ru_hub / модульный узел с VLESS).
     if [[ ! -f /etc/systemd/system/xray-api.service && ! -f /lib/systemd/system/xray-api.service ]]; then
         return 0
     fi
 
-    # На узлах Relay без VLESS служба xray-api не используется и не должна запускаться
-    local role cur_has_v
-    role="$(get_state_val "role" "")"
-    cur_has_v="$(get_state_val "has_vless" "0")"
-    if [[ "$force" != "1" && "$role" != "origin" && "$cur_has_v" != "1" ]]; then
+    # В v2 агент xray-api работает на всех управляемых узлах (при наличии установленного конфига/роли)
+    local role
+    role="$(get_state_val "role" "unconfigured")"
+    if [[ "$force" != "1" && "$role" != "ru_hub" && "$role" != "eu_hub" && "$role" != "exit_node" && ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
         return 0
     fi
 
     # 1. Если служба уже активна (systemd автоматически перезапустил её через PartOf=xray.service),
     # повторный restart категорически не вызываем, чтобы не провоцировать start-limit-hit.
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        ping_xray_api_health
         return 0
     fi
 
@@ -421,6 +387,7 @@ ensure_xray_api_healthy() {
 
     # 5. Проверяем финальный статус: функция возвращает 0 только при реальной активности службы
     if systemctl is-active --quiet xray-api 2>/dev/null; then
+        ping_xray_api_health
         return 0
     fi
     return 1
@@ -466,17 +433,6 @@ EOF
             echo "nf_conntrack" >> /etc/modules-load.d/just1knode.conf 2>/dev/null || true
         fi
         sysctl -p "$conf_path" >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.icmp_echo_ignore_all=1 >/dev/null 2>&1 || true
-        sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_fin_timeout=15 >/dev/null 2>&1 || true
-        sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.ip_local_port_range="32768 65535" >/dev/null 2>&1 || true
-        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
     fi
     local ipv6_curr
     ipv6_curr="$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo "0")"
@@ -542,15 +498,60 @@ is_ssh_port() {
 }
 
 # Автоматическое приведение периметра UFW и системных настроек к эталонному закрытому состоянию (Stealth)
+_ufw_delete_rules_by_comment() {
+    local match_comment="$1"
+    [[ -n "$match_comment" ]] || return 0
+    command -v ufw >/dev/null 2>&1 || return 0
+    ufw status 2>/dev/null | grep -qi "Status: active" || return 0
+
+    local stale_nums=()
+    local rule_line r_n r_body
+    while IFS= read -r rule_line; do
+        [[ -z "$rule_line" ]] && continue
+        if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+            r_n="${BASH_REMATCH[1]}"
+            r_body="${BASH_REMATCH[2]}"
+            if echo "$r_body" | grep -Fqi "$match_comment"; then
+                stale_nums+=("$r_n")
+            fi
+        fi
+    done < <(ufw status numbered 2>/dev/null || true)
+
+    if [[ ${#stale_nums[@]} -gt 0 ]]; then
+        local rn_s
+        for rn_s in $(printf "%s\n" "${stale_nums[@]}" | sort -rn -u); do
+            [[ -n "$rn_s" ]] && (ufw --force delete "$rn_s" >/dev/null 2>&1 || echo "y" | ufw delete "$rn_s" >/dev/null 2>&1 || true)
+        done
+    fi
+}
+
 heal_node_firewall_and_stealth() {
     # 1. Применяем системное скрытие (IPv6 leak protection + ICMP stealth)
     apply_node_sysctl_hardening
 
-    if ! command -v ufw >/dev/null 2>&1 || ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+    # 2. Авто-активация UFW при необходимости (Zero-Lockout стандарт)
+    if ! command -v ufw >/dev/null 2>&1; then
+        apt-get install -y -qq ufw >/dev/null 2>&1 || true
+    fi
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        warn "Фаервол UFW недоступен в системе. Пропуск настройки правил фаервола."
         return 0
     fi
 
-    migrate_legacy_state
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        # shellcheck disable=SC2119
+        configure_safe_ufw || {
+            error "КРИТИЧЕСКАЯ ОШИБКА: Не удалось безопасно инициализировать UFW во избежание потери SSH."
+            return 1
+        }
+    fi
+
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        warn "Фаервол UFW не в состоянии active. Пропуск настройки правил."
+        return 0
+    fi
+
     local role
     role="$(get_state_val "role" "")"
 
@@ -578,120 +579,163 @@ heal_node_firewall_and_stealth() {
     fi
     ufw default allow outgoing >/dev/null 2>&1 || true
 
-    # 3. Очистка устаревшего порта 8443 (Amnezia) во всех ролях при условии, что на нем не слушает SSH
-    if ! is_ssh_port "8443"; then
-        if ufw status 2>/dev/null | grep -E "8443(/tcp)?[[:space:]]+ALLOW" -q; then
-            ufw delete allow 8443/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8443 >/dev/null 2>&1 || true
-            warn "Фаервол UFW: устранена уязвимость — удалено устаревшее правило на порт 8443."
+    # 3. Панель API узла (8444/tcp строго по BOT_IP — Fail-Closed)
+    local cur_bot_ip
+    cur_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+
+    if ! is_ssh_port "8444"; then
+        if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+            ufw delete allow 8444/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8444 >/dev/null 2>&1 || true
+            warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
         fi
     fi
 
-    # 4. Origin API (роль origin)
-    if [[ "$role" == "origin" ]]; then
-        local origin_bot_ip
-        origin_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    if [[ -n "$cur_bot_ip" && "$cur_bot_ip" != "any" && "$cur_bot_ip" != "-" ]] && (validate_ip "$cur_bot_ip" || validate_ipv4 "$cur_bot_ip"); then
+        local bot_ip_re="${cur_bot_ip//./\\.}"
+        if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${bot_ip_re}(/32)?([[:space:]]|$)" | grep -q "8444"; then
+            if ufw allow from "$cur_bot_ip" to any port 8444 proto tcp comment "just1knode api" >/dev/null 2>&1; then
+                log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${cur_bot_ip})"
+            fi
+        fi
+    else
+        warn "BOT_IP не задан в state.json. Порт API (8444) закрыт от мира (Fail-Closed)."
+    fi
 
-        # Zero-Lockout: не удаляем 8444, если на нем слушает SSH
-        if ! is_ssh_port "8444"; then
-            if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8444 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено глобальное правило на порт 8444."
+    # 5. Роли v2 периметра (Zero-Trust: 443 для мира открыт ТОЛЬКО на ru_hub с включённым транспортом)
+    local links_file="${LINKS_FILE:-${STATE_DIR:-/etc/just1knode}/links.json}"
+    local state_file="${STATE_FILE:-/etc/just1knode/state.json}"
+
+    _ufw_sync_whitelist_port() {
+        local wl_port="$1"
+        local wl_comment="$2"
+        local mode="$3" # eu_hub | exit_node
+        if ! is_ssh_port "$wl_port"; then
+            if ufw status 2>/dev/null | grep -E "(^|[[:space:]])${wl_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw delete allow "${wl_port}/tcp" >/dev/null 2>&1 || true
+                ufw delete allow "${wl_port}" >/dev/null 2>&1 || true
+                warn "Фаервол UFW: устранена уязвимость — удалён публичный доступ к порту ${wl_port} (${mode})."
             fi
         fi
 
-        # Проверка доверенного BOT_IP из state.json (Fail-Closed)
-        if [[ -n "$origin_bot_ip" && "$origin_bot_ip" != "any" && "$origin_bot_ip" != "-" ]] && (validate_ip "$origin_bot_ip" || validate_ipv4 "$origin_bot_ip"); then
-            if ! ufw status 2>/dev/null | grep -F "$origin_bot_ip" | grep -q "8444"; then
-                if ufw allow from "$origin_bot_ip" to any port 8444 proto tcp comment "just1knode origin api" >/dev/null 2>&1; then
-                    log "Фаервол UFW: подтвержден доступ к порту 8444 для BOT_IP (${origin_bot_ip})"
+        local allowed_ips=()
+        local ip_cand
+        while IFS= read -r ip_cand; do
+            [[ -n "$ip_cand" ]] && allowed_ips+=("$ip_cand")
+        done < <(python3 -c '
+import json, sys
+
+state_path, links_path, mode = sys.argv[1:4]
+def load_d(p):
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+st = load_d(state_path)
+lk = load_d(links_path)
+seen = []
+
+def add_ip(v):
+    s = str(v or "").strip()
+    if s and s != "-" and s not in seen:
+        seen.append(s)
+
+keys = ("allowed_ru_ips",) if mode == "eu_hub" else ("allowed_hub_ips", "allowed_ru_ips", "eu_hub_ips")
+for src in (lk, st):
+    for k in keys:
+        vals = src.get(k)
+        if isinstance(vals, list):
+            for x in vals:
+                if isinstance(x, dict):
+                    add_ip(x.get("ip"))
+                else:
+                    add_ip(x)
+
+if mode == "eu_hub":
+    for arr_k in ("incoming_ru_hubs", "incoming_hubs"):
+        for item in (lk.get(arr_k) or []):
+            if isinstance(item, dict):
+                add_ip(item.get("ip"))
+else:
+    for arr_k in ("incoming_hubs", "incoming_eu_hubs"):
+        for item in (lk.get(arr_k) or []):
+            if isinstance(item, dict):
+                add_ip(item.get("ip"))
+
+for ip in seen:
+    print(ip)
+' "$state_file" "$links_file" "$mode" 2>/dev/null || true)
+
+        # Отзыв устаревших правил UFW этого типа, которых больше нет в белом списке
+        local stale_nums=()
+        local rule_line r_n r_body
+        while IFS= read -r rule_line; do
+            [[ -z "$rule_line" ]] && continue
+            if [[ "$rule_line" =~ ^\[[[:space:]]*([0-9]+)\][[:space:]]+(.*)$ ]]; then
+                r_n="${BASH_REMATCH[1]}"
+                r_body="${BASH_REMATCH[2]}"
+                if echo "$r_body" | grep -Fq "$wl_comment"; then
+                    local keep=0 a_ip
+                    for a_ip in "${allowed_ips[@]}"; do
+                        local a_ip_re="${a_ip//./\\.}"
+                        if echo "$r_body" | grep -Eq "(^|[[:space:]])${a_ip_re}(/32)?([[:space:]]|$)"; then
+                            keep=1
+                            break
+                        fi
+                    done
+                    [[ "$keep" -eq 0 ]] && stale_nums+=("$r_n")
                 fi
             fi
-        else
-            warn "BOT_IP не задан в state.json. Порт Origin API (8444) закрыт от мира (Fail-Closed)."
+        done < <(ufw status numbered 2>/dev/null || true)
+
+        if [[ ${#stale_nums[@]} -gt 0 ]]; then
+            local rn_s
+            for rn_s in $(printf "%s\n" "${stale_nums[@]}" | sort -rn -u); do
+                [[ -n "$rn_s" ]] && echo "y" | ufw delete "$rn_s" >/dev/null 2>&1 || true
+            done
+        fi
+
+        local aip aip_re
+        for aip in "${allowed_ips[@]}"; do
+            if validate_ipv4 "$aip" || validate_ip "$aip"; then
+                aip_re="${aip//./\\.}"
+                if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${aip_re}(/32)?([[:space:]]|$)" | grep -q "$wl_port"; then
+                    ufw allow from "$aip" to any port "$wl_port" proto tcp comment "$wl_comment" >/dev/null 2>&1 || true
+                fi
+            fi
+        done
+    }
+
+    if [[ "$role" == "ru_hub" ]]; then
+        if is_module_enabled "vless_tls" 2>/dev/null || is_module_enabled "vless_xhttp" 2>/dev/null; then
+            if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
+                ufw allow 443/tcp comment "just1knode hub ingress" >/dev/null 2>&1 || true
+            fi
+        elif ! is_ssh_port "443"; then
+            _ufw_delete_rules_by_comment "just1knode hub ingress"
+        fi
+    elif [[ "$role" == "eu_hub" ]]; then
+        local bridge_port
+        bridge_port="$(get_state_val "relay_port" "443")"
+        [[ "$bridge_port" =~ ^[0-9]+$ ]] || bridge_port="443"
+        _ufw_sync_whitelist_port "$bridge_port" "just1knode eu_hub bridge" "eu_hub"
+    elif [[ "$role" == "exit_node" ]]; then
+        _ufw_sync_whitelist_port "443" "just1knode exit ingress" "exit_node"
+    else
+        # Не сконфигурирован: удаляем правила ingress/bridge Just1kNode, если остались
+        if ! is_ssh_port "443"; then
+            _ufw_delete_rules_by_comment "just1knode hub ingress"
+            _ufw_delete_rules_by_comment "just1knode eu_hub bridge"
+            _ufw_delete_rules_by_comment "just1knode exit ingress"
         fi
     fi
 
-    # 5. Relay туннель (роль relay либо has_relay)
-    local cur_has_relay
-    cur_has_relay="$(get_state_val "has_relay" "0")"
-    if [[ "$role" == "relay" || "$cur_has_relay" == "1" ]]; then
-        local relay_port origin_ip
-        relay_port="$(get_state_val "relay_port" 2>/dev/null || true)"
-        origin_ip="$(get_state_val "origin_ip" 2>/dev/null || true)"
-
-        if [[ -n "$relay_port" && "$relay_port" =~ ^[0-9]+$ ]]; then
-            # Zero-Lockout: не удаляем правило, если на нем слушает SSH
-            if ! is_ssh_port "$relay_port"; then
-                if ufw status 2>/dev/null | grep -E "${relay_port}(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                    ufw delete allow "${relay_port}/tcp" >/dev/null 2>&1 || true
-                    ufw delete allow "${relay_port}" >/dev/null 2>&1 || true
-                    warn "Фаервол UFW: устранена уязвимость — удалено публичное правило на порт Relay туннеля (${relay_port})."
-                fi
-            fi
-
-            if [[ -n "$origin_ip" ]] && validate_ipv4 "$origin_ip"; then
-                if ! ufw status 2>/dev/null | grep -F "$origin_ip" | grep -q "$relay_port"; then
-                    if ufw allow from "$origin_ip" to any port "$relay_port" proto tcp comment "just1knode relay tunnel" >/dev/null 2>&1; then
-                        log "Фаервол UFW: подтвержден доступ к Relay порту ${relay_port} строго для ORIGIN_IP (${origin_ip})"
-                    fi
-                fi
-            fi
-        fi
-    fi
-
-    # 6. VLESS Direct и API (роль vless либо has_vless)
-    local cur_has_vless
-    cur_has_vless="$(get_state_val "has_vless" "0")"
-    if [[ "$role" == "vless" || "$cur_has_vless" == "1" || -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" ]]; then
-        # Клиентский вход VLESS TLS на порту 443
-        if ! ufw status 2>/dev/null | grep -E "443(/tcp)?[[:space:]]+ALLOW" -q; then
-            ufw allow 443/tcp comment "just1knode vless direct" >/dev/null 2>&1 || true
-        fi
-
-        # Защита xray-api (порт 8444)
-        if ! is_ssh_port "8444"; then
-            if ufw status 2>/dev/null | grep -E "8444(/tcp)?[[:space:]]+ALLOW[[:space:]]+(Anywhere|0\.0\.0\.0/0|::/0)" -q; then
-                ufw delete allow 8444/tcp >/dev/null 2>&1 || true
-                ufw delete allow 8444 >/dev/null 2>&1 || true
-                warn "Фаервол UFW: устранена уязвимость — удалено публичное правило на порт 8444."
-            fi
-        fi
-
-        local v_bot_ip
-        v_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
-        if [[ -f "/etc/nginx/sites-enabled/just1k-vless-api.conf" || "$cur_has_vless" == "1" || "$role" == "vless" ]]; then
-            if [[ -n "$v_bot_ip" && "$v_bot_ip" != "any" && "$v_bot_ip" != "0.0.0.0/0" && "$v_bot_ip" != "-" ]] && (validate_ip "$v_bot_ip" || validate_ipv4 "$v_bot_ip"); then
-                if ! ufw status 2>/dev/null | grep -F "$v_bot_ip" | grep -q "8444"; then
-                    ufw allow from "$v_bot_ip" to any port 8444 proto tcp comment "just1knode xray-api bot_ip" >/dev/null 2>&1 || true
-                fi
-            fi
-        fi
-    fi
-
-    # 7. Защита веб-периметра: закрытие порта 80 на узлах без внешних веб-сервисов
-    # На нодах без роли Origin и без локального контейнера (Caddy) порт 80 не должен быть открыт наружу.
-    # Фолбэк Nginx слушает строго на 127.0.0.1:80 (локальный fallback ядра Xray).
-    if [[ "$role" != "origin" ]]; then
-        local has_external_sites=0
-        if command -v nginx >/dev/null 2>&1; then
-            if [[ -n "$(detect_existing_nginx_sites 2>/dev/null || true)" ]]; then
-                has_external_sites=1
-            fi
-        fi
-        if [[ "$has_external_sites" == "0" ]] && \
-           [[ ! -f /run/just1knode_ufw_opened_80 ]] && \
-           [[ -z "$(detect_host_port80_container 2>/dev/null || true)" ]] && \
-           ! (command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "just1kbot_caddy"); then
-            if ! is_ssh_port "80"; then
-                if ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
-                    ufw delete allow 80/tcp >/dev/null 2>&1 || true
-                    ufw delete allow 80 >/dev/null 2>&1 || true
-                    log "Фаервол UFW: закрыт неиспользуемый публичный порт 80 (маскировка Zero-Signature)."
-                fi
-            fi
-        fi
+    # 6. Защита веб-периметра: удаление временных правил certbot для Just1kNode
+    if ! command -v certbot >/dev/null 2>&1 || [[ ! -f /run/just1knode_certbot_active ]]; then
+        _ufw_delete_rules_by_comment "just1knode certbot verification"
     fi
 }
 
@@ -699,10 +743,8 @@ sync_xhttp_upstreams_conf() {
     local conf_d="${NGINX_CONF_DIR:-/etc/nginx}/conf.d"
     local upstreams_file="${conf_d}/just1k-xhttp-upstreams.conf"
     local cfg_file="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-    local relays_file="${RELAYS_FILE:-${STATE_DIR:-/etc/just1knode}/relays.json}"
 
     mkdir -p "$conf_d" 2>/dev/null || true
-    manifest_track_file "$upstreams_file" 2>/dev/null || true
     create_backup "$upstreams_file" 2>/dev/null || true
 
     if ! python3 -c "
@@ -710,7 +752,6 @@ import json, os, tempfile, sys, re
 
 upstreams_file = sys.argv[1]
 cfg_file = sys.argv[2]
-relays_file = sys.argv[3]
 
 xray_inbound_ports = {}
 if os.path.exists(cfg_file):
@@ -725,16 +766,6 @@ if os.path.exists(cfg_file):
     except Exception as e:
         sys.stderr.write('Error parsing Xray config: ' + str(e) + '\\n')
         sys.exit(1)
-
-relays = []
-if os.path.exists(relays_file):
-    try:
-        with open(relays_file, 'r', encoding='utf-8') as f:
-            relays = json.load(f)
-            if not isinstance(relays, list):
-                relays = []
-    except Exception:
-        relays = []
 
 def_port = xray_inbound_ports.get('just1k-wl-default', 8003)
 lines = [
@@ -751,41 +782,6 @@ lines = [
 ]
 
 seen_codes = set()
-for r in relays:
-    if not isinstance(r, dict):
-        continue
-    code = r.get('code')
-    if not code:
-        continue
-    code_lower = str(code).strip().lower()
-    if not code_lower or not re.fullmatch(r'^[a-z0-9_-]+$', code_lower) or code_lower in seen_codes:
-        continue
-    in_tag = r.get('inbound_tag') or f'just1k-wl-inbound-{code_lower}'
-    port = xray_inbound_ports.get(in_tag)
-    if not port:
-        for t, p in xray_inbound_ports.items():
-            if t.lower() == f'just1k-wl-inbound-{code_lower}':
-                port = p
-                break
-    # Источник истины — секция inbounds в config.json (Desired-State).
-    # Релеи, отсутствующие в Xray, не получают upstream (защита от устаревших записей в relays.json).
-    if not port and not os.path.exists(cfg_file):
-        port = r.get('inbound_port')
-    if port:
-        seen_codes.add(code_lower)
-        try:
-            port_num = int(port)
-            lines.append(f'upstream xray_xhttp_relay_{code_lower} {{')
-            lines.append(f'    server 127.0.0.1:{port_num};')
-            lines.append('    keepalive 128;')
-            lines.append('    keepalive_requests 100000;')
-            lines.append('    keepalive_timeout 300s;')
-            lines.append('}')
-            lines.append('')
-        except Exception:
-            continue
-
-# Защита в глубину: если релеи есть в Xray inbounds, но relays.json временно пуст
 for t, p in xray_inbound_ports.items():
     if t.startswith('just1k-wl-inbound-'):
         c_tag = t[len('just1k-wl-inbound-'):].strip().lower()
@@ -793,7 +789,28 @@ for t, p in xray_inbound_ports.items():
             try:
                 port_num = int(p)
                 seen_codes.add(c_tag)
+                lines.append(f'upstream xray_xhttp_loc_{c_tag} {{')
+                lines.append(f'    server 127.0.0.1:{port_num};')
+                lines.append('    keepalive 128;')
+                lines.append('    keepalive_requests 100000;')
+                lines.append('    keepalive_timeout 300s;')
+                lines.append('}')
+                lines.append('')
                 lines.append(f'upstream xray_xhttp_relay_{c_tag} {{')
+                lines.append(f'    server 127.0.0.1:{port_num};')
+                lines.append('    keepalive 128;')
+                lines.append('    keepalive_requests 100000;')
+                lines.append('    keepalive_timeout 300s;')
+                lines.append('}')
+                lines.append('')
+            except Exception:
+                continue
+    elif t.startswith('just1k-wl-') and t not in ('just1k-wl-default', 'just1k-wl-api-grpc'):
+        m_tag = t[len('just1k-wl-'):].strip().lower()
+        if m_tag and re.fullmatch(r'^[a-z0-9_-]+$', m_tag):
+            try:
+                port_num = int(p)
+                lines.append(f'upstream xray_xhttp_{m_tag} {{')
                 lines.append(f'    server 127.0.0.1:{port_num};')
                 lines.append('    keepalive 128;')
                 lines.append('    keepalive_requests 100000;')
@@ -816,7 +833,7 @@ try:
     os.chmod(upstreams_file, 0o644)
 except Exception:
     pass
-" "$upstreams_file" "$cfg_file" "$relays_file"; then
+" "$upstreams_file" "$cfg_file"; then
         warn "Не удалось сгенерировать Nginx upstreams для XHTTP ($upstreams_file)"
         return 1
     fi
@@ -825,65 +842,36 @@ except Exception:
 
 detect_node_country_code() {
     local ip="${1:-}"
-    if [[ -z "$ip" ]]; then
+    if [[ -z "$ip" || "$ip" == "127.0.0.1" ]]; then
         return 1
     fi
 
+    # Если задано в переменной окружения
+    if [[ -n "${JUST1KNODE_COUNTRY:-}" && "${#JUST1KNODE_COUNTRY}" -eq 2 ]]; then
+        echo "${JUST1KNODE_COUNTRY,,}"
+        return 0
+    fi
+
+    # Последовательный запрос без зависаний
     local c_code=""
     c_code="$(python3 -c "
 import urllib.request, json, sys
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 ip = sys.argv[1]
-
-def fetch_ip_api():
+urls = [f'https://ipwho.is/{ip}', f'https://ipinfo.io/{ip}/json']
+for u in urls:
     try:
-        req = urllib.request.Request(f'http://ip-api.com/json/{ip}?fields=status,countryCode', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
+        req = urllib.request.Request(u, headers={'User-Agent': 'curl/7.88.1'})
+        with urllib.request.urlopen(req, timeout=3.0) as r:
             d = json.loads(r.read().decode('utf-8'))
-            if d.get('status') == 'success':
-                return d.get('countryCode', '').lower()
+            c = d.get('country_code') or d.get('country')
+            if c and len(c) == 2:
+                print(c.lower())
+                sys.exit(0)
     except Exception:
-        pass
-    return None
-
-def fetch_ipwho():
-    try:
-        req = urllib.request.Request(f'https://ipwho.is/{ip}', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
-            d = json.loads(r.read().decode('utf-8'))
-            if d.get('success'):
-                return d.get('country_code', '').lower()
-    except Exception:
-        pass
-    return None
-
-def fetch_ipinfo():
-    try:
-        req = urllib.request.Request(f'https://ipinfo.io/{ip}/json', headers={'User-Agent': 'curl/7.88.1'})
-        with urllib.request.urlopen(req, timeout=2.5) as r:
-            d = json.loads(r.read().decode('utf-8'))
-            return d.get('country', '').lower()
-    except Exception:
-        pass
-    return None
-
-results = []
-with ThreadPoolExecutor(max_workers=3) as ex:
-    futures = [ex.submit(fetch_ip_api), ex.submit(fetch_ipwho), ex.submit(fetch_ipinfo)]
-    for f in as_completed(futures):
-        res = f.result()
-        if res and len(res) == 2 and res != 'ru':
-            results.append(res)
-
-if results:
-    counts = Counter(results)
-    most_common, _ = counts.most_common(1)[0]
-    print(most_common)
+        continue
 " "$ip" 2>/dev/null || true)"
 
-    if [[ -n "$c_code" && "$c_code" != "ru" && "${#c_code}" -eq 2 ]]; then
+    if [[ -n "$c_code" && "${#c_code}" -eq 2 ]]; then
         echo "$c_code"
         return 0
     fi
@@ -891,218 +879,17 @@ if results:
     return 1
 }
 
-normalize_country_code() {
-    local raw="${1:-}"
-    if [[ "$raw" == *"/"* || "$raw" == *"\\"* || "$raw" == *".."* ]]; then
-        echo ""
-        return 1
-    fi
-    local val="${raw,,}"
-    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
-    case "$val" in
-        de|germany|германия|"de germany"|"de германия") echo "de" ;;
-        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "nl" ;;
-        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "fi" ;;
-        se|sweden|швеция|"se sweden"|"se швеция") echo "se" ;;
-        us|usa|сша|"us usa"|"us сша") echo "us" ;;
-        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "gb" ;;
-        fr|france|франция|"fr france"|"fr франция") echo "fr" ;;
-        tr|turkey|турция|"tr turkey"|"tr турция") echo "tr" ;;
-        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "kz" ;;
-        pl|poland|польша|"pl poland"|"pl польша") echo "pl" ;;
-        at|austria|австрия|"at austria"|"at австрия") echo "at" ;;
-        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "ch" ;;
-        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "ee" ;;
-        es|spain|испания|"es spain"|"es испания") echo "es" ;;
-        it|italy|италия|"it italy"|"it италия") echo "it" ;;
-        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "cz" ;;
-        no|norway|норвегия|"no norway"|"no норвегия") echo "no" ;;
-        dk|denmark|дания|"dk denmark"|"dk дания") echo "dk" ;;
-        is|iceland|исландия|"is iceland"|"is исландия") echo "is" ;;
-        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "lt" ;;
-        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "lv" ;;
-        ro|romania|румыния|"ro romania"|"ro румыния") echo "ro" ;;
-        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "bg" ;;
-        gr|greece|греция|"gr greece"|"gr греция") echo "gr" ;;
-        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "hu" ;;
-        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "sk" ;;
-        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "ie" ;;
-        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "pt" ;;
-        jp|japan|япония|"jp japan"|"jp япония") echo "jp" ;;
-        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "sg" ;;
-        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "ae" ;;
-        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "ge" ;;
-        am|armenia|армения|"am armenia"|"am армения") echo "am" ;;
-        *)
-            if [[ "$val" =~ ^[a-z]{2}$ ]]; then
-                echo "$val"
-            else
-                local clean
-                clean="$(echo "$val" | tr -cd '[:alnum:]')"
-                echo "${clean:0:2}"
-            fi
-            ;;
-    esac
-}
-
-get_country_display_name() {
-    local raw="${1:-}"
-    local val="${raw,,}"
-    val="$(echo "$val" | tr -d '[:punct:]' | xargs)"
-    case "$val" in
-        de|germany|германия|"de germany"|"de германия") echo "🇩🇪 Германия" ;;
-        nl|netherlands|нидерланды|"nl netherlands"|"nl нидерланды") echo "🇳🇱 Нидерланды" ;;
-        fi|finland|финляндия|"fi finland"|"fi финляндия") echo "🇫🇮 Финляндия" ;;
-        se|sweden|швеция|"se sweden"|"se швеция") echo "🇸🇪 Швеция" ;;
-        us|usa|сша|"us usa"|"us сша") echo "🇺🇸 США" ;;
-        gb|uk|britain|великобритания|"gb britain"|"gb великобритания") echo "🇬🇧 Великобритания" ;;
-        fr|france|франция|"fr france"|"fr франция") echo "🇫🇷 Франция" ;;
-        tr|turkey|турция|"tr turkey"|"tr турция") echo "🇹🇷 Турция" ;;
-        kz|kazakhstan|казахстан|"kz kazakhstan"|"kz казахстан") echo "🇰🇿 Казахстан" ;;
-        pl|poland|польша|"pl poland"|"pl польша") echo "🇵🇱 Польша" ;;
-        at|austria|австрия|"at austria"|"at австрия") echo "🇦🇹 Австрия" ;;
-        ch|switzerland|швейцария|"ch switzerland"|"ch швейцария") echo "🇨🇭 Швейцария" ;;
-        ee|estonia|эстония|"ee estonia"|"ee эстония") echo "🇪🇪 Эстония" ;;
-        es|spain|испания|"es spain"|"es испания") echo "🇪🇸 Испания" ;;
-        it|italy|италия|"it italy"|"it италия") echo "🇮🇹 Италия" ;;
-        cz|czechia|чехия|"cz czechia"|"cz чехия") echo "🇨🇿 Чехия" ;;
-        no|norway|норвегия|"no norway"|"no норвегия") echo "🇳🇴 Норвегия" ;;
-        dk|denmark|дания|"dk denmark"|"dk дания") echo "🇩🇰 Дания" ;;
-        is|iceland|исландия|"is iceland"|"is исландия") echo "🇮🇸 Исландия" ;;
-        lt|lithuania|литва|"lt lithuania"|"lt литва") echo "🇱🇹 Литва" ;;
-        lv|latvia|латвия|"lv latvia"|"lv латвия") echo "🇱🇻 Латвия" ;;
-        ro|romania|румыния|"ro romania"|"ro румыния") echo "🇷🇴 Румыния" ;;
-        bg|bulgaria|болгария|"bg bulgaria"|"bg болгария") echo "🇧🇬 Болгария" ;;
-        gr|greece|греция|"gr greece"|"gr греция") echo "🇬🇷 Греция" ;;
-        hu|hungary|венгрия|"hu hungary"|"hu венгрия") echo "🇭🇺 Венгрия" ;;
-        sk|slovakia|словакия|"sk slovakia"|"sk словакия") echo "🇸🇰 Словакия" ;;
-        ie|ireland|ирландия|"ie ireland"|"ie ирландия") echo "🇮🇪 Ирландия" ;;
-        pt|portugal|португалия|"pt portugal"|"pt португалия") echo "🇵🇹 Португалия" ;;
-        jp|japan|япония|"jp japan"|"jp япония") echo "🇯🇵 Япония" ;;
-        sg|singapore|сингапур|"sg singapore"|"sg сингапур") echo "🇸🇬 Сингапур" ;;
-        ae|uae|оаэ|"ae uae"|"ae оаэ") echo "🇦🇪 ОАЭ" ;;
-        ge|georgia|грузия|"ge georgia"|"ge грузия") echo "🇬🇪 Грузия" ;;
-        am|armenia|армения|"am armenia"|"am армения") echo "🇦🇲 Армения" ;;
-        *)
-            local norm
-            norm="$(normalize_country_code "$raw")"
-            if [[ -n "$norm" && "$norm" != "$val" && "$norm" != "$raw" ]]; then
-                get_country_display_name "$norm"
-            elif [[ -n "$raw" ]]; then
-                echo "$raw"
-            else
-                echo "Зарубежный шлюз"
-            fi
-            ;;
-    esac
-}
-
-resolve_relay_geo_interactive() {
-    local ip="${1:-}"
-    local fallback="${2:-exit}"
-    local code=""
-    local country=""
-
-    if [[ -n "$ip" ]]; then
-        code="$(detect_node_country_code "$ip" 2>/dev/null || true)"
-    fi
-    if [[ -z "$code" ]]; then
-        code="$fallback"
-    fi
-
-    code="$(normalize_country_code "$code")"
-    country="$(get_country_display_name "$code")"
-
-    if [[ -t 0 ]]; then
-        info "Определена геолокация Relay: ${BOLD}${country}${NC} (код: ${CYAN}${code}${NC})" >&2
-        local confirm=""
-        read -rp "Использовать эту локацию? [Y/n]: " confirm >&2 || true
-        if [[ "$confirm" =~ ^[NnНн]$ ]]; then
-            local custom_code=""
-            read -rp "Введите двухбуквенный код или название страны (например: se, fi, de): " custom_code >&2 || true
-            if [[ -n "$custom_code" ]]; then
-                code="$(normalize_country_code "$custom_code")"
-                country="$(get_country_display_name "$code")"
-            fi
-        fi
-    fi
-
-    echo "${code}|${country}"
-}
-
 # =============================================================================
 # СИСТЕМА ЗАЩИТЫ ОТ АБУЗА (ANTI-ABUSE: NETFILTER / IPTABLES / UFW)
 # 1. Блокировка исходящего SMTP (порт 25) с tcp-reset
-# 2. Блокировка BitTorrent L7 хэндшейка и DHT пакетов через xt_string
+# 2. Блокировка BitTorrent L7 хэндшейка, DHT пакетов и трекеров через xt_string
 # =============================================================================
 
-sync_ufw_before_rules_antiabuse() {
+_cleanup_legacy_ufw_before_rules_antiabuse() {
     local before_rules="/etc/ufw/before.rules"
-    if [[ -f "$before_rules" ]]; then
-        local has_xt_string=0
-        if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
-            has_xt_string=1
-        fi
+    if [[ -f "$before_rules" ]] && grep -Fq "# START JUST1KNODE ANTI-ABUSE" "$before_rules" 2>/dev/null; then
         python3 -c "
-import os, re, sys, tempfile
-bf = sys.argv[1]
-has_xt_string = sys.argv[2] == '1'
-with open(bf, 'r', encoding='utf-8') as f:
-    content = f.read()
-
-content = re.sub(r'# START JUST1KNODE ANTI-ABUSE.*?# END JUST1KNODE ANTI-ABUSE\n?', '', content, flags=re.DOTALL)
-
-rules = [
-    '-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
-    '-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset',
-    '-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP',
-    '-A ufw-before-forward -p udp --dport 6881:6889 -j DROP',
-    '-A ufw-before-output -p tcp --dport 6881:6889 -j DROP',
-    '-A ufw-before-output -p udp --dport 6881:6889 -j DROP',
-]
-if has_xt_string:
-    rules.extend([
-        '-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
-        '-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
-        '-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP',
-        '-A ufw-before-output -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
-        '-A ufw-before-output -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP',
-        '-A ufw-before-output -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP',
-        '-A ufw-before-output -p udp -m string --string \"d1:rd2:id20:\" --algo bm -j DROP',
-        '-A ufw-before-output -p udp -m string --hex-string \"|0000041727101980|\" --algo bm -j DROP',
-        '-A ufw-before-output -p tcp -m string --string \"/announce?info_hash=\" --algo bm -j DROP',
-    ])
-
-block = '# START JUST1KNODE ANTI-ABUSE\n' + '\n'.join(rules) + '\n# END JUST1KNODE ANTI-ABUSE\n'
-
-if ':ufw-before-forward' in content:
-    content = re.sub(r'(:\s*ufw-before-forward\s+-\s+\[0:0\]\n)', r'\1' + block, content, count=1)
-elif '*filter' in content:
-    content = content.replace('*filter\n', '*filter\n' + block, 1)
-else:
-    sys.exit(1)
-
-d = os.path.dirname(os.path.abspath(bf))
-t_fd, t_path = tempfile.mkstemp(dir=d, suffix='.tmp')
-with os.fdopen(t_fd, 'w', encoding='utf-8') as f:
-    f.write(content)
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(t_path, bf)
-" "$before_rules" "$has_xt_string" 2>/dev/null || return 1
-    else
-        if command -v ufw >/dev/null 2>&1; then
-            return 1
-        fi
-    fi
-    return 0
-}
-
-remove_ufw_before_rules_antiabuse() {
-    local before_rules="/etc/ufw/before.rules"
-    if [[ -f "$before_rules" ]]; then
-        python3 -c "
-import os, re, sys, tempfile
+import os, re, tempfile, sys
 bf = sys.argv[1]
 try:
     with open(bf, 'r', encoding='utf-8') as f:
@@ -1123,124 +910,35 @@ except Exception:
 }
 
 check_antiabuse_rules() {
-    # Проверка обязательных инвариантов сетевой защиты:
-    # 1. SMTP:25 REJECT (FORWARD + OUTPUT)
-    # 2. BitTorrent:6881-6889 DROP (FORWARD + OUTPUT)
-    # 3. BitTorrent L7 TCP/UDP DROP (FORWARD + OUTPUT при поддержке xt_string)
-    # 4. BitTorrent L7 UDP DHT DROP (FORWARD + OUTPUT при поддержке xt_string)
-    # 5. BitTorrent UDP-трекеры & HTTP-анонсы DROP (OUTPUT при поддержке xt_string)
     local missing=0
+    iptables -L JUST1KNODE-ANTIABUSE >/dev/null 2>&1 || return 1
 
-    # 1. SMTP:25 FORWARD & OUTPUT
-    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null && \
-       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null); then
-        missing=$((missing + 1))
-    fi
-    if ! iptables -C OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null && \
-       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null); then
-        missing=$((missing + 1))
+    iptables -C FORWARD -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
+    iptables -C OUTPUT -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
     fi
 
-    # 2. BitTorrent порты 6881:6889 (FORWARD + OUTPUT)
-    if ! iptables -C FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null && \
-       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp --dport 6881:6889 -j DROP 2>/dev/null); then
-        missing=$((missing + 1))
-    fi
-    if ! iptables -C FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null && \
-       ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp --dport 6881:6889 -j DROP 2>/dev/null); then
-        missing=$((missing + 1))
-    fi
-    if ! iptables -C OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null && \
-       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp --dport 6881:6889 -j DROP 2>/dev/null); then
-        missing=$((missing + 1))
-    fi
-    if ! iptables -C OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null && \
-       ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp --dport 6881:6889 -j DROP 2>/dev/null); then
-        missing=$((missing + 1))
-    fi
+    iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || missing=$((missing + 1))
+    iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
+    iptables -C JUST1KNODE-ANTIABUSE -p udp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
 
-    # 3. BitTorrent L7 (FORWARD + OUTPUT)
     if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
-        if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-forward >/dev/null 2>&1 && iptables -C ufw-before-forward -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-
-        # OUTPUT chain (для трафика локального процесса Xray)
-        if ! iptables -C OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
-        if ! iptables -C OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null && \
-           ! (iptables -L ufw-before-output >/dev/null 2>&1 && iptables -C ufw-before-output -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null); then
-            missing=$((missing + 1))
-        fi
+        iptables -C JUST1KNODE-ANTIABUSE -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
+        iptables -C JUST1KNODE-ANTIABUSE -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
+        iptables -C JUST1KNODE-ANTIABUSE -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
+        iptables -C JUST1KNODE-ANTIABUSE -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
+        iptables -C JUST1KNODE-ANTIABUSE -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
+        iptables -C JUST1KNODE-ANTIABUSE -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || missing=$((missing + 1))
     fi
 
-    # Проверка сохранения правил в /etc/ufw/before.rules (при наличии UFW)
-    local before_rules="/etc/ufw/before.rules"
-    if [[ -f "$before_rules" ]]; then
-        if ! grep -q -- "-A ufw-before-forward -p tcp --dport 25 -j REJECT --reject-with tcp-reset" "$before_rules" 2>/dev/null || \
-           ! grep -q -- "-A ufw-before-output -p tcp --dport 25 -j REJECT --reject-with tcp-reset" "$before_rules" 2>/dev/null || \
-           ! grep -q -- "-A ufw-before-forward -p tcp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
-           ! grep -q -- "-A ufw-before-forward -p udp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
-           ! grep -q -- "-A ufw-before-output -p tcp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null || \
-           ! grep -q -- "-A ufw-before-output -p udp --dport 6881:6889 -j DROP" "$before_rules" 2>/dev/null; then
-            missing=$((missing + 1))
-        fi
-        if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
-            if ! grep -q -- "-A ufw-before-forward -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-forward -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p tcp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"BitTorrent protocol\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"d1:ad2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p udp -m string --string \"d1:rd2:id20:\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p udp -m string --hex-string \"|0000041727101980|\" --algo bm -j DROP" "$before_rules" 2>/dev/null || \
-               ! grep -q -- "-A ufw-before-output -p tcp -m string --string \"/announce?info_hash=\" --algo bm -j DROP" "$before_rules" 2>/dev/null; then
-                missing=$((missing + 1))
-            fi
-        fi
-    elif command -v ufw >/dev/null 2>&1; then
-        missing=$((missing + 1))
-    fi
-
-    if [[ $missing -eq 0 ]]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ $missing -eq 0 ]]
 }
 
 apply_antiabuse_protection() {
-    log "Настройка сетевой защиты (Anti-Abuse: SMTP 25 + BitTorrent L7/Ports)..."
+    log "Настройка сетевой защиты (Anti-Abuse: цепочка JUST1KNODE-ANTIABUSE)..."
     apply_node_sysctl_hardening
 
-    # 1. Автозагрузка модуля ядра xt_string для L7 фильтрации (если поддерживается)
     modprobe xt_string 2>/dev/null || true
     if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
         mkdir -p /etc/modules-load.d 2>/dev/null || true
@@ -1249,146 +947,87 @@ apply_antiabuse_protection() {
         fi
     fi
 
-    # 2. Персистентность в UFW (переживает ufw reload и перезагрузку ОС)
-    if ! sync_ufw_before_rules_antiabuse; then
-        warn "Сбой сохранения правил в /etc/ufw/before.rules!"
-        return 1
-    fi
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-        if ! ufw reload >/dev/null 2>&1; then
-            warn "Сбой перезагрузки конфигурации UFW (ufw reload)!"
-            return 1
-        fi
-    fi
+    # Очистка устаревших правок в /etc/ufw/before.rules (при переходе со старой схемы)
+    _cleanup_legacy_ufw_before_rules_antiabuse
 
-    # 3. Применение правил в активный FORWARD, OUTPUT и DOCKER-USER (немедленная защита без ожидания перезагрузки)
-    # SMTP:25 reject (FORWARD + OUTPUT)
-    if ! iptables -C FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
-        iptables -I FORWARD 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    fi
-    if ! iptables -C OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
-        iptables -I OUTPUT 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    fi
-    if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        if ! iptables -C DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null; then
-            iptables -I DOCKER-USER 1 -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-        fi
-    fi
+    iptables -N JUST1KNODE-ANTIABUSE 2>/dev/null || true
+    iptables -F JUST1KNODE-ANTIABUSE
 
-    # BitTorrent Standard Ports (6881-6889) (FORWARD + OUTPUT)
-    if ! iptables -C FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null; then
-        iptables -I FORWARD 2 -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    fi
-    if ! iptables -C FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null; then
-        iptables -I FORWARD 3 -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
-    fi
-    if ! iptables -C OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null; then
-        iptables -I OUTPUT 2 -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    fi
-    if ! iptables -C OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null; then
-        iptables -I OUTPUT 3 -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
-    fi
+    iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset
+    iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP
+    iptables -A JUST1KNODE-ANTIABUSE -p udp --dport 6881:6889 -j DROP
 
-    # BitTorrent L7
     if iptables -m string --help 2>&1 | grep -q "\-\-algo"; then
-        if ! iptables -C FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-            iptables -I FORWARD 4 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-            iptables -I FORWARD 5 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
-            iptables -I FORWARD 6 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-        fi
-
-        # OUTPUT chain (для трафика локального процесса Xray)
-        if ! iptables -C OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 4 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 5 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 6 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 7 -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 8 -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || true
-        fi
-        if ! iptables -C OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null; then
-            iptables -I OUTPUT 9 -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || true
-        fi
-
-        if iptables -L DOCKER-USER >/dev/null 2>&1; then
-            if ! iptables -C DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-                iptables -I DOCKER-USER 2 -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-            fi
-            if ! iptables -C DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null; then
-                iptables -I DOCKER-USER 3 -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-            fi
-            if ! iptables -C DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null; then
-                iptables -I DOCKER-USER 4 -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-            fi
-        fi
+        iptables -A JUST1KNODE-ANTIABUSE -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP
+        iptables -A JUST1KNODE-ANTIABUSE -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP
+        iptables -A JUST1KNODE-ANTIABUSE -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP
+        iptables -A JUST1KNODE-ANTIABUSE -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP
+        iptables -A JUST1KNODE-ANTIABUSE -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP
+        iptables -A JUST1KNODE-ANTIABUSE -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP
     fi
 
-    # 4. Итоговая проверка соблюдения инвариантов (Fail-Closed)
+    iptables -C FORWARD -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I FORWARD 1 -j JUST1KNODE-ANTIABUSE
+    iptables -C OUTPUT -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I OUTPUT 1 -j JUST1KNODE-ANTIABUSE
+    if iptables -L DOCKER-USER >/dev/null 2>&1; then
+        iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I DOCKER-USER 1 -j JUST1KNODE-ANTIABUSE
+    fi
+
     if check_antiabuse_rules; then
-        if [[ -f /etc/ufw/after.init ]]; then
+        if [[ -f /etc/ufw/after.init ]] && grep -Fq "# START JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null; then
             sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
         fi
-        if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
-            rm -f /etc/systemd/system/just1knode-antiabuse.service 2>/dev/null || true
-            systemctl daemon-reload 2>/dev/null || true
-        fi
+        local unit_file="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-antiabuse.service"
+        local bin_path="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+        if [[ -d "$(dirname "$unit_file")" && -x "$bin_path" ]]; then
+            cat > "$unit_file" <<EOF
+[Unit]
+Description=Just1kNode Anti-Abuse iptables Rules
+After=network-pre.target ufw.service
+Wants=network-pre.target
 
-        log "✔ Правила сетевой защиты Anti-Abuse (SMTP:25 + BitTorrent L7/Ports) успешно активированы."
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${bin_path} --apply-antiabuse
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable just1knode-antiabuse.service 2>/dev/null || true
+        fi
+        log "✔ Цепочка JUST1KNODE-ANTIABUSE успешно активирована."
         set_state_val "abuse_protection" "enabled"
         return 0
     else
-        warn "Не удалось активировать полный набор правил Anti-Abuse!"
+        warn "Не удалось активировать полный набор правил в JUST1KNODE-ANTIABUSE!"
         return 1
     fi
 }
 
+_iptables_delete_all() {
+    while iptables -C "$@" 2>/dev/null; do
+        iptables -D "$@" 2>/dev/null || break
+    done
+}
+
 remove_antiabuse_protection() {
     log "Очистка правил сетевой защиты Anti-Abuse..."
-    iptables -D FORWARD -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D OUTPUT -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-    iptables -D DOCKER-USER -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || true
-
-    iptables -D FORWARD -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p tcp --dport 6881:6889 -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp --dport 6881:6889 -j DROP 2>/dev/null || true
-
-    iptables -D FORWARD -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D FORWARD -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-
-    iptables -D OUTPUT -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --string "d1:rd2:id20:" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p udp -m string --hex-string "|0000041727101980|" --algo bm -j DROP 2>/dev/null || true
-    iptables -D OUTPUT -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP 2>/dev/null || true
-
+    _iptables_delete_all FORWARD -j JUST1KNODE-ANTIABUSE
+    _iptables_delete_all OUTPUT -j JUST1KNODE-ANTIABUSE
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -D DOCKER-USER -p tcp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -p udp -m string --string "BitTorrent protocol" --algo bm -j DROP 2>/dev/null || true
-        iptables -D DOCKER-USER -p udp -m string --string "d1:ad2:id20:" --algo bm -j DROP 2>/dev/null || true
+        _iptables_delete_all DOCKER-USER -j JUST1KNODE-ANTIABUSE
     fi
 
-    # Удаление из /etc/ufw/before.rules
-    remove_ufw_before_rules_antiabuse
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-        ufw reload >/dev/null 2>&1 || true
+    if iptables -L JUST1KNODE-ANTIABUSE >/dev/null 2>&1; then
+        iptables -F JUST1KNODE-ANTIABUSE 2>/dev/null || true
+        iptables -X JUST1KNODE-ANTIABUSE 2>/dev/null || true
     fi
 
-    # Очистка legacy хуков и сервисов
-    if [[ -f /etc/ufw/after.init ]]; then
+    # Очистка возможных legacy-правил в /etc/ufw/before.rules
+    _cleanup_legacy_ufw_before_rules_antiabuse
+
+    if [[ -f /etc/ufw/after.init ]] && grep -Fq "# START JUST1KNODE ANTI-ABUSE HOOK" /etc/ufw/after.init 2>/dev/null; then
         sed -i '/# START JUST1KNODE ANTI-ABUSE HOOK/,/# END JUST1KNODE ANTI-ABUSE HOOK/d' /etc/ufw/after.init 2>/dev/null || true
     fi
     if [[ -f /etc/systemd/system/just1knode-antiabuse.service ]]; then
@@ -1396,7 +1035,6 @@ remove_antiabuse_protection() {
         systemctl daemon-reload 2>/dev/null || true
     fi
 
-    # Удаление xt_string из автозагрузки при удалении
     if [[ -f /etc/modules-load.d/just1knode.conf ]]; then
         sed -i '/^xt_string$/d' /etc/modules-load.d/just1knode.conf 2>/dev/null || true
         if [[ ! -s /etc/modules-load.d/just1knode.conf ]] || ! grep -q '[^[:space:]]' /etc/modules-load.d/just1knode.conf 2>/dev/null; then
@@ -1407,4 +1045,147 @@ remove_antiabuse_protection() {
     set_state_val "abuse_protection" "disabled"
     log "✔ Правила сетевой защиты Anti-Abuse успешно очищены."
 }
+
+is_traffic_limit_exceeded() {
+    local state_dir="${STATE_DIR:-/etc/just1knode}"
+    [[ -f "${state_dir}/traffic_limit_exceeded" ]]
+}
+
+normalize_domain() {
+    local raw="${1:-}"
+    raw="$(echo "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|^https\?://||' -e 's|/.*$||')"
+    echo "$raw"
+}
+
+validate_fqdn() {
+    local host="${1:-}"
+    [[ -z "$host" ]] && return 1
+    if [[ "$host" =~ [[:space:]\;\"\'\$\`\{\}\\\<\>\?\&\*\/] ]]; then
+        return 1
+    fi
+    if [[ "$host" == "localhost" || "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        return 1
+    fi
+    if [[ ! "$host" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+set_bot_ip() {
+    title "ОБНОВЛЕНИЕ IP-АДРЕСА TELEGRAM-БОТА (BOT_IP ДЛЯ ЗАЩИТЫ API)"
+    check_root
+    init_state_dir
+    acquire_just1knode_lock
+
+    local role
+    role="$(get_state_val "role" "unconfigured")"
+    local target_port="8444"
+    local role_descr="Control API (порт 8444)"
+
+    if [[ "$role" != "ru_hub" && "$role" != "eu_hub" && "$role" != "exit_node" && ! -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+        release_just1knode_lock
+        error "Функция доступна только при установленном xray-api или настроенной роли узла."
+        return 1
+    fi
+
+    local new_bot_ip="${1:-}"
+    if [[ -z "$new_bot_ip" && -t 0 ]]; then
+        while true; do
+            local input_bip=""
+            if ! read -rp "Введите новый IP-адрес Telegram-бота (для защиты ${role_descr}, или 0 для отмены): " input_bip; then
+                release_just1knode_lock
+                warn "Ввод прерван."
+                return 0
+            fi
+            input_bip="$(echo "$input_bip" | tr -d '[:space:]')"
+            if [[ "$input_bip" == "0" || "$input_bip" == "q" || "$input_bip" == "Q" ]]; then
+                release_just1knode_lock
+                warn "Настройка IP-адреса Telegram-бота отменена."
+                return 0
+            fi
+            if [[ -z "$input_bip" ]]; then
+                warn "IP-адрес не может быть пустым. Попробуйте еще раз (или введите 0 для отмены)."
+                continue
+            fi
+            if ! validate_ipv4 "$input_bip"; then
+                warn "Недопустимый формат IP-адреса: '$input_bip' (ожидается валидный IPv4 адрес). Попробуйте еще раз."
+                continue
+            fi
+            new_bot_ip="$input_bip"
+            break
+        done
+    fi
+
+    new_bot_ip="$(echo "$new_bot_ip" | tr -d '[:space:]')"
+    if [[ -z "$new_bot_ip" ]]; then
+        release_just1knode_lock
+        error "IP-адрес не может быть пустым."
+        return 1
+    fi
+
+    if ! validate_ipv4 "$new_bot_ip"; then
+        release_just1knode_lock
+        error "Недопустимый формат IP-адреса: '$new_bot_ip' (ожидается валидный IPv4 адрес)."
+        return 1
+    fi
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        release_just1knode_lock
+        error "Утилита UFW не найдена в системе. Настройка фаервола невозможна."
+        return 1
+    fi
+    if ! ufw status 2>/dev/null | grep -qi "Status: active"; then
+        release_just1knode_lock
+        error "Фаервол UFW не активен (Status: inactive). Для безопасного обновления порта ${target_port} UFW должен быть включен."
+        return 1
+    fi
+
+    local old_bot_ip new_bot_ip_re
+    old_bot_ip="$(get_state_val "bot_ip" 2>/dev/null || true)"
+    new_bot_ip_re="${new_bot_ip//./\\.}"
+
+    if [[ "$new_bot_ip" == "$old_bot_ip" ]] && ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
+        if ! is_ssh_port "${target_port}"; then
+            ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+            ufw delete allow "${target_port}" >/dev/null 2>&1 || true
+        fi
+        log "BOT_IP ($new_bot_ip) уже установлен и подтвержден в UFW. Изменений не требуется."
+        release_just1knode_lock
+        return 0
+    fi
+
+    log "Применение нового правила фаервола UFW для ${role_descr} ($new_bot_ip)..."
+    if ! ufw allow from "$new_bot_ip" to any port "$target_port" proto tcp comment "just1knode api"; then
+        release_just1knode_lock
+        error "Сбой выполнения команды 'ufw allow' для IP $new_bot_ip. Предыдущие правила сохранены."
+        return 1
+    fi
+
+    if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])${new_bot_ip_re}(/32)?([[:space:]]|$)" | grep -E -q "(^|[[:space:]])${target_port}(/tcp)?([[:space:]]|$)"; then
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        release_just1knode_lock
+        error "Верификация не пройдена: правило для $new_bot_ip на порт $target_port отсутствует в UFW. Изменение откатано."
+        return 1
+    fi
+
+    if ! set_state_val "bot_ip" "$new_bot_ip"; then
+        ufw delete allow from "$new_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        release_just1knode_lock
+        error "Сбой сохранения bot_ip в state.json. Новое правило для $new_bot_ip откатано, старый доступ сохранен."
+        return 1
+    fi
+
+    if ! is_ssh_port "${target_port}"; then
+        if [[ -n "$old_bot_ip" && "$old_bot_ip" != "$new_bot_ip" && "$old_bot_ip" != "any" && "$old_bot_ip" != "-" ]]; then
+            ufw delete allow from "$old_bot_ip" to any port "$target_port" proto tcp >/dev/null 2>&1 || true
+        fi
+        ufw delete allow "${target_port}/tcp" >/dev/null 2>&1 || true
+        ufw delete allow "${target_port}" >/dev/null 2>&1 || true
+    fi
+
+    log "BOT_IP успешно обновлен и зафиксирован в state.json: ${old_bot_ip:-не был задан} -> ${new_bot_ip}"
+    release_just1knode_lock
+}
+
 
