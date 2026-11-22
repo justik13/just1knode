@@ -289,6 +289,8 @@ def main():
             user_cfg["flow"] = flow
         if use_utls:
             tls_cfg["fingerprint"] = "firefox"
+        else:
+            tls_cfg["fingerprint"] = "unsafe"
         for ca_path in ("/usr/local/share/ca-certificates/just1k-internal-ca.crt", "/etc/just1knode/ca.crt"):
             if os.path.isfile(ca_path):
                 tls_cfg["certificates"] = [{
