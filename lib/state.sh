@@ -307,7 +307,9 @@ except Exception:
 }
 
 set_module_config() {
-    _state_mutate_json "set_module" "$1" "${2:-{\"enabled\": true}}"
+    local mod_json="${2:-}"
+    [[ -z "$mod_json" ]] && mod_json='{"enabled": true}'
+    _state_mutate_json "set_module" "$1" "$mod_json"
 }
 
 remove_module_config() {
