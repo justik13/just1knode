@@ -322,7 +322,11 @@ class ClientStore:
                 entry["email"] = email or existing_entry.get("email")
         else:
             svc_name = self.canonicalize_service(service)
-            targets = [svc_name] if svc_name else list(curr_service_states.keys())
+            targets = (
+                [svc_name]
+                if svc_name
+                else (list(curr_service_states.keys()) or ["vless", "white_internet"])
+            )
             for s in targets:
                 svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
                 new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)

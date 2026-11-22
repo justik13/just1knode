@@ -425,6 +425,9 @@ def main():
             spec = cdn_provider_specs[cdn_key]
             mod_cfg = modules.get(cdn_key, {})
             c_port = int(mod_cfg.get("port") or spec["port"])
+            while c_port in used_ports:
+                c_port += 1
+            used_ports.add(c_port)
             c_tag = str(mod_cfg.get("tag") or spec["tag"])
             c_path = str(mod_cfg.get("path") or f"{secret_base}/{spec['subpath']}")
             spec_eff = dict(spec)
@@ -697,6 +700,9 @@ def main():
                 )
             cidr_lines = []
             seen_cidr = set()
+            if has_vless_tls and will_need_nginx:
+                seen_cidr.add("127.0.0.1")
+                cidr_lines.append("    set_real_ip_from 127.0.0.1;")
             use_xff = False
             use_xri = False
             for ck in active_cdns:

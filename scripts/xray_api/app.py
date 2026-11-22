@@ -648,7 +648,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     restored_unique = 0
     restored_registrations = 0
     had_failures = False
-    has_active_entries = False
+    has_restorable_entries = False
     for client_uuid, meta in entries.items():
         if not isinstance(meta, dict):
             continue
@@ -666,11 +666,12 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
 
         if not active_services:
             continue
-        has_active_entries = True
 
         user_restored = False
         for s in active_services:
             tags = get_target_inbounds(service=s)
+            if tags:
+                has_restorable_entries = True
             for tag in tags:
                 try:
                     grpc_client.add_user(
@@ -691,7 +692,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
         if user_restored:
             restored_unique += 1
 
-    if has_active_entries and restored_registrations == 0:
+    if has_restorable_entries and restored_registrations == 0:
         had_failures = True
 
     logger.info(
@@ -1342,10 +1343,20 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
                                 if (svc_state and svc_state.get("version") is not None)
                                 else stored_entry.get("version")
                             )
-                            if stored_tombstone or (
-                                req.version is not None
-                                and stored_ver is not None
-                                and stored_ver > req.version
+                            stored_active = (
+                                svc_state.get("is_active")
+                                if (svc_state and svc_state.get("is_active") is not None)
+                                else stored_entry.get("is_active")
+                            )
+                            want_active = desired_state == "active"
+                            if (
+                                stored_tombstone
+                                or (
+                                    req.version is not None
+                                    and stored_ver is not None
+                                    and stored_ver > req.version
+                                )
+                                or (stored_active is not None and bool(stored_active) != want_active)
                             ):
                                 logger.info(
                                     "Cached idempotent op for key %s invalidated by client_store (tombstone=%s, stored_ver=%s, req_ver=%s)",
@@ -1401,8 +1412,12 @@ async def batch_sync_clients(
     async with _batch_sync_lock:
         try:
             preloaded_entries = client_store.load_client_entries()
-        except Exception:
-            preloaded_entries = {}
+        except Exception as exc:
+            logger.error("Failed to load client_store before batch-sync: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to load persisted client state: {exc}",
+            ) from exc
 
         try:
             for item in req.clients:
@@ -1416,7 +1431,7 @@ async def batch_sync_clients(
                         )
                         else "disabled"
                     )
-                    await _sync_client_internal(
+                    sync_res = await _sync_client_internal(
                         item,
                         clean_uuid,
                         desired_state,
@@ -1424,9 +1439,18 @@ async def batch_sync_clients(
                         preloaded_entries=preloaded_entries,
                     )
                     eff_svc = resolve_effective_service(item.service)
-                    pending_mutations.append(
-                        (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
-                    )
+                    if not (isinstance(sync_res, dict) and sync_res.get("result") == "already_newer"):
+                        client_store._mutate_entry(
+                            preloaded_entries,
+                            clean_uuid,
+                            active=(desired_state == "active"),
+                            version=item.version,
+                            email=item.email,
+                            service=eff_svc,
+                        )
+                        pending_mutations.append(
+                            (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
+                        )
                     succeeded.append(clean_uuid)
                 except HTTPException as exc:
                     failed[str(item.uuid)] = str(exc.detail)
@@ -1440,6 +1464,23 @@ async def batch_sync_clients(
                     lock_fd = client_store._acquire_lock()
                     entries = client_store.load_client_entries()
                     for c_uid, is_act, ver, em, svc in pending_mutations:
+                        disk_entry = entries.get(c_uid)
+                        if isinstance(disk_entry, dict):
+                            svc_key = client_store.canonicalize_service(svc)
+                            svc_states = disk_entry.get("service_states") or {}
+                            disk_svc = svc_states.get(svc_key) if svc_key else None
+                            disk_tomb = (
+                                disk_svc.get("tombstone", False)
+                                if isinstance(disk_svc, dict)
+                                else disk_entry.get("tombstone", False)
+                            )
+                            disk_ver = (
+                                disk_svc.get("version")
+                                if isinstance(disk_svc, dict)
+                                else disk_entry.get("version")
+                            )
+                            if disk_tomb or (ver is not None and disk_ver is not None and disk_ver > ver):
+                                continue
                         client_store._mutate_entry(
                             entries, c_uid, active=is_act, version=ver, email=em, service=svc
                         )
@@ -1447,6 +1488,16 @@ async def batch_sync_clients(
                         raise RuntimeError("save_client_entries returned False")
                 except Exception as exc:
                     logger.error("Batch client_store persist failed: %s", exc)
+                    for c_uid, is_act, _ver, em, svc in reversed(pending_mutations):
+                        for tag in get_target_inbounds(service=svc):
+                            try:
+                                mail = _xray_email_for_inbound(c_uid, tag, svc, explicit_email=em)
+                                if is_act:
+                                    grpc_client.remove_user(tag, c_uid, email=mail)
+                                else:
+                                    grpc_client.add_user(tag, c_uid, flow=get_inbound_flow(tag), email=mail)
+                            except Exception:
+                                pass
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Failed to persist batch client state: {exc}",
@@ -1641,11 +1692,14 @@ async def _sync_client_unlocked(
                 verified_inbounds: List[str] = []
                 for tag in target_inbounds:
                     try:
+                        em = _xray_email_for_inbound(
+                            client_uuid, tag, effective_service, explicit_email=req.email
+                        )
                         if curr_state == "active" and not is_tombstone:
-                            if grpc_client.probe_user_presence(tag, client_uuid):
+                            if grpc_client.probe_user_presence(tag, client_uuid, email=em):
                                 verified_inbounds.append(tag)
                         else:
-                            if grpc_client.verify_user_absent(tag, client_uuid):
+                            if grpc_client.verify_user_absent(tag, client_uuid, email=em):
                                 verified_inbounds.append(tag)
                     except Exception:
                         pass

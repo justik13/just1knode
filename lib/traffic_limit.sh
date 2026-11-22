@@ -309,11 +309,11 @@ set_traffic_reset_day() {
 
     local limit_gb
     limit_gb="$(get_traffic_limit_val "limit_gb" "")"
-    if [[ -z "$limit_gb" || "$limit_gb" -le 0 ]]; then
+    if [[ ! "$limit_gb" =~ ^[0-9]+$ ]] || [[ "$limit_gb" -le 0 ]]; then
         limit_gb="$(get_state_val "traffic_limit_gb" "0")"
     fi
 
-    if [[ -n "$limit_gb" && "$limit_gb" -gt 0 ]]; then
+    if [[ "$limit_gb" =~ ^[0-9]+$ ]] && [[ "$limit_gb" -gt 0 ]]; then
         save_traffic_limit_config "$limit_gb" "$reset_day"
     fi
 
