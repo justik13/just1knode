@@ -1151,6 +1151,42 @@ def update_node_links(
     payload = req.model_dump(exclude_none=True)
 
     lp = _links_file_path()
+    existing_matches = False
+    if lp.exists():
+        try:
+            existing_raw = json.loads(lp.read_text(encoding="utf-8"))
+            if isinstance(existing_raw, dict) and existing_raw == payload:
+                existing_matches = True
+        except Exception:
+            existing_matches = False
+
+    if existing_matches:
+        pending_path = _apply_pending_path()
+        running_path = STATE_FILE_PATH.parent / ".apply_running"
+        if pending_path.exists() or running_path.exists():
+            return {
+                "status": "ok",
+                "role": role,
+                "apply_queued": True,
+                "unchanged": True,
+                "links": payload,
+            }
+        last_apply_ok = False
+        last_apply_path = STATE_FILE_PATH.parent / "last_apply.json"
+        if last_apply_path.exists():
+            try:
+                last_apply_data = json.loads(last_apply_path.read_text(encoding="utf-8"))
+                last_apply_ok = isinstance(last_apply_data, dict) and last_apply_data.get("ok") is True
+            except Exception:
+                last_apply_ok = False
+        if last_apply_ok:
+            return {
+                "status": "ok",
+                "role": role,
+                "apply_queued": False,
+                "unchanged": True,
+                "links": payload,
+            }
     try:
         _atomic_write_json(lp, payload, mode=0o660)
     except Exception as exc:

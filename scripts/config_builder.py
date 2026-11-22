@@ -269,7 +269,7 @@ def main():
             },
         }
 
-    def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision"):
+    def build_bridge_outbound(ob_tag, peer, flow="xtls-rprx-vision", use_utls=True):
         ip = str(peer.get("ip") or "").strip()
         uid = str(peer.get("uuid") or "").strip()
         sni = str(peer.get("sni") or "").strip()
@@ -287,7 +287,10 @@ def main():
         }
         if flow:
             user_cfg["flow"] = flow
+        if use_utls:
             tls_cfg["fingerprint"] = "firefox"
+        else:
+            tls_cfg["fingerprint"] = "unsafe"
         for ca_path in ("/usr/local/share/ca-certificates/just1k-internal-ca.crt", "/etc/just1knode/ca.crt"):
             if os.path.isfile(ca_path):
                 tls_cfg["certificates"] = [{
@@ -315,15 +318,6 @@ def main():
                 },
             },
         }
-        if not flow:
-            ob["mux"] = {
-                "enabled": True,
-                "concurrency": 8,
-                "xudpConcurrency": 16,
-                "xudpProxyUDP443": "reject",
-            }
-            ob["streamSettings"]["sockopt"]["tcpFastOpen"] = True
-            ob["streamSettings"]["sockopt"]["tcpKeepAliveIdle"] = 300
         return ob
 
     def antiabuse_rules():
@@ -890,7 +884,7 @@ def main():
             ob_tag = explicit_tag if (explicit_tag and re.fullmatch(r"[a-zA-Z0-9_-]+", explicit_tag)) else f"exit-{p_code}"
             if ob_tag in seen_exits:
                 ob_tag = f"exit-{p_code}-{idx+1}"
-            ob = build_bridge_outbound(ob_tag, p, flow="")
+            ob = build_bridge_outbound(ob_tag, p, flow="xtls-rprx-vision", use_utls=False)
             if ob is None:
                 continue
             seen_exits[ob_tag] = ob
@@ -956,12 +950,12 @@ def main():
             t_uuid = str(uuid_lib.uuid4())
             resolved_tunnel_uuid = t_uuid
 
-        # СТРОГО ТОЛЬКО bridge UUID от хабов — чистый VLESS TLS без избыточного flow (нет ТСПУ в ЕС)
+        # СТРОГО ТОЛЬКО bridge UUID от хабов — VLESS TLS + xtls-rprx-vision (zero-copy splicing без mux; нет ТСПУ в ЕС)
         bridge_clients = {}
 
         def add_exit_bridge(uid, email):
             if is_valid_uuid(uid) and uid not in bridge_clients:
-                bridge_clients[uid] = {"id": uid, "email": email}
+                bridge_clients[uid] = {"id": uid, "email": email, "flow": "xtls-rprx-vision"}
 
         add_exit_bridge(t_uuid, "hub-bridge@just1k")
         for arr_k in ("incoming_hubs", "incoming_eu_hubs", "allowed_hubs"):
