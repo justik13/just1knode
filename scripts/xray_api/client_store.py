@@ -14,7 +14,13 @@ except ImportError:
 logger = logging.getLogger("xray_api.client_store")
 
 
-class ClientStoreCorruptedError(RuntimeError):
+class ClientStoreError(RuntimeError):
+    """Raised when client store operations or file locking fail."""
+
+    pass
+
+
+class ClientStoreCorruptedError(ClientStoreError):
     """Raised when clients.json exists but is unparseable or corrupted."""
 
     pass
@@ -154,8 +160,7 @@ class ClientStore:
                     lock_fd.close()
                 except Exception:
                     pass
-            logger.debug("Could not acquire client store lock: %s", e)
-            return None
+            raise ClientStoreError(f"Could not acquire client store lock {self.lock_path}: {e}") from e
 
     def _release_lock(self, lock_fd):
         if fcntl is not None and lock_fd is not None:

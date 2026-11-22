@@ -13,13 +13,17 @@ STATE_FILE="${STATE_FILE:-${STATE_DIR}/state.json}"
 CLIENTS_FILE="${CLIENTS_FILE:-${STATE_DIR}/clients.json}"
 
 JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-if [[ -z "${JUST1KNODE_REF:-}" ]]; then
-    if [[ -d "${INSTALL_DIR:-/opt/just1knode}/.git" ]] && command -v git >/dev/null 2>&1; then
-        JUST1KNODE_REF="$(git -C "${INSTALL_DIR:-/opt/just1knode}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-        [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
-    fi
+JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}}"
+if [[ -z "$JUST1KNODE_REF" && -d "${INSTALL_DIR:-/opt/just1knode}/.git" ]] && command -v git >/dev/null 2>&1; then
+    JUST1KNODE_REF="$(git -C "${INSTALL_DIR:-/opt/just1knode}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+    [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
 fi
-JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
+if [[ -z "$JUST1KNODE_REF" ]] && declare -F get_state_val >/dev/null 2>&1; then
+    JUST1KNODE_REF="$(get_state_val "repo_ref" "")"
+elif [[ -z "$JUST1KNODE_REF" && -f "${STATE_FILE}" ]] && command -v python3 >/dev/null 2>&1; then
+    JUST1KNODE_REF="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("repo_ref") or "")' "${STATE_FILE}" 2>/dev/null || true)"
+fi
+JUST1KNODE_REF="${JUST1KNODE_REF:-main}"
 
 ensure_xrayapi_user() {
     if ! getent group xrayapi >/dev/null 2>&1; then
@@ -259,8 +263,19 @@ EOF
 }
 
 deploy_xray_api_service() {
-    local api_key="$1"
+    local api_key="${1:-}"
     local cdn_domain="${2:-}"
+
+    if [[ -z "$api_key" && -f "${XRAY_API_CONFIG_ENV}" ]]; then
+        api_key="$(grep -m1 '^XRAY_API_KEY=' "${XRAY_API_CONFIG_ENV}" 2>/dev/null | cut -d= -f2- || true)"
+    fi
+    if [[ -z "$api_key" ]]; then
+        warn "XRAY_API_KEY не передан и отсутствует в ${XRAY_API_CONFIG_ENV}."
+        return 1
+    fi
+    if [[ -z "$cdn_domain" && -f "${XRAY_API_CONFIG_ENV}" ]]; then
+        cdn_domain="$(grep -m1 '^CDN_DOMAIN=' "${XRAY_API_CONFIG_ENV}" 2>/dev/null | cut -d= -f2- || true)"
+    fi
 
     if ! ensure_xrayapi_user; then
         return 1

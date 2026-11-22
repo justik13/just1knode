@@ -35,19 +35,25 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
     
     if [[ -d "/app/just1knode" && -f "/app/just1knode/lib/common.sh" ]]; then
         cp -a /app/just1knode/. "$INSTALL_DIR/"
+        if [[ -f "/app/scripts/config_builder.py" ]]; then
+            mkdir -p "$INSTALL_DIR/scripts"
+            cp -a /app/scripts/config_builder.py "$INSTALL_DIR/scripts/"
+        fi
         if [[ -d "/app/scripts/xray_api" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
             cp -a /app/scripts/xray_api/. "$INSTALL_DIR/scripts/xray_api/"
         fi
     else
         JUST1KNODE_REPO_URL="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-        if [[ -z "${JUST1KNODE_REF:-}" ]]; then
-            if [[ -d "${INSTALL_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
-                JUST1KNODE_REF="$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-                [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
-            fi
+        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}}"
+        if [[ -z "$JUST1KNODE_REF" && -d "${INSTALL_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
+            JUST1KNODE_REF="$(git -C "$INSTALL_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+            [[ "$JUST1KNODE_REF" == "HEAD" ]] && JUST1KNODE_REF=""
         fi
-        JUST1KNODE_REF="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
+        if [[ -z "$JUST1KNODE_REF" && -f "${STATE_FILE:-/etc/just1knode/state.json}" ]] && command -v python3 >/dev/null 2>&1; then
+            JUST1KNODE_REF="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("repo_ref") or "")' "${STATE_FILE:-/etc/just1knode/state.json}" 2>/dev/null || true)"
+        fi
+        JUST1KNODE_REF="${JUST1KNODE_REF:-main}"
         
         local_archive_urls=()
         if [[ "$JUST1KNODE_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
@@ -92,6 +98,10 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             cp -a "$tmp_extract/VERSION" "$INSTALL_DIR/" 2>/dev/null || true
             cp -a "$tmp_extract/lib" "$INSTALL_DIR/" 2>/dev/null || true
             cp -a "$tmp_extract/modules" "$INSTALL_DIR/" 2>/dev/null || true
+        fi
+        if [[ -f "$tmp_extract/scripts/config_builder.py" ]]; then
+            mkdir -p "$INSTALL_DIR/scripts"
+            cp -a "$tmp_extract/scripts/config_builder.py" "$INSTALL_DIR/scripts/"
         fi
         if [[ -d "$tmp_extract/scripts/xray_api" ]]; then
             mkdir -p "$INSTALL_DIR/scripts/xray_api"
@@ -171,12 +181,12 @@ print_node_version_box_line() {
 check_node_update_on_entry() {
     local repo_url ref
     repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
-    ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
+    ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}}"
     if [[ -z "$ref" && -d "${SCRIPT_DIR}/.git" ]] && command -v git >/dev/null 2>&1; then
         ref="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
         [[ "$ref" == "HEAD" ]] && ref=""
     fi
-    ref="${ref:-$(get_state_val "repo_ref" "dev")}"
+    ref="${ref:-$(get_state_val "repo_ref" "main")}"
     if [[ "$repo_url" != "https://github.com/justik13/just1knode" ]]; then
         return 0
     fi

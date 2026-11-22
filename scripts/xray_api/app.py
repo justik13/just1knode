@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import fcntl
 import json
 import logging
@@ -634,6 +635,7 @@ def _xray_email_for_inbound(
 
 _epoch_sync_lock = threading.RLock()
 _last_restore_attempt_ts = 0.0
+_last_restore_attempt_epoch: Optional[str] = None
 _RESTORE_FAILURE_COOLDOWN_SEC = 60.0
 
 
@@ -710,7 +712,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
 
 def sync_active_users_with_epoch(current_epoch: Optional[str], *, blocking: bool = True) -> None:
     """Ensures in-memory active users set is aligned with current Xray epoch."""
-    global _last_restore_attempt_ts
+    global _last_restore_attempt_ts, _last_restore_attempt_epoch
     if not current_epoch:
         return
     if not _epoch_sync_lock.acquire(blocking=blocking):
@@ -718,9 +720,13 @@ def sync_active_users_with_epoch(current_epoch: Optional[str], *, blocking: bool
     try:
         if grpc_client._active_users_epoch != current_epoch:
             now = time.time()
-            if (now - _last_restore_attempt_ts) < _RESTORE_FAILURE_COOLDOWN_SEC:
+            if (
+                _last_restore_attempt_epoch == current_epoch
+                and (now - _last_restore_attempt_ts) < _RESTORE_FAILURE_COOLDOWN_SEC
+            ):
                 logger.debug(
-                    "Skipping client restoration due to recent failure cooldown (%.1fs remaining)",
+                    "Skipping client restoration for epoch %s due to recent failure cooldown (%.1fs remaining)",
+                    current_epoch,
                     _RESTORE_FAILURE_COOLDOWN_SEC - (now - _last_restore_attempt_ts),
                 )
                 return
@@ -735,8 +741,10 @@ def sync_active_users_with_epoch(current_epoch: Optional[str], *, blocking: bool
                 if not had_failures:
                     grpc_client._active_users_epoch = current_epoch
                     _last_restore_attempt_ts = 0.0
+                    _last_restore_attempt_epoch = None
                 else:
                     _last_restore_attempt_ts = now
+                    _last_restore_attempt_epoch = current_epoch
             else:
                 logger.debug(
                     "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
@@ -1094,6 +1102,8 @@ def get_health(response: Response, _: bool = Depends(verify_api_key)) -> Dict[st
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     elif running_epoch:
         sync_active_users_with_epoch(running_epoch)
+        if grpc_client._active_users_epoch != running_epoch:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     disk_usage_info: Dict[str, Any] = {}
     try:
@@ -1394,12 +1404,15 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
                     req.expected_node_epoch,
                 )
                 completed_idempotent_ops.pop(req.idempotency_key, None)
-            return await _sync_client_internal(req, client_uuid, desired_state)
+            async with _state_mutation_lock:
+                return await _sync_client_internal(req, client_uuid, desired_state)
 
-    return await _sync_client_internal(req, client_uuid, desired_state)
+    async with _state_mutation_lock:
+        return await _sync_client_internal(req, client_uuid, desired_state)
 
 
-_batch_sync_lock = asyncio.Lock()
+_state_mutation_lock = asyncio.Lock()
+_batch_sync_lock = _state_mutation_lock
 
 
 @app.post("/v1/clients/batch-sync")
@@ -1422,8 +1435,9 @@ async def batch_sync_clients(
 
     succeeded: List[str] = []
     failed: Dict[str, str] = {}
-    pending_mutations: List[tuple[str, bool, Optional[int], Optional[str], str]] = []
-    async with _batch_sync_lock:
+    pending_mutations: List[tuple[str, bool, Optional[int], Optional[str], str, Dict[str, str]]] = []
+    pending_idempotency: List[tuple[str, Dict[str, Any]]] = []
+    async with _state_mutation_lock:
         try:
             preloaded_entries = client_store.load_client_entries()
         except Exception as exc:
@@ -1433,6 +1447,7 @@ async def batch_sync_clients(
                 detail=f"Failed to load persisted client state: {exc}",
             ) from exc
 
+        working_entries = copy.deepcopy(preloaded_entries)
         try:
             for item in req.clients:
                 try:
@@ -1450,12 +1465,27 @@ async def batch_sync_clients(
                         clean_uuid,
                         desired_state,
                         persist_to_store=False,
-                        preloaded_entries=preloaded_entries,
+                        preloaded_entries=working_entries,
                     )
                     eff_svc = resolve_effective_service(item.service)
-                    if not (isinstance(sync_res, dict) and sync_res.get("result") == "already_newer"):
+                    if isinstance(sync_res, dict) and sync_res.get("result") == "already_newer":
+                        node_tombstone = bool(sync_res.get("tombstone", False))
+                        node_state = sync_res.get("state")
+                        if (node_tombstone and desired_state == "active") or (node_state != desired_state):
+                            failed[clean_uuid] = (
+                                f"already_newer: node state={node_state} tombstone={node_tombstone} "
+                                f"version={sync_res.get('version')}"
+                            )
+                        else:
+                            succeeded.append(clean_uuid)
+                    else:
+                        init_states = (
+                            sync_res.pop("initial_states", {})
+                            if isinstance(sync_res, dict)
+                            else {}
+                        )
                         client_store._mutate_entry(
-                            preloaded_entries,
+                            working_entries,
                             clean_uuid,
                             active=(desired_state == "active"),
                             version=item.version,
@@ -1463,9 +1493,18 @@ async def batch_sync_clients(
                             service=eff_svc,
                         )
                         pending_mutations.append(
-                            (clean_uuid, desired_state == "active", item.version, item.email, eff_svc)
+                            (
+                                clean_uuid,
+                                desired_state == "active",
+                                item.version,
+                                item.email,
+                                eff_svc,
+                                init_states if isinstance(init_states, dict) else {},
+                            )
                         )
-                    succeeded.append(clean_uuid)
+                        if getattr(item, "idempotency_key", None) and isinstance(sync_res, dict):
+                            pending_idempotency.append((item.idempotency_key, sync_res))
+                        succeeded.append(clean_uuid)
                 except HTTPException as exc:
                     failed[str(item.uuid)] = str(exc.detail)
                 except Exception as exc:
@@ -1473,12 +1512,12 @@ async def batch_sync_clients(
         finally:
             if pending_mutations:
                 lock_fd = None
-                entries: Optional[Dict[str, Any]] = None
+                persist_error: Optional[Exception] = None
                 try:
                     client_store._ensure_dir()
                     lock_fd = client_store._acquire_lock()
                     entries = client_store.load_client_entries()
-                    for c_uid, is_act, ver, em, svc in pending_mutations:
+                    for c_uid, is_act, ver, em, svc, _init_st in pending_mutations:
                         disk_entry = entries.get(c_uid)
                         if isinstance(disk_entry, dict):
                             svc_key = client_store.canonicalize_service(svc)
@@ -1502,9 +1541,15 @@ async def batch_sync_clients(
                     if not client_store.save_client_entries(entries):
                         raise RuntimeError("save_client_entries returned False")
                 except Exception as exc:
-                    logger.error("Batch client_store persist failed: %s", exc)
-                    fallback_entries = entries if isinstance(entries, dict) else (preloaded_entries or {})
-                    for c_uid, is_act, _ver, em, svc in reversed(pending_mutations):
+                    persist_error = exc
+                finally:
+                    if lock_fd is not None:
+                        client_store._release_lock(lock_fd)
+
+                if persist_error is not None:
+                    logger.error("Batch client_store persist failed: %s", persist_error)
+                    for c_uid, _is_act, _ver, em, svc, init_states in reversed(pending_mutations):
+                        orig_entry = preloaded_entries.get(c_uid)
                         for tag in get_target_inbounds(service=svc):
                             try:
                                 mail = _xray_email_for_inbound(
@@ -1512,21 +1557,21 @@ async def batch_sync_clients(
                                     tag,
                                     svc,
                                     explicit_email=em,
-                                    stored_entry=fallback_entries.get(c_uid),
+                                    stored_entry=orig_entry,
                                 )
-                                if is_act:
-                                    grpc_client.remove_user(tag, c_uid, email=mail)
-                                else:
-                                    grpc_client.add_user(tag, c_uid, flow=get_inbound_flow(tag), email=mail)
+                                init_st = init_states.get(tag, "disabled")
+                                grpc_client.ensure_user_state(
+                                    tag, c_uid, desired_state=init_st, flow=get_inbound_flow(tag), email=mail
+                                )
                             except Exception:
                                 pass
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to persist batch client state: {exc}",
-                    ) from exc
-                finally:
-                    if lock_fd is not None:
-                        client_store._release_lock(lock_fd)
+                        detail=f"Failed to persist batch client state: {persist_error}",
+                    ) from persist_error
+
+                for idem_key, idem_resp in pending_idempotency:
+                    completed_idempotent_ops[idem_key] = idem_resp
 
     if not failed:
         node_sync_state["status"] = "synchronized"
@@ -1683,7 +1728,7 @@ async def _sync_client_unlocked(
                         req.version,
                         desired_state,
                     )
-                    return {
+                    idem_resp: Dict[str, Any] = {
                         "status": "ok",
                         "client_id": client_uuid,
                         "result": "applied",
@@ -1696,6 +1741,9 @@ async def _sync_client_unlocked(
                         "idempotent": True,
                         "inbounds": target_inbounds,
                     }
+                    if not persist_to_store:
+                        idem_resp["initial_states"] = {t: curr_state for t in target_inbounds}
+                    return idem_resp
                 logger.info(
                     "Idempotent retry for %s detected missing inbounds in Xray RAM. Re-applying to %s.",
                     _mask_uuid(client_uuid),
@@ -1926,7 +1974,9 @@ async def _sync_client_unlocked(
         "inbounds": target_inbounds,
     }
 
-    if req.idempotency_key:
+    if not persist_to_store:
+        resp["initial_states"] = initial_states
+    elif req.idempotency_key:
         completed_idempotent_ops[req.idempotency_key] = resp
 
     return resp
@@ -1951,7 +2001,7 @@ async def delete_client(
         ) from None
 
     uuid_lock = await _get_inflight_op_lock(f"uuid:{clean_uuid}")
-    async with uuid_lock:
+    async with _state_mutation_lock, uuid_lock:
         node_meta = get_node_state_metadata()
         node_role = str(node_meta.get("role") or "").strip().lower()
         if node_role in ("eu_hub", "exit_node"):

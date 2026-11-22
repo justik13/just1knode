@@ -200,7 +200,7 @@ ensure_domain_ssl_auto() {
     fi
 
     local ufw_opened_80=0
-    local nginx_paused_80=0
+    local nginx_stopped=0
     local port80_container=""
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
         if ! ufw status 2>/dev/null | grep -E "(^|[[:space:]])80(/tcp)?[[:space:]]+ALLOW" -q; then
@@ -209,27 +209,26 @@ ensure_domain_ssl_auto() {
     fi
 
     _cleanup_auto_ssl() {
-        if [[ $nginx_paused_80 -eq 1 ]]; then
-            if [[ -f /etc/nginx/sites-available/default && ! -L /etc/nginx/sites-enabled/default ]]; then
-                ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default 2>/dev/null || true
-            fi
-            systemctl reload nginx 2>/dev/null || true
+        if [[ $nginx_stopped -eq 1 ]]; then
+            nginx_stopped=0
+            systemctl start nginx 2>/dev/null || true
         fi
         if [[ -n "$port80_container" ]] && command -v docker >/dev/null 2>&1; then
             docker start "$port80_container" >/dev/null 2>&1 || true
+            port80_container=""
         fi
         if [[ $ufw_opened_80 -eq 1 ]]; then
+            ufw_opened_80=0
             ufw delete allow 80/tcp >/dev/null 2>&1 || true
             ufw delete allow 80 >/dev/null 2>&1 || true
         fi
     }
+    trap '_cleanup_auto_ssl' RETURN
 
     if systemctl is-active --quiet nginx 2>/dev/null; then
         if ss -tlnp 2>/dev/null | grep -E ':(80)[[:space:]]' | grep -q 'nginx'; then
-            if [[ -L /etc/nginx/sites-enabled/default ]]; then
-                rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-                nginx_paused_80=1
-                systemctl reload nginx 2>/dev/null || true
+            if systemctl stop nginx 2>/dev/null; then
+                nginx_stopped=1
             fi
         fi
     fi
@@ -254,6 +253,7 @@ ensure_domain_ssl_auto() {
         --keep-until-expiring >/dev/null 2>&1 || cert_rc=$?
 
     _cleanup_auto_ssl
+    trap - RETURN
 
     if [[ $cert_rc -ne 0 || ! -f "$cert_file" || ! -f "$key_file" ]]; then
         warn "Не удалось выпустить SSL-сертификат для ${domain}. Проверьте A-запись DNS и доступность порта 80."

@@ -181,12 +181,12 @@ update_node() {
     info "1/4. Загрузка исходных модулей из репозитория GitHub..."
     local repo_url="${JUST1KNODE_REPO_URL:-${JUST1KBOT_REPO_URL:-https://github.com/justik13/just1knode}}"
     local node_dir="${INSTALL_DIR:-/opt/just1knode}"
-    local ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-dev}}}}"
+    local ref="${JUST1KNODE_REF:-${JUST1KNODE_BRANCH:-${JUST1KBOT_REF:-${JUST1KBOT_BRANCH:-}}}}"
     if [[ -z "$ref" && -d "${node_dir}/.git" ]] && command -v git >/dev/null 2>&1; then
         ref="$(git -C "$node_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
         [[ "$ref" == "HEAD" ]] && ref=""
     fi
-    ref="${ref:-$(get_state_val "repo_ref" "dev")}"
+    ref="${ref:-$(get_state_val "repo_ref" "main")}"
     local tmp_tar
     tmp_tar="$(mktemp /tmp/just1knode_update.XXXXXX.tar.gz 2>/dev/null || mktemp)"
     local tmp_dir
@@ -374,6 +374,10 @@ update_node() {
                     cp -a "${node_src_dir}/VERSION" "${node_dir}/" 2>/dev/null || true
                     cp -a "${node_src_dir}/lib" "${node_dir}/" 2>/dev/null || copy_ok=0
                     cp -a "${node_src_dir}/modules" "${node_dir}/" 2>/dev/null || copy_ok=0
+                    if [[ -f "${node_src_dir}/scripts/config_builder.py" ]]; then
+                        mkdir -p "${node_dir}/scripts"
+                        cp -a "${node_src_dir}/scripts/config_builder.py" "${node_dir}/scripts/" 2>/dev/null || copy_ok=0
+                    fi
                 fi
                 if [[ $copy_ok -ne 1 ]]; then
                     rollback_node_components || true
@@ -452,7 +456,11 @@ update_node() {
                 chown -R root:xrayapi "$api_dir" 2>/dev/null || true
                 chmod -R 750 "$api_dir" 2>/dev/null || true
                 if declare -F deploy_xray_api_service >/dev/null 2>&1; then
-                    deploy_xray_api_service || true
+                    if ! deploy_xray_api_service; then
+                        rollback_node_components || true
+                        rm -rf "$tmp_tar" "$tmp_dir"
+                        error "Не удалось обновить unit и окружение службы xray-api. Обновление прервано."
+                    fi
                 elif [[ -f "${api_dir}/xray-api.service" ]]; then
                     cp "${api_dir}/xray-api.service" /etc/systemd/system/xray-api.service 2>/dev/null || true
                     systemctl daemon-reload 2>/dev/null || true
