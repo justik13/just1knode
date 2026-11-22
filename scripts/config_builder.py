@@ -157,17 +157,37 @@ def main():
             continue
         top_tombstone = bool(meta.get("tombstone", False))
         ss = meta.get("service_states") if isinstance(meta.get("service_states"), dict) else {}
+        svc_emails = meta.get("service_emails") if isinstance(meta.get("service_emails"), dict) else {}
         st_v = ss.get("vless")
         if isinstance(st_v, dict):
             if st_v.get("is_active") and not st_v.get("tombstone") and not top_tombstone:
-                email_val = meta.get("email") or f"{cid}:std"
+                cand_v = st_v.get("email") or svc_emails.get("vless") or meta.get("email")
+                cand_v_str = str(cand_v).strip() if cand_v else ""
+                if (
+                    cand_v_str
+                    and (":" in cand_v_str or "@" in cand_v_str)
+                    and not cand_v_str.endswith(":wi")
+                ):
+                    email_val = cand_v_str
+                else:
+                    email_val = f"{cid}:std"
                 vless_clients[cid] = {"id": cid, "email": email_val, "flow": "xtls-rprx-vision"}
             else:
                 revoked_vless.add(cid)
         st_w = ss.get("white_internet")
         if isinstance(st_w, dict):
             if st_w.get("is_active") and not st_w.get("tombstone") and not top_tombstone:
-                wl_clients[cid] = {"id": cid, "email": meta.get("email") or f"{cid}:wi"}
+                cand_w = st_w.get("email") or svc_emails.get("white_internet") or meta.get("email")
+                cand_w_str = str(cand_w).strip() if cand_w else ""
+                if (
+                    cand_w_str
+                    and (":" in cand_w_str or "@" in cand_w_str)
+                    and not cand_w_str.endswith(":std")
+                ):
+                    w_email_val = cand_w_str
+                else:
+                    w_email_val = f"{cid}:wi"
+                wl_clients[cid] = {"id": cid, "email": w_email_val}
             else:
                 revoked_wl.add(cid)
 

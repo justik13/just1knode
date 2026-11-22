@@ -180,6 +180,56 @@ class ClientStore:
             return "vless"
         return s
 
+    @staticmethod
+    def _is_valid_email_for_service(email_val: Optional[str], svc_name: Optional[str]) -> bool:
+        if not email_val or not isinstance(email_val, str):
+            return False
+        cleaned = email_val.strip()
+        if not cleaned or (":" not in cleaned and "@" not in cleaned):
+            return False
+        if svc_name == "white_internet" and cleaned.endswith(":std"):
+            return False
+        if svc_name == "vless" and cleaned.endswith(":wi"):
+            return False
+        return True
+
+    @classmethod
+    def resolve_service_email(
+        cls,
+        client_uuid: str,
+        service: Optional[str],
+        explicit_email: Optional[str] = None,
+        existing_entry: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Resolves service-specific Xray email, preventing cross-service (:std vs :wi) pollution."""
+        svc_name = cls.canonicalize_service(service)
+        if cls._is_valid_email_for_service(explicit_email, svc_name):
+            return str(explicit_email).strip()
+
+        if isinstance(existing_entry, dict):
+            if svc_name:
+                ss = existing_entry.get("service_states")
+                if isinstance(ss, dict) and isinstance(ss.get(svc_name), dict):
+                    st_email = ss[svc_name].get("email")
+                    if cls._is_valid_email_for_service(st_email, svc_name):
+                        return str(st_email).strip()
+                se = existing_entry.get("service_emails")
+                if isinstance(se, dict):
+                    se_email = se.get(svc_name)
+                    if cls._is_valid_email_for_service(se_email, svc_name):
+                        return str(se_email).strip()
+            top_email = existing_entry.get("email")
+            if cls._is_valid_email_for_service(top_email, svc_name):
+                return str(top_email).strip()
+
+        if svc_name == "white_internet":
+            return f"{client_uuid}:wi"
+        if svc_name == "vless":
+            return f"{client_uuid}:std"
+        if explicit_email and str(explicit_email).strip():
+            return str(explicit_email).strip()
+        return client_uuid
+
     def _detect_default_service(self, service: Optional[str] = None) -> str:
         """Detects default service namespace ('white_internet' or 'vless') based on node configuration."""
         if service:
@@ -274,6 +324,28 @@ class ClientStore:
         curr = existing_entry.get("service_states")
         return dict(curr) if isinstance(curr, dict) else {}
 
+    def _extract_service_emails(
+        self, existing_entry: Dict[str, Any], curr_service_states: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Extract and sanitize per-service email mapping from existing client entry."""
+        service_emails: Dict[str, str] = {}
+        raw_se = existing_entry.get("service_emails")
+        if isinstance(raw_se, dict):
+            for k, v in raw_se.items():
+                ck = self.canonicalize_service(k)
+                if ck and self._is_valid_email_for_service(v, ck):
+                    service_emails[ck] = str(v).strip()
+        for s_key, st_val in curr_service_states.items():
+            ck = self.canonicalize_service(s_key) or s_key
+            if isinstance(st_val, dict) and self._is_valid_email_for_service(st_val.get("email"), ck):
+                service_emails[ck] = str(st_val["email"]).strip()
+        top_email = existing_entry.get("email")
+        if isinstance(top_email, str) and top_email.strip():
+            for ck in ("vless", "white_internet"):
+                if ck not in service_emails and self._is_valid_email_for_service(top_email, ck):
+                    service_emails[ck] = top_email.strip()
+        return service_emails
+
     def _mutate_entry(
         self,
         entries: Dict[str, Any],
@@ -286,6 +358,7 @@ class ClientStore:
     ) -> None:
         existing_entry = entries.get(client_uuid, {})
         curr_service_states = self._extract_service_states(existing_entry)
+        curr_service_emails = self._extract_service_emails(existing_entry, curr_service_states)
         now_ts = time.time()
 
         if active:
@@ -294,6 +367,10 @@ class ClientStore:
                 or existing_entry.get("service")
                 or self._detect_default_service(service)
             )
+            svc_email = self.resolve_service_email(
+                client_uuid, svc_name, explicit_email=email, existing_entry=existing_entry
+            )
+            curr_service_emails[svc_name] = svc_email
             svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
             new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
             curr_service_states[svc_name] = {
@@ -301,7 +378,15 @@ class ClientStore:
                 "version": new_svc_ver,
                 "tombstone": False,
                 "updated_at": now_ts,
+                "email": svc_email,
             }
+            for other_s, other_st in curr_service_states.items():
+                if other_s != svc_name and isinstance(other_st, dict):
+                    other_em = self.resolve_service_email(
+                        client_uuid, other_s, existing_entry=existing_entry
+                    )
+                    other_st["email"] = other_em
+                    curr_service_emails[other_s] = other_em
             active_services = [
                 s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
             ]
@@ -315,11 +400,11 @@ class ClientStore:
                 "services": active_services,
                 "service": svc_name,
                 "service_states": curr_service_states,
+                "service_emails": curr_service_emails,
                 "tombstone": False,
                 "updated_at": now_ts,
+                "email": svc_email,
             }
-            if email or existing_entry.get("email"):
-                entry["email"] = email or existing_entry.get("email")
         else:
             svc_name = self.canonicalize_service(service)
             targets = (
@@ -328,6 +413,13 @@ class ClientStore:
                 else (list(curr_service_states.keys()) or ["vless", "white_internet"])
             )
             for s in targets:
+                s_email = self.resolve_service_email(
+                    client_uuid,
+                    s,
+                    explicit_email=email if s == svc_name else None,
+                    existing_entry=existing_entry,
+                )
+                curr_service_emails[s] = s_email
                 svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
                 new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
                 curr_service_states[s] = {
@@ -335,7 +427,15 @@ class ClientStore:
                     "version": new_svc_ver,
                     "tombstone": False,
                     "updated_at": now_ts,
+                    "email": s_email,
                 }
+            for other_s, other_st in curr_service_states.items():
+                if other_s not in targets and isinstance(other_st, dict):
+                    other_em = self.resolve_service_email(
+                        client_uuid, other_s, existing_entry=existing_entry
+                    )
+                    other_st["email"] = other_em
+                    curr_service_emails[other_s] = other_em
             active_services = [
                 s for s, st in curr_service_states.items() if st.get("is_active") is True and not st.get("tombstone", False)
             ]
@@ -348,14 +448,22 @@ class ClientStore:
                 "version": global_ver,
                 "services": active_services,
                 "service_states": curr_service_states,
+                "service_emails": curr_service_emails,
                 "updated_at": now_ts,
             }
             if active_services:
-                entry["service"] = active_services[-1]
-            elif existing_entry.get("service"):
-                entry["service"] = existing_entry["service"]
-            if existing_entry.get("email"):
-                entry["email"] = existing_entry["email"]
+                active_svc = active_services[-1]
+                entry["service"] = active_svc
+                entry["email"] = curr_service_emails.get(active_svc) or self.resolve_service_email(
+                    client_uuid, active_svc, existing_entry=existing_entry
+                )
+            else:
+                if existing_entry.get("service"):
+                    entry["service"] = existing_entry["service"]
+                if existing_entry.get("email"):
+                    entry["email"] = existing_entry["email"]
+                elif svc_name and curr_service_emails.get(svc_name):
+                    entry["email"] = curr_service_emails[svc_name]
 
         entries[client_uuid] = entry
 
@@ -402,8 +510,13 @@ class ClientStore:
             entries = self.load_client_entries()
             existing_entry = entries.get(client_uuid, {})
             curr_service_states = self._extract_service_states(existing_entry)
+            curr_service_emails = self._extract_service_emails(existing_entry, curr_service_states)
             svc_name = self.canonicalize_service(service)
             if svc_name:
+                s_email = self.resolve_service_email(
+                    client_uuid, svc_name, existing_entry=existing_entry
+                )
+                curr_service_emails[svc_name] = s_email
                 svc_curr_ver = curr_service_states.get(svc_name, {}).get("version", 0)
                 new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
                 curr_service_states[svc_name] = {
@@ -411,6 +524,7 @@ class ClientStore:
                     "version": new_svc_ver,
                     "tombstone": True,
                     "updated_at": time.time(),
+                    "email": s_email,
                 }
             else:
                 services_to_tombstone = (
@@ -419,6 +533,10 @@ class ClientStore:
                     else ["vless", "white_internet"]
                 )
                 for s in services_to_tombstone:
+                    s_email = self.resolve_service_email(
+                        client_uuid, s, existing_entry=existing_entry
+                    )
+                    curr_service_emails[s] = s_email
                     svc_curr_ver = curr_service_states.get(s, {}).get("version", 0)
                     new_svc_ver = version if version is not None else max(svc_curr_ver + 1, 1)
                     curr_service_states[s] = {
@@ -426,6 +544,7 @@ class ClientStore:
                         "version": new_svc_ver,
                         "tombstone": True,
                         "updated_at": time.time(),
+                        "email": s_email,
                     }
 
             active_services = [
@@ -441,14 +560,24 @@ class ClientStore:
                 else True
             )
 
-            entries[client_uuid] = {
+            entry_del: Dict[str, Any] = {
                 "is_active": bool(active_services),
                 "version": global_ver,
                 "services": active_services,
                 "service_states": curr_service_states,
+                "service_emails": curr_service_emails,
                 "tombstone": is_global_tombstone,
                 "updated_at": time.time(),
             }
+            if active_services:
+                active_svc = active_services[-1]
+                entry_del["service"] = active_svc
+                entry_del["email"] = curr_service_emails.get(active_svc) or self.resolve_service_email(
+                    client_uuid, active_svc, existing_entry=existing_entry
+                )
+            elif existing_entry.get("email"):
+                entry_del["email"] = existing_entry["email"]
+            entries[client_uuid] = entry_del
             if not self.save_client_entries(entries):
                 raise IOError(f"Failed to persist client deletion tombstone to disk: {client_uuid}")
         finally:

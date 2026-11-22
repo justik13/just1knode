@@ -614,20 +614,22 @@ def _xray_email_for_inbound(
     tag: str,
     service: Optional[str] = None,
     explicit_email: Optional[str] = None,
+    stored_entry: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return service-scoped Xray user email so QueryStats never mixes Standard and WI traffic."""
-    if explicit_email and (":" in explicit_email or "@" in explicit_email):
-        return explicit_email
     if is_wl_inbound_tag(tag):
-        return f"{client_uuid}:wi"
-    if tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
-        return f"{client_uuid}:std"
-    eff = resolve_effective_service(service) if service else None
-    if eff == "white_internet":
-        return f"{client_uuid}:wi"
-    if eff == "vless":
-        return f"{client_uuid}:std"
-    return client_uuid
+        inbound_svc: Optional[str] = "white_internet"
+    elif tag.startswith("just1k-vless-") or tag == "just1k-vless-direct":
+        inbound_svc = "vless"
+    else:
+        inbound_svc = resolve_effective_service(service) if service else None
+
+    return ClientStore.resolve_service_email(
+        client_uuid,
+        inbound_svc,
+        explicit_email=explicit_email,
+        existing_entry=stored_entry,
+    )
 
 
 _epoch_sync_lock = threading.RLock()
@@ -679,7 +681,10 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
                         client_uuid,
                         flow=get_inbound_flow(tag),
                         email=_xray_email_for_inbound(
-                            client_uuid, tag, s, explicit_email=meta.get("email")
+                            client_uuid,
+                            tag,
+                            s,
+                            stored_entry=meta,
                         ),
                     )
                     restored_registrations += 1
@@ -703,12 +708,14 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     return restored_unique, had_failures
 
 
-def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
+def sync_active_users_with_epoch(current_epoch: Optional[str], *, blocking: bool = True) -> None:
     """Ensures in-memory active users set is aligned with current Xray epoch."""
     global _last_restore_attempt_ts
     if not current_epoch:
         return
-    with _epoch_sync_lock:
+    if not _epoch_sync_lock.acquire(blocking=blocking):
+        return
+    try:
         if grpc_client._active_users_epoch != current_epoch:
             now = time.time()
             if (now - _last_restore_attempt_ts) < _RESTORE_FAILURE_COOLDOWN_SEC:
@@ -735,6 +742,8 @@ def sync_active_users_with_epoch(current_epoch: Optional[str]) -> None:
                     "Xray instance epoch changed to %s, but gRPC is not healthy yet. Deferring client restoration.",
                     current_epoch,
                 )
+    finally:
+        _epoch_sync_lock.release()
 
 
 @asynccontextmanager
@@ -869,6 +878,11 @@ def healthcheck(response: Response) -> Dict[str, Any]:
         and starttime is not None
         and boot_id is not None
     )
+    if is_running and running_epoch and grpc_client._active_users_epoch != running_epoch:
+        try:
+            sync_active_users_with_epoch(running_epoch, blocking=False)
+        except Exception as e:
+            logger.error("Healthcheck epoch sync failed: %s", e)
     epoch_synced = True
     if running_epoch and grpc_client._active_users_epoch != running_epoch:
         epoch_synced = False
@@ -1459,6 +1473,7 @@ async def batch_sync_clients(
         finally:
             if pending_mutations:
                 lock_fd = None
+                entries: Optional[Dict[str, Any]] = None
                 try:
                     client_store._ensure_dir()
                     lock_fd = client_store._acquire_lock()
@@ -1488,10 +1503,17 @@ async def batch_sync_clients(
                         raise RuntimeError("save_client_entries returned False")
                 except Exception as exc:
                     logger.error("Batch client_store persist failed: %s", exc)
+                    fallback_entries = entries if isinstance(entries, dict) else (preloaded_entries or {})
                     for c_uid, is_act, _ver, em, svc in reversed(pending_mutations):
                         for tag in get_target_inbounds(service=svc):
                             try:
-                                mail = _xray_email_for_inbound(c_uid, tag, svc, explicit_email=em)
+                                mail = _xray_email_for_inbound(
+                                    c_uid,
+                                    tag,
+                                    svc,
+                                    explicit_email=em,
+                                    stored_entry=fallback_entries.get(c_uid),
+                                )
                                 if is_act:
                                     grpc_client.remove_user(tag, c_uid, email=mail)
                                 else:
@@ -1587,20 +1609,23 @@ async def _sync_client_unlocked(
 
     # Monotonic version fencing check strictly scoped to target service
     curr_ver: Optional[int] = None
-    if req.version is not None:
-        if preloaded_entries is not None:
-            entries = preloaded_entries
-        else:
-            try:
-                entries = client_store.load_client_entries()
-            except ClientStoreCorruptedError as e:
+    curr_entry: Optional[Dict[str, Any]] = None
+    if preloaded_entries is not None:
+        curr_entry = preloaded_entries.get(client_uuid)
+    else:
+        try:
+            entries = client_store.load_client_entries()
+            curr_entry = entries.get(client_uuid)
+        except ClientStoreCorruptedError as e:
+            if req.version is not None:
                 logger.critical("Cannot sync client: client store corrupted: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=f"Client store corrupted: {e}",
                 ) from e
+            logger.warning("Client store corrupted during unversioned sync lookup: %s", e)
 
-        curr_entry = entries.get(client_uuid)
+    if req.version is not None:
         if curr_entry:
             service_states = curr_entry.get("service_states")
             if isinstance(service_states, dict):
@@ -1632,7 +1657,11 @@ async def _sync_client_unlocked(
                 for tag in target_inbounds:
                     try:
                         em = _xray_email_for_inbound(
-                            client_uuid, tag, effective_service, explicit_email=getattr(req, "email", None)
+                            client_uuid,
+                            tag,
+                            effective_service,
+                            explicit_email=getattr(req, "email", None),
+                            stored_entry=curr_entry,
                         )
                         if desired_state == "active":
                             if not grpc_client.probe_user_presence(tag, client_uuid, email=em):
@@ -1693,7 +1722,11 @@ async def _sync_client_unlocked(
                 for tag in target_inbounds:
                     try:
                         em = _xray_email_for_inbound(
-                            client_uuid, tag, effective_service, explicit_email=req.email
+                            client_uuid,
+                            tag,
+                            effective_service,
+                            explicit_email=req.email,
+                            stored_entry=curr_entry,
                         )
                         if curr_state == "active" and not is_tombstone:
                             if grpc_client.probe_user_presence(tag, client_uuid, email=em):
@@ -1724,7 +1757,9 @@ async def _sync_client_unlocked(
     initial_states: Dict[str, str] = {}
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
+            em = _xray_email_for_inbound(
+                client_uuid, tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+            )
             initial_states[tag] = "active" if grpc_client.probe_user_presence(tag, client_uuid, email=em) else "disabled"
         except Exception:
             initial_states[tag] = "disabled"
@@ -1734,7 +1769,9 @@ async def _sync_client_unlocked(
     failed_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
+            em = _xray_email_for_inbound(
+                client_uuid, tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+            )
             grpc_client.ensure_user_state(
                 tag, client_uuid, desired_state=desired_state, flow=get_inbound_flow(tag), email=em
             )
@@ -1750,7 +1787,9 @@ async def _sync_client_unlocked(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
-                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
+                em = _xray_email_for_inbound(
+                    client_uuid, rb_tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+                )
                 grpc_client.ensure_user_state(
                     rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
@@ -1787,7 +1826,9 @@ async def _sync_client_unlocked(
     unverified_inbounds: List[str] = []
     for tag in target_inbounds:
         try:
-            em = _xray_email_for_inbound(client_uuid, tag, effective_service, explicit_email=req_email)
+            em = _xray_email_for_inbound(
+                client_uuid, tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+            )
             if desired_state == "active":
                 is_verified = grpc_client.probe_user_presence(tag, client_uuid, email=em)
             else:
@@ -1810,7 +1851,9 @@ async def _sync_client_unlocked(
         for rb_tag in succeeded_inbounds:
             try:
                 init_st = initial_states.get(rb_tag, "disabled")
-                em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
+                em = _xray_email_for_inbound(
+                    client_uuid, rb_tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+                )
                 grpc_client.ensure_user_state(
                     rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                 )
@@ -1846,7 +1889,9 @@ async def _sync_client_unlocked(
             for rb_tag in succeeded_inbounds:
                 try:
                     init_st = initial_states.get(rb_tag, "disabled")
-                    em = _xray_email_for_inbound(client_uuid, rb_tag, effective_service, explicit_email=req_email)
+                    em = _xray_email_for_inbound(
+                        client_uuid, rb_tag, effective_service, explicit_email=req_email, stored_entry=curr_entry
+                    )
                     grpc_client.ensure_user_state(
                         rb_tag, client_uuid, desired_state=init_st, flow=get_inbound_flow(rb_tag), email=em
                     )
@@ -1983,11 +2028,18 @@ async def delete_client(
                     }
 
         entries_for_del = client_store.load_client_entries()
-        del_email = (entries_for_del.get(clean_uuid) or {}).get("email")
+        stored_del_entry = (
+            entries_for_del.get(clean_uuid) if isinstance(entries_for_del, dict) else None
+        )
         failed_inbounds: List[str] = []
         for tag in target_inbounds:
             try:
-                em = _xray_email_for_inbound(clean_uuid, tag, eff_service, explicit_email=del_email)
+                em = _xray_email_for_inbound(
+                    clean_uuid,
+                    tag,
+                    eff_service,
+                    stored_entry=stored_del_entry,
+                )
                 grpc_client.remove_user(tag, clean_uuid, email=em)
             except Exception as e:
                 logger.error(
@@ -2094,10 +2146,17 @@ async def get_clients_inventory(
 
         inbound_presence: Dict[str, bool] = {}
         eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
-        probe_email = (stored_entries.get(clean_cid) or {}).get("email") if isinstance(stored_entries, dict) else None
+        stored_cid_entry = (
+            stored_entries.get(clean_cid) if isinstance(stored_entries, dict) else None
+        )
         for tag in target_inbounds:
             try:
-                em = _xray_email_for_inbound(clean_cid, tag, eff_req_svc, explicit_email=probe_email)
+                em = _xray_email_for_inbound(
+                    clean_cid,
+                    tag,
+                    eff_req_svc,
+                    stored_entry=stored_cid_entry,
+                )
                 present = grpc_client.probe_user_presence(tag, clean_cid, email=em)
                 inbound_presence[tag] = present
             except Exception as e:
