@@ -492,10 +492,9 @@ def main():
                 if isinstance(m_cfg, dict) and m_cfg.get("xPaddingPlacement"):
                     spec_eff["xPaddingPlacement"] = str(m_cfg["xPaddingPlacement"])
 
-                if len(loc_cdns) == 1:
-                    loc_slug = code
-                else:
-                    loc_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
+                # Единый канонический формат тега и пути независимо от числа активных CDN,
+                # чтобы добавление/отключение второго CDN не ломало существующие подписки.
+                loc_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
                 r_tag = f"just1k-wl-inbound-{loc_slug}"
 
                 req_port = int(loc.get("inbound_port") or 0) if len(loc_cdns) == 1 else 0
@@ -509,8 +508,8 @@ def main():
 
                 if cdn_paths.get(cdn_key):
                     r_path = str(cdn_paths[cdn_key])
-                elif len(loc_cdns) == 1 or (cdn_idx == 0 and loc.get("path")):
-                    r_path = str(loc.get("path") or f"{secret_base}/{code}")
+                elif cdn_idx == 0 and loc.get("path"):
+                    r_path = str(loc["path"])
                 else:
                     r_path = f"{secret_base}/{sp['subpath']}/{code}"
                 if not r_path.startswith("/"):
