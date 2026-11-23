@@ -401,9 +401,9 @@ update_node() {
                 fi
                 local fetched_sha=""
                 if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-                    fetched_sha="$(timeout 5s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)"
+                    fetched_sha="$(timeout 15s git ls-remote "$repo_url" "refs/heads/${ref}" 2>/dev/null | awk '{print $1}' || true)"
                     if [[ ! "$fetched_sha" =~ ^[0-9a-f]{40}$ ]]; then
-                        fetched_sha="$(timeout 5s git ls-remote "$repo_url" "$ref" 2>/dev/null | awk '{print $1}' || true)"
+                        fetched_sha="$(timeout 15s git ls-remote "$repo_url" "$ref" 2>/dev/null | awk '{print $1}' || true)"
                     fi
                 fi
                 if [[ ! "$fetched_sha" =~ ^[0-9a-f]{40}$ && "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
