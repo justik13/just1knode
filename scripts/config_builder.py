@@ -677,13 +677,11 @@ def main():
             listen_block = (
                 "    listen 127.0.0.1:8080;\n"
                 if has_vless_tls else
-                "    listen 443 ssl http2;\n"
+                "    listen 443 ssl;\n"
                 f"    ssl_certificate {c_file};\n"
                 f"    ssl_certificate_key {k_file};\n"
                 "    ssl_protocols TLSv1.2 TLSv1.3;\n"
                 "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
-                "    ssl_session_cache shared:just1k_ssl:10m;\n"
-                "    ssl_session_timeout 10m;\n"
             )
             if has_vless_tls:
                 catchall_block = (
