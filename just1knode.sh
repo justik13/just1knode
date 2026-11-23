@@ -113,7 +113,7 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
         fi
         bootstrap_sha=""
         if command -v git >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-            bootstrap_sha="$(timeout 5s git ls-remote "${JUST1KNODE_REPO_URL:-https://github.com/justik13/just1knode}" "refs/heads/${JUST1KNODE_REF:-main}" 2>/dev/null | awk '{print $1}' || true)"
+            bootstrap_sha="$(timeout 15s git ls-remote "${JUST1KNODE_REPO_URL:-https://github.com/justik13/just1knode}" "refs/heads/${JUST1KNODE_REF:-main}" 2>/dev/null | awk '{print $1}' || true)"
         fi
         if [[ "$bootstrap_sha" =~ ^[0-9a-f]{40}$ ]]; then
             printf '%s\n' "$bootstrap_sha" > "$INSTALL_DIR/COMMIT" 2>/dev/null || true
