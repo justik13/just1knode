@@ -497,21 +497,12 @@ def main():
                 loc_slug = f"{code}__{clean_code(cdn_key, f'cdn{cdn_idx + 1}')}"
                 r_tag = f"just1k-wl-inbound-{loc_slug}"
 
-                req_port = int(loc.get("inbound_port") or 0) if len(loc_cdns) == 1 else 0
-                if not req_port or req_port in used_ports:
-                    while next_port in used_ports:
-                        next_port += 1
-                    r_port = next_port
-                else:
-                    r_port = req_port
+                while next_port in used_ports:
+                    next_port += 1
+                r_port = next_port
                 used_ports.add(r_port)
 
-                if cdn_paths.get(cdn_key):
-                    r_path = str(cdn_paths[cdn_key])
-                elif cdn_idx == 0 and loc.get("path"):
-                    r_path = str(loc["path"])
-                else:
-                    r_path = f"{secret_base}/{sp['subpath']}/{code}"
+                r_path = str(cdn_paths[cdn_key]) if cdn_paths.get(cdn_key) else f"{secret_base}/{sp['subpath']}/{code}"
                 if not r_path.startswith("/"):
                     r_path = "/" + r_path
 
