@@ -330,7 +330,7 @@ def main():
         ]
 
     cfg = {
-        "log": {"loglevel": "warning"},
+        "log": {"access": "none", "loglevel": "warning"},
         "stats": {},
         "api": {"tag": "api", "services": ["HandlerService", "StatsService"]},
         "policy": {
@@ -677,11 +677,13 @@ def main():
             listen_block = (
                 "    listen 127.0.0.1:8080;\n"
                 if has_vless_tls else
-                "    listen 443 ssl;\n"
+                "    listen 443 ssl http2;\n"
                 f"    ssl_certificate {c_file};\n"
                 f"    ssl_certificate_key {k_file};\n"
                 "    ssl_protocols TLSv1.2 TLSv1.3;\n"
                 "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
+                "    ssl_session_cache shared:SSL:10m;\n"
+                "    ssl_session_timeout 10m;\n"
             )
             if has_vless_tls:
                 catchall_block = (
@@ -983,7 +985,7 @@ def main():
             },
         })
         cfg["outbounds"] = [
-            {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
+            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
             {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         ]
         cfg["routing"]["rules"] = [api_rule] + antiabuse_rules() + [
