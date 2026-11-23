@@ -330,7 +330,7 @@ def main():
         ]
 
     cfg = {
-        "log": {"loglevel": "warning"},
+        "log": {"access": "none", "loglevel": "warning"},
         "stats": {},
         "api": {"tag": "api", "services": ["HandlerService", "StatsService"]},
         "policy": {
@@ -973,7 +973,7 @@ def main():
             },
         })
         cfg["outbounds"] = [
-            {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
+            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
             {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         ]
         cfg["routing"]["rules"] = [api_rule] + antiabuse_rules() + [
