@@ -682,7 +682,7 @@ def main():
                 f"    ssl_certificate_key {k_file};\n"
                 "    ssl_protocols TLSv1.2 TLSv1.3;\n"
                 "    ssl_ciphers HIGH:!aNULL:!MD5;\n"
-                "    ssl_session_cache shared:SSL:10m;\n"
+                "    ssl_session_cache shared:just1k_ssl:10m;\n"
                 "    ssl_session_timeout 10m;\n"
             )
             if has_vless_tls:
