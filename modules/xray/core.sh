@@ -213,6 +213,11 @@ update_node() {
 
     if [[ $download_ok -eq 1 ]]; then
         info "2/4. Распаковка и проверка целостности архива..."
+        local tar_entries
+        if ! tar_entries="$(tar -tzf "$tmp_tar" 2>/dev/null)" || [[ -z "$tar_entries" ]] || printf '%s\n' "$tar_entries" | grep -Eq '(^/|^\.\./|/\.\./|/\.\.$|^\.\.$)'; then
+            rm -rf "$tmp_tar" "$tmp_dir"
+            error "Ошибка безопасности архива: обнаружены небезопасные пути (path traversal) или архив поврежден. Обновление прервано."
+        fi
         if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 --no-same-owner 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_dir"
             error "Ошибка целостности архива: распаковка не удалась. Обновление прервано."
