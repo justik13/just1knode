@@ -860,11 +860,19 @@ def _probe_via_socks5_sync(
         path = f"{path}?{parsed.query}"
 
     started = time.monotonic()
+    deadline = started + timeout
+
+    def _remaining() -> float:
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            raise TimeoutError("Timeout (possible TSPU silent stall)")
+        return rem
+
     raw_sock = None
     tls_sock = None
     try:
-        raw_sock = socket.create_connection(("127.0.0.1", socks_port), timeout=timeout)
-        raw_sock.settimeout(timeout)
+        raw_sock = socket.create_connection(("127.0.0.1", socks_port), timeout=_remaining())
+        raw_sock.settimeout(_remaining())
 
         # 1. SOCKS5 greeting (username/password auth = 0x02)
         raw_sock.sendall(b"\x05\x01\x02")
@@ -873,6 +881,7 @@ def _probe_via_socks5_sync(
             return False, 0, None, f"SOCKS5 auth method rejected: {ver_method!r}"
 
         # 2. RFC 1929 username/password
+        raw_sock.settimeout(_remaining())
         user_b = bridge_tag.encode("utf-8")[:255]
         pass_b = b"just1k-probe"
         raw_sock.sendall(b"\x01" + bytes([len(user_b)]) + user_b + bytes([len(pass_b)]) + pass_b)
@@ -881,6 +890,7 @@ def _probe_via_socks5_sync(
             return False, 0, None, "SOCKS5 auth failed"
 
         # 3. SOCKS5 CONNECT (ATYP=0x03 domain)
+        raw_sock.settimeout(_remaining())
         host_b = host.encode("ascii")
         raw_sock.sendall(
             b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + port.to_bytes(2, "big")
@@ -900,9 +910,10 @@ def _probe_via_socks5_sync(
 
         io_sock: socket.socket = raw_sock
         if parsed.scheme == "https":
+            raw_sock.settimeout(_remaining())
             ctx = ssl.create_default_context()
             tls_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
-            tls_sock.settimeout(timeout)
+            tls_sock.settimeout(_remaining())
             io_sock = tls_sock
 
         req = (
@@ -910,8 +921,10 @@ def _probe_via_socks5_sync(
             f"Host: {host}\r\n"
             f"User-Agent: just1k-bridge-probe/1.0\r\n"
             f"Accept: */*\r\n"
+            f"Accept-Encoding: identity\r\n"
             f"Connection: close\r\n\r\n"
         ).encode("ascii")
+        io_sock.settimeout(_remaining())
         io_sock.sendall(req)
 
         total_bytes = 0
@@ -919,6 +932,7 @@ def _probe_via_socks5_sync(
         headers_parsed = False
         status_code = 0
         while total_bytes < min_bytes + 4096:
+            io_sock.settimeout(_remaining())
             chunk = io_sock.recv(16384)
             if not chunk:
                 break
@@ -993,7 +1007,9 @@ async def _run_bridge_probe_cycle() -> None:
         bytes_read = 0
         latency_ms = None
         err_msg = "No probe URL configured"
-        for probe_url in BRIDGE_PROBE_URLS:
+        for url_idx, probe_url in enumerate(BRIDGE_PROBE_URLS):
+            if url_idx > 0:
+                await asyncio.sleep(0.5)
             ok, bytes_read, latency_ms, err_msg = await asyncio.to_thread(
                 _probe_via_socks5_sync,
                 socks_port,
