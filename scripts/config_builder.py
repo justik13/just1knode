@@ -601,6 +601,49 @@ def main():
             if not bi_default_tag or p.get("is_default"):
                 bi_default_tag = ob_tag
 
+        # Outbounds для фонового зондирования временно исключённых eu_hub (probe_bridges)
+        probe_bridges_raw = links.get("probe_bridges") if isinstance(links.get("probe_bridges"), list) else []
+        probe_only_tags = []
+        for idx, p in enumerate(probe_bridges_raw):
+            if not isinstance(p, dict):
+                continue
+            p_code = clean_code(p.get("code"), f"probe{idx+1}")
+            ob_tag = f"bridge-probe-{p_code}"
+            if ob_tag in probe_only_tags:
+                continue
+            ob = build_bridge_outbound(ob_tag, p)
+            if ob is None:
+                continue
+            probe_only_tags.append(ob_tag)
+            cfg["outbounds"].append(ob)
+
+        all_probe_tags = list(dict.fromkeys(list(std_outbounds.values()) + list(bi_outbounds.values()) + probe_only_tags))
+        probe_rules = []
+        if all_probe_tags:
+            probe_socks_port = 10809
+            while probe_socks_port in used_ports:
+                probe_socks_port += 1
+            used_ports.add(probe_socks_port)
+            cfg["inbounds"].append({
+                "tag": "just1k-probe-socks",
+                "listen": "127.0.0.1",
+                "port": probe_socks_port,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "password",
+                    "accounts": [{"user": t, "pass": "just1k-probe"} for t in all_probe_tags],
+                    "udp": False,
+                },
+                "sniffing": {"enabled": False},
+            })
+            for t in all_probe_tags:
+                probe_rules.append({
+                    "type": "field",
+                    "inboundTag": ["just1k-probe-socks"],
+                    "user": [t],
+                    "outboundTag": t,
+                })
+
         balancers = []
         observed_tags = set()
 
@@ -638,7 +681,7 @@ def main():
                 })
 
         all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
-        rules = [api_rule] + antiabuse_rules()
+        rules = [api_rule] + antiabuse_rules() + probe_rules
         if all_client_inbounds:
             # Строго прямой выход для РФ-трафика (домены РФ + GeoIP RU)
             rules.append(
@@ -679,8 +722,8 @@ def main():
             cfg["observatory"] = {
                 "subjectSelector": sorted(observed_tags),
                 "probeURL": "https://www.google.com/generate_204",
-                "probeInterval": "10s",
-                "enableConcurrency": True,
+                "probeInterval": "30s",
+                "enableConcurrency": False,
             }
 
         cfg["routing"]["rules"] = rules
