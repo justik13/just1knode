@@ -833,8 +833,58 @@ async def track_bot_activity_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_FAILED_AUTH_WINDOW_SECONDS = 60.0
+_FAILED_AUTH_MAX_ATTEMPTS = 15
+_FAILED_AUTH_LOCKOUT_SECONDS = 120.0
+_failed_auth_lock = threading.Lock()
+_failed_auth_attempts: Dict[str, List[float]] = {}
+_failed_auth_blocked_until: Dict[str, float] = {}
+
+
+def _check_auth_rate_limit(client_ip: str) -> Optional[int]:
+    """Return remaining block seconds if IP exceeded failed auth attempts, else None."""
+    now = time.monotonic()
+    with _failed_auth_lock:
+        blocked_until = _failed_auth_blocked_until.get(client_ip, 0.0)
+        if blocked_until > now:
+            return max(1, int(blocked_until - now))
+        if blocked_until:
+            _failed_auth_blocked_until.pop(client_ip, None)
+    return None
+
+
+def _record_auth_failure(client_ip: str) -> None:
+    """Record a failed X-API-Key attempt and temporarily block abusive IPs."""
+    now = time.monotonic()
+    with _failed_auth_lock:
+        if len(_failed_auth_attempts) > 4096:
+            _failed_auth_attempts.clear()
+        recent = [
+            ts for ts in _failed_auth_attempts.get(client_ip, [])
+            if now - ts <= _FAILED_AUTH_WINDOW_SECONDS
+        ]
+        recent.append(now)
+        _failed_auth_attempts[client_ip] = recent
+        if len(recent) >= _FAILED_AUTH_MAX_ATTEMPTS:
+            _failed_auth_blocked_until[client_ip] = now + _FAILED_AUTH_LOCKOUT_SECONDS
+            _failed_auth_attempts.pop(client_ip, None)
+            logger.warning("Temporarily blocked %s after %d failed X-API-Key attempts", client_ip, len(recent))
+
+
 # Security dependency
-def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+def verify_api_key(
+    request: Request,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    retry_after = _check_auth_rate_limit(client_ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed authentication attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     expected_key = os.getenv("XRAY_API_KEY") or API_KEY
     if not expected_key:
         logger.error("XRAY_API_KEY is not configured on the node")
@@ -843,8 +893,11 @@ def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             detail="Node API key is not configured",
         )
     if not x_api_key or not secrets.compare_digest(x_api_key, expected_key):
+        _record_auth_failure(client_ip)
         logger.warning(
-            "Unauthorized access attempt with X-API-Key: %s", "present" if x_api_key else "missing"
+            "Unauthorized access attempt from %s with X-API-Key: %s",
+            client_ip,
+            "present" if x_api_key else "missing",
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
