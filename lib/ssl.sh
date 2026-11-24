@@ -109,8 +109,11 @@ if [[ -d "$XRAY_TLS_DIR" ]]; then
     done
     if getent group xrayapi >/dev/null 2>&1; then
         chown -R root:xrayapi "$XRAY_TLS_DIR" 2>/dev/null || true
+        chmod 750 "$XRAY_TLS_DIR" 2>/dev/null || true
         chmod 640 "$XRAY_TLS_DIR"/*privkey.pem 2>/dev/null || true
         chmod 644 "$XRAY_TLS_DIR"/*fullchain.pem 2>/dev/null || true
+    else
+        chmod 750 "$XRAY_TLS_DIR" 2>/dev/null || true
     fi
 fi
 
@@ -136,7 +139,11 @@ sync_xray_tls_cert_files() {
     [[ -f "${le_live}/fullchain.pem" && -f "${le_live}/privkey.pem" ]] || return 1
 
     mkdir -p "$xray_tls_dir"
-    chmod 755 "$(dirname "$xray_tls_dir")" "$xray_tls_dir" 2>/dev/null || true
+    chmod 755 "$(dirname "$xray_tls_dir")" 2>/dev/null || true
+    if getent group xrayapi >/dev/null 2>&1; then
+        chown root:xrayapi "$xray_tls_dir" 2>/dev/null || true
+    fi
+    chmod 750 "$xray_tls_dir" 2>/dev/null || true
 
     local targets=("fullchain.pem" "privkey.pem")
     if [[ -n "$prefix" && "$prefix" != "default" ]]; then

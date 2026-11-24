@@ -509,6 +509,7 @@ update_node() {
         source "${node_dir}/lib/module_loader.sh" 2>/dev/null || true
         source "${node_dir}/lib/builder.sh" 2>/dev/null || true
         source "${node_dir}/modules/xray/core.sh" 2>/dev/null || true
+        source "${node_dir}/modules/xray/api.sh" 2>/dev/null || true
         source "${node_dir}/modules/roles/base.sh" 2>/dev/null || true
         source "${node_dir}/modules/roles/ru_hub.sh" 2>/dev/null || true
         source "${node_dir}/modules/roles/eu_hub.sh" 2>/dev/null || true
@@ -555,6 +556,11 @@ update_node_post() {
     # Обновляем systemd trigger (just1knode-apply.path / service) при наличии xray-api
     if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]] && declare -F deploy_apply_trigger_units >/dev/null 2>&1; then
         deploy_apply_trigger_units || true
+    fi
+
+    # Применяем актуальную политику прав доступа из новой версии кода (после exec update-post)
+    if declare -F harden_node_permissions >/dev/null 2>&1; then
+        harden_node_permissions || true
     fi
 
     local has_xray="0"
