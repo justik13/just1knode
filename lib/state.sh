@@ -30,7 +30,8 @@ init_state_dir() {
     fi
 
     chown -h root:xrayapi "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
-    chmod 660 "$STATE_FILE" "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
+    chmod 640 "$STATE_FILE" 2>/dev/null || true
+    chmod 660 "$CLIENTS_FILE" "$LINKS_FILE" 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
     find "$STATE_DIR" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
@@ -118,7 +119,7 @@ try:
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
     try:
         if hasattr(os, 'fchmod'):
-            os.fchmod(tmp_fd, 0o660)
+            os.fchmod(tmp_fd, 0o640)
         import grp
         gid = grp.getgrnam('xrayapi').gr_gid
         if hasattr(os, 'fchown'):
@@ -244,10 +245,12 @@ try:
 
     tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(f), suffix='.tmp')
     try:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(tmp_fd, 0o640)
         import grp
         gid = grp.getgrnam('xrayapi').gr_gid
-        os.fchown(tmp_fd, 0, gid)
-        os.fchmod(tmp_fd, 0o660)
+        if hasattr(os, 'fchown'):
+            os.fchown(tmp_fd, 0, gid)
     except Exception:
         pass
     with os.fdopen(tmp_fd, 'w', encoding='utf-8', errors='replace') as fp:

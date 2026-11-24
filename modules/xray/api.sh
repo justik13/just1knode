@@ -268,6 +268,82 @@ EOF
     fi
 }
 
+harden_node_permissions() {
+    local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+    local xray_cfg_dir="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
+    local state_dir="${STATE_DIR:-/etc/just1knode}"
+    local state_file="${STATE_FILE:-${state_dir}/state.json}"
+    local clients_file="${CLIENTS_FILE:-${state_dir}/clients.json}"
+    local links_file="${LINKS_FILE:-${state_dir}/links.json}"
+
+    local has_xrayapi=0
+    if getent group xrayapi >/dev/null 2>&1; then
+        has_xrayapi=1
+    elif [[ -d "${XRAY_API_DIR:-/opt/xray-api}" || -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
+        if declare -F ensure_xrayapi_user >/dev/null 2>&1 && ensure_xrayapi_user; then
+            if getent group xrayapi >/dev/null 2>&1; then
+                has_xrayapi=1
+            fi
+        fi
+    fi
+
+    # Права на чтение/синхронизацию TLS сертификатов и конфигурации Xray
+    if [[ -d "${le_dir}/live" ]]; then
+        chmod 755 "$le_dir" 2>/dev/null || true
+        if [[ $has_xrayapi -eq 1 ]]; then
+            chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
+        fi
+        chmod 750 "${le_dir}/live" 2>/dev/null || true
+    fi
+    if [[ -d "${xray_cfg_dir}" ]]; then
+        chmod 755 "$xray_cfg_dir" 2>/dev/null || true
+    fi
+    if [[ -d "${xray_cfg_dir}/tls" ]]; then
+        if [[ $has_xrayapi -eq 1 ]]; then
+            chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
+        fi
+        chmod 750 "${xray_cfg_dir}/tls" 2>/dev/null || true
+    fi
+    if [[ -f "${xray_cfg_dir}/config.json" ]]; then
+        if [[ $has_xrayapi -eq 1 ]]; then
+            chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
+        fi
+        chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
+    fi
+
+    # Права на каталог состояния (SGID 2770; state.json — read-only 640 для группы xrayapi)
+    if [[ -d "${state_dir}" ]]; then
+        if [[ $has_xrayapi -eq 1 ]]; then
+            chown -R root:xrayapi "${state_dir}" 2>/dev/null || true
+        fi
+        chmod 2770 "${state_dir}" 2>/dev/null || true
+        if [[ -f "${clients_file}" ]]; then
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${clients_file}" 2>/dev/null || true
+            fi
+            chmod 660 "${clients_file}" 2>/dev/null || true
+        fi
+        if [[ -f "${state_file}" ]]; then
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${state_file}" 2>/dev/null || true
+            fi
+            chmod 640 "${state_file}" 2>/dev/null || true
+        fi
+        if [[ -f "${links_file}" ]]; then
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${links_file}" 2>/dev/null || true
+            fi
+            chmod 660 "${links_file}" 2>/dev/null || true
+        fi
+        if [[ $has_xrayapi -eq 1 ]]; then
+            find "${state_dir}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
+            find "${state_dir}" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
+        fi
+        find "${state_dir}" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
+        find "${state_dir}" -maxdepth 1 -type f -name "idempotency.db*" -exec chmod 660 {} + 2>/dev/null || true
+    fi
+}
+
 deploy_xray_api_service() {
     local api_key="${1:-}"
     local cdn_domain="${2:-}"
@@ -313,31 +389,11 @@ EOF
     chown -R xrayapi:xrayapi "${XRAY_API_LIB}" 2>/dev/null || true
     chmod 750 "${XRAY_API_LIB}"
 
-    # Права на чтение/синхронизацию TLS сертификатов и конфигурации Xray для пользователя xrayapi
+    # Права на чтение/синхронизацию TLS сертификатов, конфигурации Xray и каталога состояния
     local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
     local xray_cfg_dir="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
     mkdir -p "${le_dir}/live" "${xray_cfg_dir}/tls" 2>/dev/null || true
-    chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
-    chmod 755 "$le_dir" 2>/dev/null || true
-    chmod 750 "${le_dir}/live" 2>/dev/null || true
-    chmod 755 "$xray_cfg_dir" 2>/dev/null || true
-    chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
-    chmod 750 "${xray_cfg_dir}/tls" 2>/dev/null || true
-    if [[ -f "${xray_cfg_dir}/config.json" ]]; then
-        chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
-        chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
-    fi
-
-    # Права на каталог состояния для пользователя xrayapi (SGID 2770)
-    chown -R root:xrayapi "${STATE_DIR}" 2>/dev/null || true
-    chmod 2770 "${STATE_DIR}"
-    [[ -f "${CLIENTS_FILE}" ]] && { chown root:xrayapi "${CLIENTS_FILE}" 2>/dev/null || true; chmod 660 "${CLIENTS_FILE}"; }
-    [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 640 "${STATE_FILE}"; }
-    [[ -f "${LINKS_FILE:-${STATE_DIR}/links.json}" ]] && { chown root:xrayapi "${LINKS_FILE:-${STATE_DIR}/links.json}" 2>/dev/null || true; chmod 660 "${LINKS_FILE:-${STATE_DIR}/links.json}"; }
-    find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
-    find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true
-    find "${STATE_DIR}" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true
-    find "${STATE_DIR}" -maxdepth 1 -type f -name "idempotency.db*" -exec chmod 660 {} + 2>/dev/null || true
+    harden_node_permissions
 
     # Финальная синхронизация прав на каталог агента
     chown -R root:xrayapi "${XRAY_API_DIR}" 2>/dev/null || true
