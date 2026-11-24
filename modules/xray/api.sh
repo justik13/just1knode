@@ -281,7 +281,9 @@ harden_node_permissions() {
         has_xrayapi=1
     elif [[ -d "${XRAY_API_DIR:-/opt/xray-api}" || -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" ]]; then
         if declare -F ensure_xrayapi_user >/dev/null 2>&1 && ensure_xrayapi_user; then
-            getent group xrayapi >/dev/null 2>&1 && has_xrayapi=1
+            if getent group xrayapi >/dev/null 2>&1; then
+                has_xrayapi=1
+            fi
         fi
     fi
 
@@ -316,15 +318,21 @@ harden_node_permissions() {
         fi
         chmod 2770 "${state_dir}" 2>/dev/null || true
         if [[ -f "${clients_file}" ]]; then
-            [[ $has_xrayapi -eq 1 ]] && { chown root:xrayapi "${clients_file}" 2>/dev/null || true; }
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${clients_file}" 2>/dev/null || true
+            fi
             chmod 660 "${clients_file}" 2>/dev/null || true
         fi
         if [[ -f "${state_file}" ]]; then
-            [[ $has_xrayapi -eq 1 ]] && { chown root:xrayapi "${state_file}" 2>/dev/null || true; }
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${state_file}" 2>/dev/null || true
+            fi
             chmod 640 "${state_file}" 2>/dev/null || true
         fi
         if [[ -f "${links_file}" ]]; then
-            [[ $has_xrayapi -eq 1 ]] && { chown root:xrayapi "${links_file}" 2>/dev/null || true; }
+            if [[ $has_xrayapi -eq 1 ]]; then
+                chown root:xrayapi "${links_file}" 2>/dev/null || true
+            fi
             chmod 660 "${links_file}" 2>/dev/null || true
         fi
         if [[ $has_xrayapi -eq 1 ]]; then
