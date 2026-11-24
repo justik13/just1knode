@@ -836,6 +836,7 @@ async def track_bot_activity_middleware(request: Request, call_next):
 _FAILED_AUTH_WINDOW_SECONDS = 60.0
 _FAILED_AUTH_MAX_ATTEMPTS = 15
 _FAILED_AUTH_LOCKOUT_SECONDS = 120.0
+_FAILED_AUTH_MAX_ENTRIES = 4096
 _failed_auth_lock = threading.Lock()
 _failed_auth_attempts: Dict[str, List[float]] = {}
 _failed_auth_blocked_until: Dict[str, float] = {}
@@ -857,18 +858,38 @@ def _record_auth_failure(client_ip: str) -> None:
     """Record a failed X-API-Key attempt and temporarily block abusive IPs."""
     now = time.monotonic()
     with _failed_auth_lock:
-        if len(_failed_auth_attempts) > 4096:
-            _failed_auth_attempts.clear()
         recent = [
-            ts for ts in _failed_auth_attempts.get(client_ip, [])
+            ts for ts in _failed_auth_attempts.pop(client_ip, [])
             if now - ts <= _FAILED_AUTH_WINDOW_SECONDS
         ]
         recent.append(now)
-        _failed_auth_attempts[client_ip] = recent
         if len(recent) >= _FAILED_AUTH_MAX_ATTEMPTS:
+            _failed_auth_blocked_until.pop(client_ip, None)
+            if len(_failed_auth_blocked_until) >= _FAILED_AUTH_MAX_ENTRIES:
+                expired_blocked = [
+                    ip for ip, until in _failed_auth_blocked_until.items()
+                    if until <= now
+                ]
+                for ip in expired_blocked:
+                    _failed_auth_blocked_until.pop(ip, None)
+                while len(_failed_auth_blocked_until) >= _FAILED_AUTH_MAX_ENTRIES:
+                    _failed_auth_blocked_until.pop(next(iter(_failed_auth_blocked_until)))
             _failed_auth_blocked_until[client_ip] = now + _FAILED_AUTH_LOCKOUT_SECONDS
-            _failed_auth_attempts.pop(client_ip, None)
             logger.warning("Temporarily blocked %s after %d failed X-API-Key attempts", client_ip, len(recent))
+        else:
+            if len(_failed_auth_attempts) >= _FAILED_AUTH_MAX_ENTRIES:
+                expired_ips: List[str] = []
+                for ip, attempts in _failed_auth_attempts.items():
+                    active = [ts for ts in attempts if now - ts <= _FAILED_AUTH_WINDOW_SECONDS]
+                    if active:
+                        _failed_auth_attempts[ip] = active
+                    else:
+                        expired_ips.append(ip)
+                for ip in expired_ips:
+                    _failed_auth_attempts.pop(ip, None)
+                while len(_failed_auth_attempts) >= _FAILED_AUTH_MAX_ENTRIES:
+                    _failed_auth_attempts.pop(next(iter(_failed_auth_attempts)))
+            _failed_auth_attempts[client_ip] = recent
 
 
 # Security dependency

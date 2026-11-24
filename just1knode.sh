@@ -90,6 +90,12 @@ if [[ -z "$SCRIPT_DIR" || ! -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
             exit 1
         fi
         
+        if ! tar_entries="$(tar -tzf "$tmp_tar" 2>/dev/null)" || [[ -z "$tar_entries" ]] || printf '%s\n' "$tar_entries" | grep -Eq '(^/|^\.\./|/\.\./|/\.\.$|^\.\.$)'; then
+            rm -rf "$tmp_tar" "$tmp_extract"
+            echo "Ошибка: архив репозитория поврежден или содержит небезопасные пути (path traversal)." >&2
+            exit 1
+        fi
+        unset tar_entries
         tar -xzf "$tmp_tar" -C "$tmp_extract" --strip-components=1 --no-same-owner
         if [[ -d "$tmp_extract/just1knode" ]]; then
             cp -a "$tmp_extract/just1knode/." "$INSTALL_DIR/"

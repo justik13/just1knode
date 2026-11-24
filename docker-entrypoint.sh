@@ -4,7 +4,7 @@ set -euo pipefail
 NODE_ROLE="${NODE_ROLE:-ru_hub}"
 PORT="${PORT:-8444}"
 GRPC_PORT="${GRPC_PORT:-10085}"
-XRAY_API_KEY="${XRAY_API_KEY:-dev_node_secret_key_123456}"
+: "${XRAY_API_KEY:?XRAY_API_KEY must be set}"
 LOCATION_CODE="${LOCATION_CODE:-de}"
 DOMAIN="${DOMAIN:-dash.just1k.pro}"
 

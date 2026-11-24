@@ -77,6 +77,21 @@ def clean_code(val, fallback):
     return c or fallback
 
 
+_SAFE_NGINX_PATH_RE = re.compile(r"^/[A-Za-z0-9._/~-]+$")
+
+
+def is_valid_nginx_path(val):
+    if not isinstance(val, str) or not val or len(val) > 256:
+        return False
+    if not val.startswith("/") or ".." in val:
+        return False
+    if not _SAFE_NGINX_PATH_RE.fullmatch(val):
+        return False
+    if not val.rstrip("/"):
+        return False
+    return True
+
+
 def main():
     if len(sys.argv) < 13:
         sys.stderr.write(
@@ -502,9 +517,19 @@ def main():
                 r_port = next_port
                 used_ports.add(r_port)
 
-                r_path = str(cdn_paths[cdn_key]) if cdn_paths.get(cdn_key) else f"{secret_base}/{sp['subpath']}/{code}"
-                if not r_path.startswith("/"):
-                    r_path = "/" + r_path
+                raw_cdn_path = cdn_paths.get(cdn_key)
+                if raw_cdn_path is not None and raw_cdn_path != "":
+                    if not isinstance(raw_cdn_path, str):
+                        sys.stderr.write(f"ERROR: invalid location path type for {code}/{cdn_key}\n")
+                        sys.exit(1)
+                    r_path = raw_cdn_path
+                    if not is_valid_nginx_path(r_path):
+                        sys.stderr.write(f"ERROR: unsafe location path for {code}/{cdn_key}: {raw_cdn_path!r}\n")
+                        sys.exit(1)
+                else:
+                    r_path = f"{secret_base}/{sp['subpath']}/{code}"
+                    if not r_path.startswith("/"):
+                        r_path = "/" + r_path
 
                 cfg["inbounds"].append(
                     build_xhttp_inbound(r_tag, r_port, r_path, spec_eff, active_clients_list(wl_clients, "", revoked_wl))
@@ -733,7 +758,10 @@ def main():
                 )
 
             def make_xhttp_loc(c_path_raw, upstream_name, sp):
-                cp = c_path_raw.rstrip("/")
+                cp = str(c_path_raw or "").rstrip("/")
+                if not is_valid_nginx_path(cp):
+                    sys.stderr.write(f"ERROR: unsafe nginx location path rejected: {c_path_raw!r}\n")
+                    sys.exit(1)
                 return (
                     f"    location ^~ {cp} {{\n"
                     f"        rewrite ^{re.escape(cp)}/?$ {cp}/ break;\n"

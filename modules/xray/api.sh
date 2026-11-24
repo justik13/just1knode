@@ -94,6 +94,12 @@ deploy_xray_api_sources() {
             return 1
         fi
 
+        local tar_entries
+        if ! tar_entries="$(tar -tzf "$tmp_tar" 2>/dev/null)" || [[ -z "$tar_entries" ]] || printf '%s\n' "$tar_entries" | grep -Eq '(^/|^\.\./|/\.\./|/\.\.$|^\.\.$)'; then
+            rm -rf "$tmp_tar" "$tmp_extracted"
+            warn "Архив репозитория для xray-api поврежден или содержит небезопасные пути."
+            return 1
+        fi
         if ! tar -xzf "$tmp_tar" -C "$tmp_extracted" --strip-components=1 --no-same-owner 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_extracted"
             warn "Не удалось распаковать архив репозитория для xray-api."
@@ -313,10 +319,10 @@ EOF
     mkdir -p "${le_dir}/live" "${xray_cfg_dir}/tls" 2>/dev/null || true
     chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
     chmod 755 "$le_dir" 2>/dev/null || true
-    chmod 2775 "${le_dir}/live" 2>/dev/null || true
+    chmod 750 "${le_dir}/live" 2>/dev/null || true
     chmod 755 "$xray_cfg_dir" 2>/dev/null || true
     chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
-    chmod 2775 "${xray_cfg_dir}/tls" 2>/dev/null || true
+    chmod 750 "${xray_cfg_dir}/tls" 2>/dev/null || true
     if [[ -f "${xray_cfg_dir}/config.json" ]]; then
         chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
         chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
@@ -326,7 +332,7 @@ EOF
     chown -R root:xrayapi "${STATE_DIR}" 2>/dev/null || true
     chmod 2770 "${STATE_DIR}"
     [[ -f "${CLIENTS_FILE}" ]] && { chown root:xrayapi "${CLIENTS_FILE}" 2>/dev/null || true; chmod 660 "${CLIENTS_FILE}"; }
-    [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 660 "${STATE_FILE}"; }
+    [[ -f "${STATE_FILE}" ]] && { chown root:xrayapi "${STATE_FILE}" 2>/dev/null || true; chmod 640 "${STATE_FILE}"; }
     [[ -f "${LINKS_FILE:-${STATE_DIR}/links.json}" ]] && { chown root:xrayapi "${LINKS_FILE:-${STATE_DIR}/links.json}" 2>/dev/null || true; chmod 660 "${LINKS_FILE:-${STATE_DIR}/links.json}"; }
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
     find "${STATE_DIR}" -maxdepth 1 -type f -name "*.lock" -exec chmod 660 {} + 2>/dev/null || true

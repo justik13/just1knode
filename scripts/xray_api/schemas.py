@@ -31,6 +31,21 @@ def _validate_uuid_strict(value: str) -> str:
     return str(uuid_lib.UUID(str(value or "").strip())).lower()
 
 
+_SAFE_NGINX_PATH_RE = re.compile(r"^/[A-Za-z0-9._/~-]+$")
+
+
+def _validate_nginx_path_strict(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("Location path must be a non-empty string")
+    if len(value) > 256:
+        raise ValueError("Location path exceeds maximum length of 256 characters")
+    if not value.startswith("/") or ".." in value:
+        raise ValueError(f"Invalid location path: {value!r}")
+    if not _SAFE_NGINX_PATH_RE.fullmatch(value) or not value.rstrip("/"):
+        raise ValueError(f"Location path contains forbidden characters: {value!r}")
+    return value
+
+
 class ClientSyncRequest(BaseModel):
     client_id: Optional[str] = Field(None, description="Client UUID")
     uuid: Optional[str] = Field(None, description="Client UUID alias")
@@ -183,6 +198,23 @@ class NodeLinksSectionSpec(BaseModel):
     bridges: List[BridgeSpec] = Field(default_factory=list)
     sni_routes: List[SniRouteSpec] = Field(default_factory=list)
     locations: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("locations")
+    @classmethod
+    def validate_locations_paths(cls, locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for loc in locations:
+            if not isinstance(loc, dict):
+                raise ValueError("Each location entry must be an object")
+            if "path" in loc and loc["path"] is not None:
+                loc["path"] = _validate_nginx_path_strict(loc["path"])
+            if "paths" in loc and loc["paths"] is not None:
+                if not isinstance(loc["paths"], dict):
+                    raise ValueError("location.paths must be a mapping of CDN key to path")
+                validated_paths: Dict[str, str] = {}
+                for k, v in loc["paths"].items():
+                    validated_paths[str(k)] = _validate_nginx_path_strict(v)
+                loc["paths"] = validated_paths
+        return locations
 
 
 class NodeLinksUpdateRequest(BaseModel):
