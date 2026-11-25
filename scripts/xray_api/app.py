@@ -1,11 +1,14 @@
 import asyncio
 import copy
+from datetime import datetime, timezone
 import fcntl
 import json
 import logging
 import os
 import secrets
 import shutil
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -151,6 +154,127 @@ def _load_module_errors() -> Dict[str, str]:
         except Exception as e:
             logger.debug("Could not read module_errors.json: %s", e)
     return {}
+
+
+def _load_last_apply() -> Optional[Dict[str, Any]]:
+    """Read last_apply.json safely; return parsed status dict or None."""
+    lp = STATE_FILE_PATH.parent / "last_apply.json"
+    if not lp.exists():
+        return None
+    try:
+        data = json.loads(lp.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        res: Dict[str, Any] = {
+            "ok": bool(data.get("ok")),
+            "rc": int(data["rc"]) if data.get("rc") is not None else None,
+            "role": str(data.get("role") or ""),
+            "ts": int(data["ts"]) if data.get("ts") is not None else None,
+        }
+        err_val = data.get("error") or data.get("rollback_error")
+        if err_val:
+            res["error"] = str(err_val)[:500]
+        return res
+    except Exception as e:
+        logger.debug("Could not read last_apply.json at %s: %s", lp, e)
+    return None
+
+
+_SSL_CERT_CACHE_TTL = 300.0
+_ssl_cert_cache_lock = threading.Lock()
+_ssl_cert_cache: Dict[str, Any] = {
+    "key": None,
+    "checked_at": 0.0,
+    "expires_dt": None,
+}
+
+
+def _find_node_cert_path(domain: str) -> Optional[Path]:
+    env_cert = (os.getenv("SSL_CERT_PATH") or "").strip()
+    candidates: List[Path] = []
+    if env_cert:
+        candidates.append(Path(env_cert))
+    xray_tls_dir = Path(os.getenv("XRAY_TLS_DIR") or str(XRAY_CONFIG_PATH.parent / "tls"))
+    le_dir = Path(os.getenv("LETSENCRYPT_DIR", "/etc/letsencrypt"))
+    clean_dom = (domain or "").strip()
+    if clean_dom and clean_dom != "-":
+        candidates.append(xray_tls_dir / f"{clean_dom}_fullchain.pem")
+        candidates.append(le_dir / "live" / clean_dom / "fullchain.pem")
+    candidates.append(xray_tls_dir / "fullchain.pem")
+    for cand in candidates:
+        try:
+            if cand.is_file() and os.access(cand, os.R_OK):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _parse_cert_not_after(cert_path: Path) -> Optional[datetime]:
+    not_after_raw: Optional[str] = None
+    decode_fn = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+    if callable(decode_fn):
+        try:
+            info = decode_fn(str(cert_path))
+            if isinstance(info, dict) and info.get("notAfter"):
+                not_after_raw = str(info["notAfter"]).strip()
+        except Exception:
+            not_after_raw = None
+    if not not_after_raw:
+        try:
+            proc = subprocess.run(
+                ["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if proc.returncode == 0 and "=" in proc.stdout:
+                not_after_raw = proc.stdout.split("=", 1)[1].strip()
+        except Exception:
+            not_after_raw = None
+    if not not_after_raw:
+        return None
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b  %d %H:%M:%S %Y %Z"):
+        try:
+            return datetime.strptime(not_after_raw, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _load_ssl_cert_info(domain: str) -> Optional[Dict[str, Any]]:
+    """Return cached {expires_at, days_left} for the node TLS cert, or None."""
+    cert_path = _find_node_cert_path(domain)
+    if cert_path is None:
+        return None
+    try:
+        mtime_ns = cert_path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+    cache_key = (str(cert_path), mtime_ns)
+    now_mono = time.monotonic()
+    exp_dt: Optional[datetime] = None
+    with _ssl_cert_cache_lock:
+        if (
+            _ssl_cert_cache["key"] == cache_key
+            and (now_mono - float(_ssl_cert_cache["checked_at"])) < _SSL_CERT_CACHE_TTL
+        ):
+            exp_dt = _ssl_cert_cache["expires_dt"]
+        else:
+            exp_dt = _parse_cert_not_after(cert_path)
+            _ssl_cert_cache["key"] = cache_key
+            _ssl_cert_cache["checked_at"] = now_mono
+            _ssl_cert_cache["expires_dt"] = exp_dt
+
+    if exp_dt is None:
+        return None
+    days_left = int((exp_dt - datetime.now(timezone.utc)).total_seconds() // 86400)
+    return {
+        "expires_at": exp_dt.isoformat(),
+        "days_left": days_left,
+    }
 
 
 def _load_traffic_limit_summary() -> Optional[Dict[str, Any]]:
@@ -1058,11 +1182,12 @@ def _build_node_status_payload(
     links_data = _load_links_data()
     load_info = system_load_info if system_load_info is not None else _get_system_load_info(disk_usage_info)
 
+    domain_str = str(node_meta.get("domain") or "")
     payload: Dict[str, Any] = {
         "status": "ok" if is_running else "error",
         "role": str(node_meta.get("role") or ""),
         "country_code": str(node_meta.get("country_code") or ""),
-        "domain": str(node_meta.get("domain") or ""),
+        "domain": domain_str,
         "cdn_domain": get_cdn_domain(),
         "cdn_domains": get_cdn_domains(),
         "sub_path_prefix": get_sub_path_prefix(),
@@ -1070,6 +1195,8 @@ def _build_node_status_payload(
         "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
         "module_errors": _load_module_errors(),
+        "last_apply": _load_last_apply(),
+        "ssl_cert": _load_ssl_cert_info(domain_str),
         "links": links_data,
         "sni_routes": _get_sni_routes(links_data),
         "xhttp_locations": _get_xhttp_location_routes(),
