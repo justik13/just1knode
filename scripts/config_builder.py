@@ -553,6 +553,7 @@ def main():
             "tag": "just1k-wl-direct",
             "protocol": "freedom",
             "settings": {},
+            "streamSettings": {"sockopt": {"mark": 255}},
         })
 
         # Outbounds для Стандарта (std_bridges)
@@ -1043,8 +1044,9 @@ def main():
                 "tlsSettings": build_tls_settings(c_file, k_file, domain),
             },
         })
+        cfg["routing"]["domainStrategy"] = "IPOnDemand"
         cfg["outbounds"] = [
-            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "mark": 255}}},
             {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         ]
         cfg["routing"]["rules"] = [api_rule] + antiabuse_rules() + [

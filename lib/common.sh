@@ -925,6 +925,13 @@ check_antiabuse_rules() {
         iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
     fi
 
+    if iptables -m mark --help >/dev/null 2>&1; then
+        local _priv_cidr
+        for _priv_cidr in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 0.0.0.0/8; do
+            iptables -C JUST1KNODE-ANTIABUSE -m mark --mark 255 -d "$_priv_cidr" -j DROP 2>/dev/null || missing=$((missing + 1))
+        done
+    fi
+
     iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || missing=$((missing + 1))
     iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
     iptables -C JUST1KNODE-ANTIABUSE -p udp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
@@ -958,6 +965,14 @@ apply_antiabuse_protection() {
 
     iptables -N JUST1KNODE-ANTIABUSE 2>/dev/null || true
     iptables -F JUST1KNODE-ANTIABUSE
+
+    # Защита от SSRF/loopback- и LAN-пивота через Xray freedom outbound (sockopt.mark=255)
+    if iptables -m mark --help >/dev/null 2>&1; then
+        local _priv_cidr
+        for _priv_cidr in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 0.0.0.0/8; do
+            iptables -A JUST1KNODE-ANTIABUSE -m mark --mark 255 -d "$_priv_cidr" -j DROP
+        done
+    fi
 
     iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset
     iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP

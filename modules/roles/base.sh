@@ -199,7 +199,7 @@ apply_v2_hub_configuration() {
     local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
     local applied_hash_file="${state_dir}/.applied_xray_hash"
     local applied_hash=""
-    if [[ -f "$applied_hash_file" ]]; then
+    if [[ -f "$applied_hash_file" && ! -L "$applied_hash_file" ]]; then
         applied_hash="$(tr -d '[:space:]' < "$applied_hash_file" 2>/dev/null || true)"
     fi
 
@@ -234,8 +234,17 @@ apply_v2_hub_configuration() {
             return 1
         fi
         if [[ -n "$xray_cfg_hash_after" ]]; then
-            printf '%s\n' "$xray_cfg_hash_after" > "$applied_hash_file" 2>/dev/null || true
-            chmod 644 "$applied_hash_file" 2>/dev/null || true
+            if [[ -L "$applied_hash_file" ]]; then
+                warn "Обнаружен неожиданный symlink ${applied_hash_file} — удаление."
+                rm -f "$applied_hash_file" 2>/dev/null || true
+            fi
+            local tmp_hash
+            tmp_hash="$(mktemp "${state_dir}/.applied_xray_hash.XXXXXX" 2>/dev/null || true)"
+            if [[ -n "$tmp_hash" ]]; then
+                printf '%s\n' "$xray_cfg_hash_after" > "$tmp_hash" 2>/dev/null || true
+                chmod 644 "$tmp_hash" 2>/dev/null || true
+                mv -f "$tmp_hash" "$applied_hash_file" 2>/dev/null || rm -f "$tmp_hash" 2>/dev/null || true
+            fi
         fi
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
         ping_xray_api_health
