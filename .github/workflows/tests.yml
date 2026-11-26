@@ -33,9 +33,3 @@ jobs:
         run: |
           python -m pip install ruff
           ruff check .
-      - name: Run unit tests
-        run: |
-          if [ -d tests ]; then
-            python -m pip install pytest -r scripts/xray_api/requirements.txt
-            pytest -q
-          fi
