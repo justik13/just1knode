@@ -80,12 +80,53 @@ def _apply_pending_path() -> Path:
     return STATE_FILE_PATH.parent / ".apply_pending"
 
 
+APPLY_RUNNING_STALE_SEC = 600
+
+
+def _get_boot_time_epoch() -> Optional[float]:
+    """Return Linux system boot time as Unix epoch from /proc/stat, or None."""
+    try:
+        with open("/proc/stat", "r", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return float(parts[1])
+    except Exception:
+        pass
+    return None
+
+
 def _apply_running_path() -> Path:
     return STATE_FILE_PATH.parent / ".apply_running"
 
 
 def _is_apply_in_progress() -> bool:
-    return _apply_pending_path().exists() or _apply_running_path().exists()
+    if _apply_pending_path().exists():
+        return True
+    running_path = _apply_running_path()
+    try:
+        st_mtime = running_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return running_path.exists()
+    boot_time = _get_boot_time_epoch()
+    if (boot_time is not None and st_mtime < boot_time) or (
+        time.time() - st_mtime > APPLY_RUNNING_STALE_SEC
+    ):
+        logger.warning(
+            "Stale .apply_running detected at %s (mtime=%.0f, boot_time=%s); clearing",
+            running_path,
+            st_mtime,
+            f"{boot_time:.0f}" if boot_time is not None else "unknown",
+        )
+        try:
+            running_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Could not unlink stale %s: %s", running_path, exc)
+        return False
+    return True
 
 
 def _module_errors_path() -> Path:
@@ -1740,9 +1781,7 @@ def update_node_links(
             existing_matches = False
 
     if existing_matches:
-        pending_path = _apply_pending_path()
-        running_path = _apply_running_path()
-        if pending_path.exists() or running_path.exists():
+        if _is_apply_in_progress():
             return {
                 "status": "ok",
                 "role": role,
