@@ -80,6 +80,14 @@ def _apply_pending_path() -> Path:
     return STATE_FILE_PATH.parent / ".apply_pending"
 
 
+def _apply_running_path() -> Path:
+    return STATE_FILE_PATH.parent / ".apply_running"
+
+
+def _is_apply_in_progress() -> bool:
+    return _apply_pending_path().exists() or _apply_running_path().exists()
+
+
 def _module_errors_path() -> Path:
     env_p = os.getenv("MODULE_ERRORS_PATH")
     if env_p:
@@ -900,7 +908,24 @@ _bridge_health_state: Dict[str, Dict[str, Any]] = {}
 
 def _clean_bridge_code(raw: Any, fallback: str) -> str:
     val = _BRIDGE_CODE_CLEAN_RE.sub("", str(raw or "").strip().lower())
-    return val[:32] if val else fallback
+    return val[:48] if val else fallback
+
+
+def _collect_links_bridge_ips(links: Dict[str, Any]) -> set[str]:
+    """Return all bridge IPs declared in links.json across standard, bi, and probe_bridges."""
+    ips: set[str] = set()
+    std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
+    bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
+    for items in (std_cfg.get("bridges"), bi_cfg.get("bridges"), links.get("probe_bridges")):
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip") or "").strip()
+            if ip:
+                ips.add(ip)
+    return ips
 
 
 def _get_probe_socks_config() -> tuple[int | None, set[str]]:
@@ -926,9 +951,9 @@ def _get_probe_socks_config() -> tuple[int | None, set[str]]:
         return None, set()
 
 
-def _collect_ru_hub_probe_targets(links: Dict[str, Any], configured_tags: set[str]) -> list[Dict[str, str]]:
-    """Pick one unique probe target per eu_hub IP from links.json that is active in Xray config."""
-    targets_by_ip: Dict[str, Dict[str, str]] = {}
+def _collect_ru_hub_probe_targets(links: Dict[str, Any], configured_tags: set[str]) -> list[Dict[str, Any]]:
+    """Pick up to 2 distinct exit-node probe tags per eu_hub IP active in Xray config."""
+    targets_by_ip: Dict[str, Dict[str, Any]] = {}
 
     def _consider(items: Any, prefix: str, fb_prefix: str) -> None:
         if not isinstance(items, list):
@@ -944,15 +969,31 @@ def _collect_ru_hub_probe_targets(links: Dict[str, Any], configured_tags: set[st
             tag = f"{prefix}{code}"
             if tag not in configured_tags:
                 continue
-            if ip not in targets_by_ip:
-                targets_by_ip[ip] = {"ip": ip, "sni": sni, "tag": tag}
+            exit_key = _clean_bridge_code(item.get("location_code") or item.get("code"), code)
+            entry = targets_by_ip.get(ip)
+            if entry is None:
+                targets_by_ip[ip] = {
+                    "ip": ip,
+                    "sni": sni,
+                    "tag": tag,
+                    "tags": [tag],
+                    "_exit_keys": {exit_key},
+                }
+            elif len(entry["tags"]) < 2 and tag not in entry["tags"]:
+                if exit_key not in entry["_exit_keys"]:
+                    entry["tags"].append(tag)
+                    entry["_exit_keys"].add(exit_key)
 
     std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
     bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
     _consider(std_cfg.get("bridges"), "bridge-std-", "hub")
     _consider(bi_cfg.get("bridges"), "bridge-bi-", "hub")
     _consider(links.get("probe_bridges"), "bridge-probe-", "probe")
-    return list(targets_by_ip.values())
+    targets: list[Dict[str, Any]] = []
+    for entry in targets_by_ip.values():
+        entry.pop("_exit_keys", None)
+        targets.append(entry)
+    return targets
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -1070,8 +1111,10 @@ def _probe_via_socks5_sync(
                         status_code = int(parts[1])
                     body_part = header_buf[sep_idx + 4 :]
                     total_bytes += len(body_part)
-                    if status_code >= 400:
+                    if status_code < 200 or status_code >= 300 or status_code == 204:
                         return False, total_bytes, None, f"HTTP {status_code}"
+                    if total_bytes >= min_bytes:
+                        break
                 elif len(header_buf) > 16384:
                     return False, 0, None, "HTTP header too large"
             else:
@@ -1099,6 +1142,8 @@ def _probe_via_socks5_sync(
 
 
 async def _run_bridge_probe_cycle() -> None:
+    if _is_apply_in_progress():
+        return
     node_meta = get_node_state_metadata()
     if str(node_meta.get("role") or "") != "ru_hub":
         return
@@ -1106,44 +1151,66 @@ async def _run_bridge_probe_cycle() -> None:
     if not socks_port or not configured_tags:
         return
     links = _load_links_data()
+    if _is_apply_in_progress():
+        return
+    links_ips = _collect_links_bridge_ips(links)
     targets = _collect_ru_hub_probe_targets(links, configured_tags)
     if not targets:
         with _bridge_health_lock:
-            _bridge_health_state.clear()
+            for stale_ip in list(_bridge_health_state.keys()):
+                if stale_ip not in links_ips:
+                    _bridge_health_state.pop(stale_ip, None)
         return
 
-    active_ips = {t["ip"] for t in targets}
+    keep_ips = {t["ip"] for t in targets} | links_ips
     with _bridge_health_lock:
         for stale_ip in list(_bridge_health_state.keys()):
-            if stale_ip not in active_ips:
+            if stale_ip not in keep_ips:
                 _bridge_health_state.pop(stale_ip, None)
 
     for idx, target in enumerate(targets):
         if idx > 0:
             # Strict sequential spacing to avoid triggering TSPU TLS concurrency policing
             await asyncio.sleep(1.5)
+        if _is_apply_in_progress():
+            return
         ip = target["ip"]
-        tag = target["tag"]
         sni = target["sni"]
+        tags = list(target.get("tags") or ([target["tag"]] if target.get("tag") else []))
+        used_tag = tags[0] if tags else ""
 
         ok = False
         bytes_read = 0
         latency_ms = None
         err_msg = "No probe URL configured"
-        for url_idx, probe_url in enumerate(BRIDGE_PROBE_URLS):
-            if url_idx > 0:
+        for tag_idx, tag in enumerate(tags):
+            if tag_idx > 0:
                 await asyncio.sleep(0.5)
-            ok, bytes_read, latency_ms, err_msg = await asyncio.to_thread(
-                _probe_via_socks5_sync,
-                socks_port,
-                tag,
-                probe_url,
-                BRIDGE_PROBE_MIN_BYTES,
-                BRIDGE_PROBE_TIMEOUT,
-            )
+                if _is_apply_in_progress():
+                    return
+            used_tag = tag
+            for url_idx, probe_url in enumerate(BRIDGE_PROBE_URLS):
+                if url_idx > 0:
+                    await asyncio.sleep(0.5)
+                    if _is_apply_in_progress():
+                        return
+                ok, bytes_read, latency_ms, err_msg = await asyncio.to_thread(
+                    _probe_via_socks5_sync,
+                    socks_port,
+                    tag,
+                    probe_url,
+                    BRIDGE_PROBE_MIN_BYTES,
+                    BRIDGE_PROBE_TIMEOUT,
+                )
+                if _is_apply_in_progress():
+                    return
+                if ok:
+                    break
             if ok:
                 break
 
+        if _is_apply_in_progress():
+            return
         now_ts = time.time()
         with _bridge_health_lock:
             prev = _bridge_health_state.get(ip, {})
@@ -1156,7 +1223,7 @@ async def _run_bridge_probe_cycle() -> None:
             _bridge_health_state[ip] = {
                 "ip": ip,
                 "sni": sni,
-                "tag": tag,
+                "tag": used_tag,
                 "ok": ok,
                 "bytes_read": bytes_read,
                 "latency_ms": latency_ms,
@@ -1674,7 +1741,7 @@ def update_node_links(
 
     if existing_matches:
         pending_path = _apply_pending_path()
-        running_path = STATE_FILE_PATH.parent / ".apply_running"
+        running_path = _apply_running_path()
         if pending_path.exists() or running_path.exists():
             return {
                 "status": "ok",

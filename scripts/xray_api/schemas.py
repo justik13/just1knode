@@ -132,7 +132,7 @@ class InventoryRequest(BaseModel):
 class BridgeSpec(BaseModel):
     id: Optional[str] = Field(default=None, max_length=64)
     tag: Optional[str] = Field(default=None, max_length=64)
-    code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
     location_code: Optional[str] = None
     name: Optional[str] = None
     ip: str
@@ -155,7 +155,7 @@ class BridgeSpec(BaseModel):
 
 class SniRouteSpec(BaseModel):
     sni: str
-    bridge_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    bridge_code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
 
     @model_validator(mode="after")
     def validate_route(self) -> "SniRouteSpec":
