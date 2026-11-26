@@ -220,6 +220,7 @@ class NodeLinksSectionSpec(BaseModel):
 class NodeLinksUpdateRequest(BaseModel):
     standard: Optional[NodeLinksSectionSpec] = None
     bi: Optional[NodeLinksSectionSpec] = None
+    probe_bridges: Optional[List[BridgeSpec]] = None
     exit_nodes: Optional[List[BridgeSpec]] = None
     allowed_ru_ips: Optional[List[str]] = None
     allowed_hub_ips: Optional[List[str]] = None
