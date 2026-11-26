@@ -1075,6 +1075,7 @@ def _probe_via_socks5_sync(
 
     raw_sock = None
     tls_sock = None
+    total_bytes = 0
     try:
         raw_sock = socket.create_connection(("127.0.0.1", socks_port), timeout=_remaining())
         raw_sock.settimeout(_remaining())
@@ -1132,7 +1133,6 @@ def _probe_via_socks5_sync(
         io_sock.settimeout(_remaining())
         io_sock.sendall(req)
 
-        total_bytes = 0
         header_buf = bytearray()
         headers_parsed = False
         status_code = 0
@@ -1170,9 +1170,9 @@ def _probe_via_socks5_sync(
             return False, total_bytes, elapsed_ms, f"Short payload ({total_bytes}/{min_bytes} bytes)"
         return True, total_bytes, elapsed_ms, None
     except socket.timeout:
-        return False, 0, None, "Timeout (possible TSPU silent stall)"
+        return False, total_bytes, None, "Timeout (possible TSPU silent stall)"
     except Exception as exc:
-        return False, 0, None, str(exc) or type(exc).__name__
+        return False, total_bytes, None, str(exc) or type(exc).__name__
     finally:
         for s in (tls_sock, raw_sock):
             if s is not None:
