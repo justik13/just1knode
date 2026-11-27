@@ -199,13 +199,54 @@ apply_v2_hub_configuration() {
     local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
     local applied_hash_file="${state_dir}/.applied_xray_hash"
     local applied_hash=""
-    if [[ -f "$applied_hash_file" ]]; then
+    LAST_APPLY_ERROR=""
+    if [[ -f "$applied_hash_file" && ! -L "$applied_hash_file" ]]; then
         applied_hash="$(tr -d '[:space:]' < "$applied_hash_file" 2>/dev/null || true)"
     fi
+
+    local prev_xray_cfg_bak=""
+    if [[ -f "$xray_cfg" && ! -L "$xray_cfg" ]]; then
+        prev_xray_cfg_bak="$(mktemp /tmp/xray_role_cfg_bak.XXXXXX 2>/dev/null || true)"
+        if [[ -n "$prev_xray_cfg_bak" ]]; then
+            cp -f "$xray_cfg" "$prev_xray_cfg_bak" 2>/dev/null || { rm -f "$prev_xray_cfg_bak" 2>/dev/null || true; prev_xray_cfg_bak=""; }
+        fi
+    fi
+    local nginx_dir="${NGINX_CONF_DIR:-/etc/nginx}"
+    local prev_ngx_hub_bak=""
+    if [[ -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" && ! -L "${nginx_dir}/sites-available/just1k-ru-hub.conf" ]]; then
+        prev_ngx_hub_bak="$(mktemp /tmp/just1k_ngx_hub_bak.XXXXXX 2>/dev/null || true)"
+        if [[ -n "$prev_ngx_hub_bak" ]]; then
+            cp -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" "$prev_ngx_hub_bak" 2>/dev/null || { rm -f "$prev_ngx_hub_bak" 2>/dev/null || true; prev_ngx_hub_bak=""; }
+        fi
+    fi
+    local prev_ngx_up_bak=""
+    if [[ -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" && ! -L "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" ]]; then
+        prev_ngx_up_bak="$(mktemp /tmp/just1k_ngx_up_bak.XXXXXX 2>/dev/null || true)"
+        if [[ -n "$prev_ngx_up_bak" ]]; then
+            cp -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" "$prev_ngx_up_bak" 2>/dev/null || { rm -f "$prev_ngx_up_bak" 2>/dev/null || true; prev_ngx_up_bak=""; }
+        fi
+    fi
+
+    _restore_apply_backups() {
+        if [[ -n "$prev_xray_cfg_bak" && -f "$prev_xray_cfg_bak" ]]; then
+            cp -f "$prev_xray_cfg_bak" "$xray_cfg" 2>/dev/null || true
+            if declare -F ensure_xray_config_permissions >/dev/null 2>&1; then
+                ensure_xray_config_permissions "$xray_cfg"
+            fi
+        fi
+        if [[ -n "$prev_ngx_hub_bak" && -f "$prev_ngx_hub_bak" ]]; then
+            cp -f "$prev_ngx_hub_bak" "${nginx_dir}/sites-available/just1k-ru-hub.conf" 2>/dev/null || true
+        fi
+        if [[ -n "$prev_ngx_up_bak" && -f "$prev_ngx_up_bak" ]]; then
+            cp -f "$prev_ngx_up_bak" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
+        fi
+    }
 
     apply_node_sysctl_hardening
     _sync_all_role_certs
     if ! assemble_v2_hub_config; then
+        LAST_APPLY_ERROR="assemble_v2_hub_config_failed"
+        rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
         return 1
     fi
 
@@ -216,11 +257,21 @@ apply_v2_hub_configuration() {
 
     if ! nginx -t >/dev/null 2>&1; then
         nginx -t || true
+        _restore_apply_backups
+        rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
+        LAST_APPLY_ERROR="nginx_test_failed"
         warn "Ошибка синтаксиса Nginx при применении конфигурации роли ${role}."
         return 1
     fi
 
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    if declare -F ensure_nginx_nofile_limits >/dev/null 2>&1; then
+        ensure_nginx_nofile_limits
+    fi
+    if [[ "${NGINX_NEEDS_NOFILE_RESTART:-0}" == "1" ]]; then
+        systemctl restart nginx 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+    else
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    fi
     deploy_xray_systemd_service
 
     if is_traffic_limit_exceeded; then
@@ -230,19 +281,38 @@ apply_v2_hub_configuration() {
         ping_xray_api_health
     else
         if ! systemctl restart xray || ! systemctl is-active --quiet xray; then
+            _restore_apply_backups
+            systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+            systemctl restart xray 2>/dev/null || true
+            rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
+            LAST_APPLY_ERROR="xray_restart_failed"
             warn "Не удалось перезапустить службу Xray с новой конфигурацией!"
             return 1
         fi
         if [[ -n "$xray_cfg_hash_after" ]]; then
-            printf '%s\n' "$xray_cfg_hash_after" > "$applied_hash_file" 2>/dev/null || true
-            chmod 644 "$applied_hash_file" 2>/dev/null || true
+            if [[ -L "$applied_hash_file" ]]; then
+                warn "Обнаружен неожиданный symlink ${applied_hash_file} — удаление."
+                rm -f "$applied_hash_file" 2>/dev/null || true
+            fi
+            local tmp_hash
+            tmp_hash="$(mktemp "${state_dir}/.applied_xray_hash.XXXXXX" 2>/dev/null || true)"
+            if [[ -n "$tmp_hash" ]]; then
+                printf '%s\n' "$xray_cfg_hash_after" > "$tmp_hash" 2>/dev/null || true
+                chmod 644 "$tmp_hash" 2>/dev/null || true
+                mv -f "$tmp_hash" "$applied_hash_file" 2>/dev/null || rm -f "$tmp_hash" 2>/dev/null || true
+            fi
         fi
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
         ping_xray_api_health
     fi
+    rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
 
     if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
         apply_antiabuse_protection >/dev/null 2>&1 || true
+    fi
+
+    if declare -F deploy_geodata_update_timer >/dev/null 2>&1; then
+        deploy_geodata_update_timer "$role" || true
     fi
 
     heal_node_firewall_and_stealth
@@ -279,19 +349,51 @@ apply_pending_node_updates() {
     local max_passes=3
     local pass=0
 
+    # shellcheck disable=SC2329
+    _cleanup_aborted_apply() {
+        trap - EXIT TERM INT
+        rm -f "$running_file" 2>/dev/null || true
+        python3 - "$result_file" "1" "${role:-unconfigured}" "${LAST_APPLY_ERROR:-apply_aborted_or_timeout}" <<'PYEOF' 2>/dev/null || true
+import json, os, sys, tempfile, time
+out_path, rc_str, role_val, err_msg = sys.argv[1:5]
+d = os.path.dirname(os.path.abspath(out_path))
+os.makedirs(d, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+payload = {"ok": False, "rc": int(rc_str), "role": role_val, "ts": int(time.time()), "error": err_msg}
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+    f.flush()
+os.chmod(tmp, 0o644)
+os.replace(tmp, out_path)
+PYEOF
+    }
+    # shellcheck disable=SC2329
+    _on_abort_signal() {
+        _cleanup_aborted_apply
+        if declare -F release_just1knode_lock >/dev/null 2>&1; then
+            release_just1knode_lock 2>/dev/null || true
+        fi
+        exit 130
+    }
+    trap _cleanup_aborted_apply EXIT
+    trap _on_abort_signal TERM INT
+
     while [[ $pass -lt $max_passes ]]; do
         pass=$((pass + 1))
         if [[ -f "$pending_file" ]]; then
             mv -f "$pending_file" "$running_file" 2>/dev/null || true
+            touch "$running_file" 2>/dev/null || true
         fi
 
         rc=0
+        LAST_APPLY_ERROR=""
         role="$(get_state_val "role" "unconfigured")"
         if [[ "$role" == "ru_hub" || "$role" == "eu_hub" || "$role" == "exit_node" ]]; then
             apply_v2_hub_configuration || rc=$?
         else
             _sync_all_role_certs
             setup_base_api_nginx || rc=$?
+            [[ "$rc" -ne 0 ]] && LAST_APPLY_ERROR="setup_base_api_nginx_failed"
             heal_node_firewall_and_stealth || true
         fi
 
@@ -299,18 +401,22 @@ apply_pending_node_updates() {
         [[ "$rc" -eq 0 && -f "$pending_file" ]] || break
     done
 
+    trap - EXIT TERM INT
     if declare -F release_just1knode_lock >/dev/null 2>&1; then
         release_just1knode_lock 2>/dev/null || true
     fi
 
-    python3 - "$result_file" "$rc" "$role" <<'PYEOF' 2>/dev/null || true
+    python3 - "$result_file" "$rc" "$role" "${LAST_APPLY_ERROR:-}" <<'PYEOF' 2>/dev/null || true
 import json, os, sys, tempfile, time
-out_path, rc_str, role = sys.argv[1:4]
+out_path, rc_str, role, err_msg = sys.argv[1:5]
 d = os.path.dirname(os.path.abspath(out_path))
 os.makedirs(d, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+payload = {"ok": rc_str == "0", "rc": int(rc_str), "role": role, "ts": int(time.time())}
+if err_msg and rc_str != "0":
+    payload["error"] = err_msg
 with os.fdopen(fd, "w", encoding="utf-8") as f:
-    json.dump({"ok": rc_str == "0", "rc": int(rc_str), "role": role, "ts": int(time.time())}, f, indent=2)
+    json.dump(payload, f, indent=2)
     f.flush()
 os.chmod(tmp, 0o644)
 os.replace(tmp, out_path)
@@ -362,14 +468,19 @@ change_role_guarded() {
           "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/just1k-origin.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/sites-enabled/just1k-fallback80.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/xhttp-map.conf" \
+          "${NGINX_CONF_DIR:-/etc/nginx}/conf.d/just1k-xhttp-upstreams.conf" \
           "${NGINX_CONF_DIR:-/etc/nginx}/just1k-stream443.conf" 2>/dev/null || true
     rm -f "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" 2>/dev/null || true
+    if declare -F deploy_geodata_update_timer >/dev/null 2>&1; then
+        deploy_geodata_update_timer "unconfigured" || true
+    fi
     ensure_xray_stub_config
     if command -v systemctl >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || true
         if ! is_traffic_limit_exceeded; then
             systemctl restart xray 2>/dev/null || true
         fi
+        systemctl try-restart xray-api 2>/dev/null || true
     fi
     heal_node_firewall_and_stealth
     log "✔ Роль сброшена. Выберите новую роль сервера."
@@ -465,6 +576,9 @@ select_role_wizard() {
 
     if [[ "$new_role" == "ru_hub" ]]; then
         setup_base_api_nginx || true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl try-restart xray-api 2>/dev/null || true
+        fi
         heal_node_firewall_and_stealth
         log "✔ Роль 'РУ ХАБ' активирована! Выберите транспортные модули."
         ru_hub_menu

@@ -45,7 +45,13 @@ install_xray_binaries() {
 
     mkdir -p "$XRAY_CONFIG_DIR" "$XRAY_SHARE_DIR" "$(dirname "$XRAY_BIN")"
     unzip -q -o "$tmp_zip" xray -d "$(dirname "$XRAY_BIN")"
-    unzip -q -o "$tmp_zip" geoip.dat geosite.dat -d "$XRAY_SHARE_DIR/" || true
+    local _cur_role=""
+    if declare -F get_state_val >/dev/null 2>&1; then
+        _cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
+    fi
+    if [[ "$_cur_role" != "ru_hub" || ! -f "${XRAY_SHARE_DIR}/geoip.dat" || ! -f "${XRAY_SHARE_DIR}/geosite.dat" ]]; then
+        unzip -q -o "$tmp_zip" geoip.dat geosite.dat -d "$XRAY_SHARE_DIR/" || true
+    fi
     rm -f "$tmp_zip"
     chmod +x "$XRAY_BIN"
 }
@@ -82,7 +88,7 @@ update_xray_core() {
     init_state_dir
 
     local current_ver
-    current_ver="$($XRAY_BIN version 2>/dev/null | awk 'NR==1 {print $2}')"
+    current_ver="$($XRAY_BIN version 2>/dev/null | awk 'NR==1 {print $2}' || true)"
     log "Текущая версия Xray: ${current_ver:-не установлена}"
 
     local force_update=0
@@ -116,8 +122,12 @@ update_xray_core() {
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
         local xray_asset_dir="${XRAY_SHARE_DIR:-/usr/local/share/xray}"
         mkdir -p "$xray_asset_dir"
+        local _cur_role=""
+        if declare -F get_state_val >/dev/null 2>&1; then
+            _cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
+        fi
         for dat_f in geoip.dat geosite.dat; do
-            if [[ -f "${tmp_extract}/${dat_f}" ]]; then
+            if [[ -f "${tmp_extract}/${dat_f}" ]] && [[ "$_cur_role" != "ru_hub" || ! -f "${xray_asset_dir}/${dat_f}" ]]; then
                 install -m 644 "${tmp_extract}/${dat_f}" "${xray_asset_dir}/${dat_f}" 2>/dev/null || true
             fi
         done
@@ -159,6 +169,189 @@ update_xray_core() {
         error "Тест новой версии провалился. Обновление отменено."
     fi
     rm -rf "$tmp_dir"
+}
+
+update_xray_geodata() {
+    local quiet=0
+    if [[ "${1:-}" == "--quiet" || "${1:-}" == "-q" ]]; then
+        quiet=1
+    fi
+    check_root
+
+    local xray_bin="${XRAY_BIN:-/usr/local/bin/xray}"
+    local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
+    local asset_dir="${XRAY_SHARE_DIR:-/usr/local/share/xray}"
+    local base_url="${XRAY_GEODATA_BASE_URL:-https://github.com/XTLS/Xray-rules-dat/releases/latest/download}"
+
+    [[ -x "$xray_bin" ]] || return 0
+    mkdir -p "$asset_dir"
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d /tmp/xray_geodata.XXXXXX 2>/dev/null || mktemp -d)"
+    local updated=0
+    local failed=0
+    local spec src_name dest_name expected_hash current_hash new_hash
+
+    for spec in "geoip-lite.dat:geoip.dat" "geosite.dat:geosite.dat"; do
+        src_name="${spec%%:*}"
+        dest_name="${spec#*:}"
+        expected_hash="$(curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}/${src_name}.sha256sum" 2>/dev/null | awk 'NR==1 {print $1}' | tr -cd '0-9a-fA-F' || true)"
+        if [[ ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            failed=$((failed + 1))
+            [[ $quiet -eq 0 ]] && warn "Не удалось получить SHA-256 для ${src_name}; обновление ${dest_name} пропущено."
+            continue
+        fi
+
+        if [[ -f "${asset_dir}/${dest_name}" ]]; then
+            current_hash="$(sha256sum "${asset_dir}/${dest_name}" 2>/dev/null | awk '{print $1}' || true)"
+            if [[ "${current_hash,,}" == "${expected_hash,,}" ]]; then
+                cp -f "${asset_dir}/${dest_name}" "${tmp_dir}/${dest_name}" 2>/dev/null || true
+                continue
+            fi
+        fi
+
+        if ! curl -fsSL --connect-timeout 15 --max-time 120 "${base_url}/${src_name}" -o "${tmp_dir}/${dest_name}" 2>/dev/null; then
+            failed=$((failed + 1))
+            [[ $quiet -eq 0 ]] && warn "Не удалось скачать ${src_name}; используется текущая версия ${dest_name}."
+            rm -f "${tmp_dir}/${dest_name}"
+            continue
+        fi
+
+        new_hash="$(sha256sum "${tmp_dir}/${dest_name}" 2>/dev/null | awk '{print $1}' || true)"
+        if [[ "${new_hash,,}" != "${expected_hash,,}" ]]; then
+            failed=$((failed + 1))
+            warn "Контрольная сумма SHA-256 для ${dest_name} не совпадает! Файл отклонён."
+            rm -f "${tmp_dir}/${dest_name}"
+            continue
+        fi
+        updated=1
+    done
+
+    if [[ $updated -eq 0 ]]; then
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        if [[ $failed -gt 0 ]]; then
+            [[ $quiet -eq 0 ]] && warn "Не удалось проверить/скачать обновления гео-баз (ошибок: ${failed}); используются локальные файлы."
+            return 1
+        fi
+        [[ $quiet -eq 0 ]] && log "Гео-базы geoip.dat / geosite.dat уже актуальны."
+        return 0
+    fi
+
+    # Дополняем временный каталог отсутствующим вторым файлом для корректного xray run -test
+    for dest_name in geoip.dat geosite.dat; do
+        if [[ ! -f "${tmp_dir}/${dest_name}" && -f "${asset_dir}/${dest_name}" ]]; then
+            cp -f "${asset_dir}/${dest_name}" "${tmp_dir}/${dest_name}" 2>/dev/null || true
+        fi
+    done
+
+    if [[ -f "$xray_cfg" ]]; then
+        if ! XRAY_LOCATION_ASSET="$tmp_dir" "$xray_bin" run -test -format json -config "$xray_cfg" >/dev/null 2>&1; then
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            warn "Тест конфигурации Xray с новыми гео-базами не прошёл; откат к текущим файлам."
+            return 1
+        fi
+    fi
+
+    local bak_dir="${tmp_dir}/bak"
+    mkdir -p "$bak_dir"
+    local install_failed=0
+    for dest_name in geoip.dat geosite.dat; do
+        [[ -f "${asset_dir}/${dest_name}" ]] && cp -f "${asset_dir}/${dest_name}" "${bak_dir}/${dest_name}" 2>/dev/null || true
+        if [[ -f "${tmp_dir}/${dest_name}" ]]; then
+            if ! install -m 644 "${tmp_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null; then
+                install_failed=1
+                break
+            fi
+        fi
+    done
+
+    if [[ $install_failed -ne 0 ]]; then
+        for dest_name in geoip.dat geosite.dat; do
+            [[ -f "${bak_dir}/${dest_name}" ]] && install -m 644 "${bak_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null || true
+        done
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        warn "Не удалось установить обновлённые гео-базы в ${asset_dir}; выполнен откат."
+        return 1
+    fi
+
+    if ! is_traffic_limit_exceeded && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet xray 2>/dev/null; then
+        if ! systemctl restart xray 2>/dev/null || ! systemctl is-active --quiet xray 2>/dev/null; then
+            for dest_name in geoip.dat geosite.dat; do
+                [[ -f "${bak_dir}/${dest_name}" ]] && install -m 644 "${bak_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null || true
+            done
+            systemctl restart xray 2>/dev/null || true
+            if declare -F ensure_xray_api_healthy >/dev/null 2>&1; then
+                ensure_xray_api_healthy 1 || true
+            fi
+            if declare -F ping_xray_api_health >/dev/null 2>&1; then
+                ping_xray_api_health || true
+            fi
+            rm -rf "$tmp_dir" 2>/dev/null || true
+            warn "Сбой перезапуска Xray после обновления гео-баз; выполнен откат."
+            return 1
+        fi
+        if declare -F ensure_xray_api_healthy >/dev/null 2>&1; then
+            ensure_xray_api_healthy 1 || true
+        fi
+        if declare -F ping_xray_api_health >/dev/null 2>&1; then
+            ping_xray_api_health || true
+        fi
+    fi
+
+    rm -rf "$tmp_dir" 2>/dev/null || true
+    log "Гео-базы geoip.dat / geosite.dat успешно обновлены."
+    return 0
+}
+
+deploy_geodata_update_timer() {
+    local role="${1:-unconfigured}"
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    local global_bin="${JUST1KNODE_GLOBAL_BIN:-/usr/local/bin/just1knode}"
+    local svc_file="${systemd_dir}/just1knode-geodata.service"
+    local tmr_file="${systemd_dir}/just1knode-geodata.timer"
+
+    if [[ "$role" != "ru_hub" ]]; then
+        local had_units=0
+        [[ -f "$svc_file" || -f "$tmr_file" ]] && had_units=1
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop just1knode-geodata.timer 2>/dev/null || true
+            systemctl disable just1knode-geodata.timer 2>/dev/null || true
+        fi
+        rm -f "$svc_file" "$tmr_file" 2>/dev/null || true
+        if [[ $had_units -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        return 0
+    fi
+
+    mkdir -p "$systemd_dir" 2>/dev/null || return 0
+    cat > "$svc_file" <<EOF
+[Unit]
+Description=Just1kNode Xray GeoData Weekly Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${global_bin} update geodata --quiet
+EOF
+    cat > "$tmr_file" <<EOF
+[Unit]
+Description=Weekly Xray GeoData Update Timer
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 644 "$svc_file" "$tmr_file" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable --now just1knode-geodata.timer >/dev/null 2>&1 || true
+    fi
 }
 
 update_node() {
@@ -570,7 +763,11 @@ update_node_post() {
 
     if [[ "$target" == "all" && "$has_xray" == "1" ]]; then
         update_xray_core
+        if [[ "$role" == "ru_hub" ]]; then
+            update_xray_geodata --quiet || true
+        fi
     fi
+    deploy_geodata_update_timer "${role:-unconfigured}" || true
 
     title "ОБНОВЛЕНИЕ И АВТО-КОНФИГУРАЦИЯ УЗЛА УСПЕШНО ЗАВЕРШЕНЫ!"
     echo -e "${GREEN}✔ Модули just1knode, сетевые политики и конфигурация роли (${role:-unconfigured}) приведены к эталону.${NC}\n"

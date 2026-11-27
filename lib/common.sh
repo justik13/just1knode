@@ -100,6 +100,40 @@ install_base_deps() {
         apt-get install -y -qq curl wget unzip jq python3 python3-pip python3-venv ufw openssl ca-certificates
 }
 
+ensure_nginx_nofile_limits() {
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    local dropin_dir="${systemd_dir}/nginx.service.d"
+    local dropin_file="${dropin_dir}/limits.conf"
+    local desired="[Service]
+LimitNOFILE=65535"
+    local changed=0
+
+    mkdir -p "$dropin_dir" 2>/dev/null || return 0
+    if [[ ! -f "$dropin_file" ]] || [[ "$(cat "$dropin_file" 2>/dev/null || true)" != "$desired" ]]; then
+        printf '%s\n' "$desired" > "$dropin_file" 2>/dev/null || true
+        chmod 644 "$dropin_file" 2>/dev/null || true
+        changed=1
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+    fi
+
+    NGINX_NEEDS_NOFILE_RESTART=0
+    if [[ $changed -eq 1 ]]; then
+        NGINX_NEEDS_NOFILE_RESTART=1
+    elif command -v pgrep >/dev/null 2>&1; then
+        local ngx_pid max_fd
+        ngx_pid="$(pgrep -x nginx 2>/dev/null | head -n1 || true)"
+        if [[ -n "$ngx_pid" && -r "/proc/${ngx_pid}/limits" ]]; then
+            max_fd="$(awk '/Max open files/{print $4}' "/proc/${ngx_pid}/limits" 2>/dev/null | head -n1 || true)"
+            if [[ "$max_fd" =~ ^[0-9]+$ && "$max_fd" -lt 65535 ]]; then
+                NGINX_NEEDS_NOFILE_RESTART=1
+            fi
+        fi
+    fi
+    return 0
+}
+
 install_nginx_if_missing() {
     if ! command -v nginx >/dev/null 2>&1; then
         log "Установка Nginx, mod-stream и Certbot..."
@@ -113,27 +147,10 @@ install_nginx_if_missing() {
             cp -L "$def_site" "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/default.user.bak" 2>/dev/null || true
             rm -f "$def_site" 2>/dev/null || true
         fi
+        ensure_nginx_nofile_limits
         systemctl enable nginx 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
     fi
-}
-
-ensure_nginx_stream_module() {
-    install_nginx_if_missing
-    command -v nginx >/dev/null 2>&1 || return 1
-    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
-        return 0
-    fi
-    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|$)'; then
-        return 0
-    fi
-    if command -v apt-get >/dev/null 2>&1; then
-        log "Доустановка модуля Nginx Stream (libnginx-mod-stream) для SNI-маршрутизации..."
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 || true
-    fi
-    compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1
 }
 
 # Обнаружение Docker-контейнера, слушающего хостовый TCP-порт 80
@@ -925,6 +942,13 @@ check_antiabuse_rules() {
         iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
     fi
 
+    if iptables -m mark --help >/dev/null 2>&1; then
+        local _priv_cidr
+        for _priv_cidr in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 0.0.0.0/8; do
+            iptables -C JUST1KNODE-ANTIABUSE -m mark --mark 255 -d "$_priv_cidr" -j DROP 2>/dev/null || missing=$((missing + 1))
+        done
+    fi
+
     iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset 2>/dev/null || missing=$((missing + 1))
     iptables -C JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
     iptables -C JUST1KNODE-ANTIABUSE -p udp --dport 6881:6889 -j DROP 2>/dev/null || missing=$((missing + 1))
@@ -958,6 +982,14 @@ apply_antiabuse_protection() {
 
     iptables -N JUST1KNODE-ANTIABUSE 2>/dev/null || true
     iptables -F JUST1KNODE-ANTIABUSE
+
+    # Защита от SSRF/loopback- и LAN-пивота через Xray freedom outbound (sockopt.mark=255)
+    if iptables -m mark --help >/dev/null 2>&1; then
+        local _priv_cidr
+        for _priv_cidr in 127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 0.0.0.0/8; do
+            iptables -A JUST1KNODE-ANTIABUSE -m mark --mark 255 -d "$_priv_cidr" -j DROP
+        done
+    fi
 
     iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 25 -j REJECT --reject-with tcp-reset
     iptables -A JUST1KNODE-ANTIABUSE -p tcp --dport 6881:6889 -j DROP

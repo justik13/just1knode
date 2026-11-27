@@ -25,7 +25,9 @@ def load_json(path, default, fail_closed=False):
     lock_fd = None
     try:
         if fcntl is not None:
-            lock_fd = open(lock_file, "a")
+            flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(lock_file, flags, 0o600)
+            lock_fd = os.fdopen(fd, "a", encoding="utf-8")
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
         with open(path, "r", encoding="utf-8", errors="replace") as fp:
             return json.load(fp)
@@ -136,7 +138,8 @@ def main():
 
     role = str(state.get("role", "unconfigured")).strip().lower()
     domain = str(state.get("domain", "")).strip()
-    bot_domain = str(state.get("bot_domain", "")).strip()
+    raw_bot_domain = str(state.get("bot_domain", "")).strip()
+    bot_domain = raw_bot_domain if raw_bot_domain and raw_bot_domain != "-" and is_valid_fqdn(raw_bot_domain) else ""
     sub_prefix = str(state.get("sub_path_prefix") or "/sub/wl").strip().rstrip("/") or "/sub/wl"
     if not sub_prefix.startswith("/"):
         sub_prefix = "/" + sub_prefix
@@ -413,6 +416,9 @@ def main():
                 "tlsSettings": build_tls_settings(c_file, k_file, domain),
             }
 
+            fb_obj = {"dest": fb_dest}
+            if will_need_nginx:
+                fb_obj["xver"] = 1
             cfg["inbounds"].append({
                 "tag": "just1k-vless-direct",
                 "listen": "0.0.0.0",
@@ -421,7 +427,7 @@ def main():
                 "settings": {
                     "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
                     "decryption": "none",
-                    "fallbacks": [{"dest": fb_dest}],
+                    "fallbacks": [fb_obj],
                 },
                 "streamSettings": ss_tls,
                 "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": True},
@@ -553,6 +559,7 @@ def main():
             "tag": "just1k-wl-direct",
             "protocol": "freedom",
             "settings": {},
+            "streamSettings": {"sockopt": {"mark": 255}},
         })
 
         # Outbounds для Стандарта (std_bridges)
@@ -601,6 +608,50 @@ def main():
             if not bi_default_tag or p.get("is_default"):
                 bi_default_tag = ob_tag
 
+        # Outbounds для фонового зондирования временно исключённых eu_hub (probe_bridges)
+        probe_bridges_raw = links.get("probe_bridges") if isinstance(links.get("probe_bridges"), list) else []
+        probe_only_tags = []
+        for idx, p in enumerate(probe_bridges_raw):
+            if not isinstance(p, dict):
+                continue
+            p_code = clean_code(p.get("code"), f"probe{idx+1}")
+            ob_tag = f"bridge-probe-{p_code}"
+            if ob_tag in probe_only_tags:
+                continue
+            ob = build_bridge_outbound(ob_tag, p)
+            if ob is None:
+                continue
+            probe_only_tags.append(ob_tag)
+            cfg["outbounds"].append(ob)
+
+        all_probe_tags = list(dict.fromkeys(list(std_outbounds.values()) + list(bi_outbounds.values()) + probe_only_tags))
+        probe_rules = []
+        if all_probe_tags:
+            probe_socks_port = 10809
+            while probe_socks_port in used_ports:
+                probe_socks_port += 1
+            used_ports.add(probe_socks_port)
+            cfg["inbounds"].append({
+                "tag": "just1k-probe-socks",
+                "listen": "127.0.0.1",
+                "port": probe_socks_port,
+                "protocol": "socks",
+                "settings": {
+                    "auth": "password",
+                    "accounts": [{"user": t, "pass": "just1k-probe"} for t in all_probe_tags],
+                    "udp": False,
+                    "userLevel": 1,
+                },
+                "sniffing": {"enabled": False},
+            })
+            for t in all_probe_tags:
+                probe_rules.append({
+                    "type": "field",
+                    "inboundTag": ["just1k-probe-socks"],
+                    "user": [t],
+                    "outboundTag": t,
+                })
+
         balancers = []
         observed_tags = set()
 
@@ -638,7 +689,7 @@ def main():
                 })
 
         all_client_inbounds = list(dict.fromkeys(std_inbounds + bi_inbounds))
-        rules = [api_rule] + antiabuse_rules()
+        rules = [api_rule] + antiabuse_rules() + probe_rules
         if all_client_inbounds:
             # Строго прямой выход для РФ-трафика (домены РФ + GeoIP RU)
             rules.append(
@@ -679,8 +730,8 @@ def main():
             cfg["observatory"] = {
                 "subjectSelector": sorted(observed_tags),
                 "probeURL": "https://www.google.com/generate_204",
-                "probeInterval": "10s",
-                "enableConcurrency": True,
+                "probeInterval": "30s",
+                "enableConcurrency": False,
             }
 
         cfg["routing"]["rules"] = rules
@@ -690,7 +741,7 @@ def main():
             nginx_needed = True
             c_file, k_file = cert_pair(domain)
             listen_block = (
-                "    listen 127.0.0.1:8080;\n"
+                "    listen 127.0.0.1:8080 proxy_protocol;\n"
                 if has_vless_tls else
                 "    listen 443 ssl;\n"
                 f"    ssl_certificate {c_file};\n"
@@ -701,7 +752,7 @@ def main():
             if has_vless_tls:
                 catchall_block = (
                     "server {\n"
-                    "    listen 127.0.0.1:8080 default_server;\n"
+                    "    listen 127.0.0.1:8080 default_server proxy_protocol;\n"
                     "    server_name _;\n"
                     "    server_tokens off;\n"
                     "    return 444;\n"
@@ -729,6 +780,7 @@ def main():
                 )
             cidr_lines = []
             seen_cidr = set()
+            cdn_only_cidrs = []
             if has_vless_tls and will_need_nginx:
                 seen_cidr.add("127.0.0.1")
                 cidr_lines.append("    set_real_ip_from 127.0.0.1;")
@@ -743,19 +795,52 @@ def main():
                 for cidr in sp.get("cidrs", []):
                     if cidr not in seen_cidr:
                         seen_cidr.add(cidr)
+                        cdn_only_cidrs.append(cidr)
                         cidr_lines.append(f"    set_real_ip_from {cidr};")
             real_ip_hdr = "X-Forwarded-For" if use_xff or not use_xri else "X-Real-IP"
             loc_blocks = []
+            sub_map_block = ""
             if bot_domain:
-                loc_blocks.append(
-                    "    location ^~ /sub/ {\n"
-                    f"        proxy_pass https://{bot_domain}/sub/;\n"
-                    "        proxy_ssl_server_name on;\n"
-                    f"        proxy_set_header Host {bot_domain};\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                    "    }\n"
+                geo_peer_var = "$proxy_protocol_addr" if has_vless_tls else "$realip_remote_addr"
+                geo_entries = ["    default 0;"]
+                for cidr in cdn_only_cidrs:
+                    geo_entries.append(f"    {cidr} 1;")
+                sub_map_block = (
+                    f"geo {geo_peer_var} $just1k_is_trusted_cdn_peer {{\n"
+                    + "\n".join(geo_entries) + "\n"
+                    "}\n\n"
+                    "map $http_x_forwarded_for_y $just1k_yff_ip {\n"
+                    '    "~(?:^|[,\\s])([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]*:[0-9a-fA-F:.]*)\\s*$" $1;\n'
+                    '    default "";\n'
+                    "}\n\n"
+                    'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_client_ip {\n'
+                    '    "~^1:(.+)$" $1;\n'
+                    '    "~^1:$"     $remote_addr;\n'
+                    f"    default     {geo_peer_var};\n"
+                    "}\n\n"
+                    'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_xff {\n'
+                    f'    "~^1:(.+)$" "$1, {geo_peer_var}";\n'
+                    f'    "~^1:$"     "$remote_addr, {geo_peer_var}";\n'
+                    f"    default     {geo_peer_var};\n"
+                    "}\n\n"
                 )
+                def _make_sub_proxy_loc(loc_prefix):
+                    clean_p = loc_prefix.rstrip("/") or "/sub"
+                    return (
+                        f"    location ^~ {clean_p}/ {{\n"
+                        f"        proxy_pass https://{bot_domain}{clean_p}/;\n"
+                        "        proxy_http_version 1.1;\n"
+                        "        proxy_ssl_server_name on;\n"
+                        f"        proxy_set_header Host {bot_domain};\n"
+                        "        proxy_set_header X-Real-IP $just1k_sub_client_ip;\n"
+                        "        proxy_set_header X-Forwarded-For $just1k_sub_xff;\n"
+                        "        proxy_buffering off;\n"
+                        "        proxy_request_buffering off;\n"
+                        "    }\n"
+                    )
+                loc_blocks.append(_make_sub_proxy_loc("/sub"))
+                if sub_prefix != "/sub" and not sub_prefix.startswith("/sub/") and is_valid_nginx_path(sub_prefix):
+                    loc_blocks.append(_make_sub_proxy_loc(sub_prefix))
 
             def make_xhttp_loc(c_path_raw, upstream_name, sp):
                 cp = str(c_path_raw or "").rstrip("/")
@@ -817,7 +902,8 @@ def main():
                     cdn_doms.append(str(m_cfg.get("cdn_domain") or m_cfg.get("domain") or "").strip())
             srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms) if x and x != "-"]) or (domain or "localhost")
             nginx_text = (
-                "\n".join(std_upstream_blocks)
+                sub_map_block
+                + "\n".join(std_upstream_blocks)
                 + catchall_block
                 + "server {\n"
                 + listen_block
@@ -1000,8 +1086,9 @@ def main():
                 "tlsSettings": build_tls_settings(c_file, k_file, domain),
             },
         })
+        cfg["routing"]["domainStrategy"] = "IPOnDemand"
         cfg["outbounds"] = [
-            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+            {"tag": "direct", "protocol": "freedom", "settings": {}, "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "mark": 255}}},
             {"tag": "just1k-wl-block", "protocol": "blackhole", "settings": {}},
         ]
         cfg["routing"]["rules"] = [api_rule] + antiabuse_rules() + [

@@ -600,6 +600,9 @@ show_status() {
         if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" ]]; then
             systemctl is-active --quiet just1knode-apply.path && echo -e "    Apply Watcher:        ${GREEN}● Активен${NC}" || echo -e "    Apply Watcher:        ${YELLOW}○ Не активен${NC}"
         fi
+        if [[ "$role" == "ru_hub" && -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" ]]; then
+            systemctl is-active --quiet just1knode-geodata.timer && echo -e "    GeoData Timer:        ${GREEN}● Активен${NC}" || echo -e "    GeoData Timer:        ${YELLOW}○ Не активен${NC}"
+        fi
     else
         echo -e "  Отображение:          $(role_display_name "$role")"
         echo -e "  Бот:                  $(get_bot_connection_label)"
@@ -667,6 +670,19 @@ run_doctor() {
             echo -e "  ${GREEN}✔${NC} Триггер применения конфигурации just1knode-apply.path активен"
         else
             echo -e "  ${YELLOW}!${NC} Триггер just1knode-apply.path не активен"
+            warnings=$((warnings + 1))
+        fi
+    fi
+    if [[ "$role" == "ru_hub" ]]; then
+        if [[ -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" ]]; then
+            if systemctl is-active --quiet just1knode-geodata.timer 2>/dev/null; then
+                echo -e "  ${GREEN}✔${NC} Таймер обновления гео-баз just1knode-geodata.timer активен"
+            else
+                echo -e "  ${YELLOW}!${NC} Таймер just1knode-geodata.timer не активен"
+                warnings=$((warnings + 1))
+            fi
+        else
+            echo -e "  ${YELLOW}!${NC} Таймер обновления гео-баз just1knode-geodata.timer отсутствует"
             warnings=$((warnings + 1))
         fi
     fi
@@ -1150,6 +1166,33 @@ PYEOF
         else
             echo -e "  ${YELLOW}i${NC} Связи (мосты / транзитные узлы) для роли $role не настроены"
         fi
+        if [[ "$role" == "ru_hub" ]] && [[ -f "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" ]]; then
+            local _bh_warn
+            _bh_warn=$(python3 - "${XRAY_API_CONFIG_ENV:-/etc/xray-api/config.env}" <<'PYEOF' 2>/dev/null || true
+import json, urllib.request
+env_p = __import__("sys").argv[1]
+key = ""
+with open(env_p, "r", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        if line.startswith("XRAY_API_KEY="):
+            key = line.split("=", 1)[1].strip()
+            break
+if key:
+    req = urllib.request.Request("http://127.0.0.1:5001/v1/health", headers={"X-API-Key": key})
+    with urllib.request.urlopen(req, timeout=3.0) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    for ip, info in (data.get("bridge_health") or {}).items():
+        if isinstance(info, dict) and info.get("ok") is False:
+            print(f"{ip}\t{info.get('error') or 'failed'}\t{info.get('bytes_read', 0)}")
+PYEOF
+            )
+            if [[ -n "$_bh_warn" ]]; then
+                while IFS=$'\t' read -r _bip _berr _bbytes; do
+                    echo -e "  ${YELLOW}!${NC} Bridge payload-probe ${_bip}: ${_berr} (bytes_read=${_bbytes})"
+                    warnings=$((warnings + 1))
+                done <<< "$_bh_warn"
+            fi
+        fi
     fi
 
     if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
@@ -1274,8 +1317,11 @@ reset_node() {
         fi
     fi
 
-    systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
-    systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
+    systemctl stop just1knode-apply.path just1knode-apply.service just1knode-geodata.timer just1knode-geodata.service xray xray-api 2>/dev/null || true
+    systemctl disable just1knode-apply.path just1knode-apply.service just1knode-geodata.timer xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
     remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-ru-hub.conf /etc/nginx/sites-available/just1k-ru-hub.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/just1k-stream443.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
@@ -1448,14 +1494,20 @@ uninstall_node() {
 
     info "1/11. Остановка и отключение системных служб systemd..."
     remove_traffic_limit_timer
-    systemctl stop just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
-    systemctl disable just1knode-apply.path just1knode-apply.service xray xray-api 2>/dev/null || true
+    systemctl stop just1knode-apply.path just1knode-apply.service just1knode-geodata.timer just1knode-geodata.service xray xray-api 2>/dev/null || true
+    systemctl disable just1knode-apply.path just1knode-apply.service just1knode-geodata.timer xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" \
           "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" \
           "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" \
-          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.service" 2>/dev/null || true
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/nginx.service.d/limits.conf" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl reset-failed just1knode-apply.path just1knode-apply.service xray xray-api just1knode-traffic.service just1knode-traffic.timer just1knode-traffic-limit.service just1knode-traffic-limit.timer 2>/dev/null || true
+    systemctl reset-failed just1knode-apply.path just1knode-apply.service just1knode-geodata.timer just1knode-geodata.service xray xray-api just1knode-traffic.service just1knode-traffic.timer just1knode-traffic-limit.service just1knode-traffic-limit.timer 2>/dev/null || true
 
     info "2/11. Завершение активных процессов ядра и API..."
     local xray_proc_name
@@ -1678,6 +1730,15 @@ uninstall_node() {
     fi
     if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-traffic.timer" ]]; then
         node_cleanup_errors+=("Таймер systemd just1knode-traffic.timer все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" ]]; then
+        node_cleanup_errors+=("Служба systemd just1knode-geodata.service все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" ]]; then
+        node_cleanup_errors+=("Таймер systemd just1knode-geodata.timer все еще существует")
+    fi
+    if [[ -e "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/nginx.service.d/limits.conf" ]]; then
+        node_cleanup_errors+=("Drop-in Nginx limits.conf все еще существует")
     fi
     if [[ -f "$sysctl_ipv6_conf" ]]; then
         node_cleanup_errors+=("Файл sysctl $sysctl_ipv6_conf все еще существует")
@@ -2019,6 +2080,16 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             update)
                 case "${2:-}" in
                     core|xray) shift 2; update_xray_core "$@" ;;
+                    geo|geodata)
+                        shift 2
+                        check_root
+                        init_state_dir
+                        acquire_just1knode_lock
+                        trap release_just1knode_lock EXIT
+                        update_xray_geodata "$@"
+                        release_just1knode_lock
+                        trap - EXIT
+                        ;;
                     config|heal) heal_node_config ;;
                     *) update_node "${2:-all}" ;;
                 esac

@@ -1,11 +1,16 @@
 import asyncio
 import copy
+from datetime import datetime, timezone
 import fcntl
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
+import socket
+import ssl
+import subprocess
 import tempfile
 import threading
 import time
@@ -13,6 +18,7 @@ import uuid as uuid_lib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 
@@ -74,6 +80,55 @@ def _apply_pending_path() -> Path:
     return STATE_FILE_PATH.parent / ".apply_pending"
 
 
+APPLY_RUNNING_STALE_SEC = 150
+
+
+def _get_boot_time_epoch() -> Optional[float]:
+    """Return Linux system boot time as Unix epoch from /proc/stat, or None."""
+    try:
+        with open("/proc/stat", "r", encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return float(parts[1])
+    except Exception:
+        pass
+    return None
+
+
+def _apply_running_path() -> Path:
+    return STATE_FILE_PATH.parent / ".apply_running"
+
+
+def _is_apply_in_progress() -> bool:
+    if _apply_pending_path().exists():
+        return True
+    running_path = _apply_running_path()
+    try:
+        st_mtime = running_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return running_path.exists()
+    boot_time = _get_boot_time_epoch()
+    if (boot_time is not None and st_mtime < boot_time) or (
+        time.time() - st_mtime > APPLY_RUNNING_STALE_SEC
+    ):
+        logger.warning(
+            "Stale .apply_running detected at %s (mtime=%.0f, boot_time=%s); clearing",
+            running_path,
+            st_mtime,
+            f"{boot_time:.0f}" if boot_time is not None else "unknown",
+        )
+        try:
+            running_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Could not unlink stale %s: %s", running_path, exc)
+        return False
+    return True
+
+
 def _module_errors_path() -> Path:
     env_p = os.getenv("MODULE_ERRORS_PATH")
     if env_p:
@@ -84,7 +139,9 @@ def _module_errors_path() -> Path:
 def _atomic_write_json(path: Path, payload: Any, mode: int = 0o660) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{path}.lock")
-    with open(lock_path, "a", encoding="utf-8") as lock_fp:
+    lock_flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(str(lock_path), lock_flags, 0o660)
+    with os.fdopen(lock_fd, "a", encoding="utf-8") as lock_fp:
         fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
         try:
             fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -151,6 +208,124 @@ def _load_module_errors() -> Dict[str, str]:
         except Exception as e:
             logger.debug("Could not read module_errors.json: %s", e)
     return {}
+
+
+def _load_last_apply() -> Optional[Dict[str, Any]]:
+    """Read last_apply.json safely; return parsed status dict or None."""
+    lp = STATE_FILE_PATH.parent / "last_apply.json"
+    if not lp.exists():
+        return None
+    try:
+        data = json.loads(lp.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        res: Dict[str, Any] = {
+            "ok": bool(data.get("ok")),
+            "rc": int(data["rc"]) if data.get("rc") is not None else None,
+            "role": str(data.get("role") or ""),
+            "ts": int(data["ts"]) if data.get("ts") is not None else None,
+        }
+        err_val = data.get("error") or data.get("rollback_error")
+        if err_val:
+            res["error"] = str(err_val)[:500]
+        return res
+    except Exception as e:
+        logger.debug("Could not read last_apply.json at %s: %s", lp, e)
+    return None
+
+
+_SSL_CERT_CACHE_TTL = 300.0
+_SSL_CERT_NEG_CACHE_TTL = 15.0
+_ssl_cert_cache_lock = threading.Lock()
+_ssl_cert_cache: Dict[str, Any] = {
+    "key": None,
+    "checked_at": 0.0,
+    "expires_dt": None,
+}
+
+
+def _find_node_cert_path(domain: str) -> Optional[Path]:
+    env_cert = (os.getenv("SSL_CERT_PATH") or "").strip()
+    candidates: List[Path] = []
+    if env_cert:
+        candidates.append(Path(env_cert))
+    xray_tls_dir = Path(os.getenv("XRAY_TLS_DIR") or str(XRAY_CONFIG_PATH.parent / "tls"))
+    le_dir = Path(os.getenv("LETSENCRYPT_DIR", "/etc/letsencrypt"))
+    clean_dom = (domain or "").strip()
+    if clean_dom and clean_dom != "-":
+        candidates.append(xray_tls_dir / f"{clean_dom}_fullchain.pem")
+        candidates.append(le_dir / "live" / clean_dom / "fullchain.pem")
+    candidates.append(xray_tls_dir / "fullchain.pem")
+    for cand in candidates:
+        try:
+            if cand.is_file() and os.access(cand, os.R_OK):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _parse_cert_not_after(cert_path: Path) -> Optional[datetime]:
+    not_after_raw: Optional[str] = None
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+        if proc.returncode == 0 and "=" in proc.stdout:
+            not_after_raw = proc.stdout.split("=", 1)[1].strip()
+    except Exception:
+        not_after_raw = None
+    if not not_after_raw:
+        return None
+    for fmt in ("%b %d %H:%M:%S %Y %Z", "%b  %d %H:%M:%S %Y %Z"):
+        try:
+            return datetime.strptime(not_after_raw, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _load_ssl_cert_info(domain: str) -> Optional[Dict[str, Any]]:
+    """Return cached {expires_at, days_left} for the node TLS cert, or None."""
+    cert_path = _find_node_cert_path(domain)
+    if cert_path is None:
+        return None
+    try:
+        mtime_ns = cert_path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+    cache_key = (str(cert_path), mtime_ns)
+    now_mono = time.monotonic()
+    exp_dt: Optional[datetime] = None
+    with _ssl_cert_cache_lock:
+        ttl = (
+            _SSL_CERT_CACHE_TTL
+            if _ssl_cert_cache["expires_dt"] is not None
+            else _SSL_CERT_NEG_CACHE_TTL
+        )
+        if (
+            _ssl_cert_cache["key"] == cache_key
+            and (now_mono - float(_ssl_cert_cache["checked_at"])) < ttl
+        ):
+            exp_dt = _ssl_cert_cache["expires_dt"]
+        else:
+            exp_dt = _parse_cert_not_after(cert_path)
+            _ssl_cert_cache["key"] = cache_key
+            _ssl_cert_cache["checked_at"] = now_mono
+            _ssl_cert_cache["expires_dt"] = exp_dt
+
+    if exp_dt is None:
+        return None
+    days_left = int((exp_dt - datetime.now(timezone.utc)).total_seconds() // 86400)
+    return {
+        "expires_at": exp_dt.isoformat(),
+        "days_left": days_left,
+    }
 
 
 def _load_traffic_limit_summary() -> Optional[Dict[str, Any]]:
@@ -754,6 +929,383 @@ def sync_active_users_with_epoch(current_epoch: Optional[str], *, blocking: bool
         _epoch_sync_lock.release()
 
 
+_BRIDGE_CODE_CLEAN_RE = re.compile(r"[^a-z0-9_-]+")
+BRIDGE_PROBE_INTERVAL = float(os.getenv("BRIDGE_PROBE_INTERVAL", "60.0"))
+BRIDGE_PROBE_TIMEOUT = float(os.getenv("BRIDGE_PROBE_TIMEOUT", "8.0"))
+BRIDGE_PROBE_MIN_BYTES = int(os.getenv("BRIDGE_PROBE_MIN_BYTES", "36864"))
+BRIDGE_PROBE_URLS = [
+    u.strip()
+    for u in os.getenv(
+        "BRIDGE_PROBE_URLS",
+        "https://speed.cloudflare.com/__down?bytes=65536,https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js",
+    ).split(",")
+    if u.strip()
+]
+
+_bridge_health_lock = threading.Lock()
+_bridge_health_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _clean_bridge_code(raw: Any, fallback: str) -> str:
+    val = _BRIDGE_CODE_CLEAN_RE.sub("", str(raw or "").strip().lower())
+    return val[:48] if val else fallback
+
+
+def _collect_links_bridge_ips(links: Dict[str, Any]) -> set[str]:
+    """Return all bridge IPs declared in links.json across standard, bi, and probe_bridges."""
+    ips: set[str] = set()
+    std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
+    bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
+    for items in (std_cfg.get("bridges"), bi_cfg.get("bridges"), links.get("probe_bridges")):
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip") or "").strip()
+            if ip:
+                ips.add(ip)
+    return ips
+
+
+def _get_probe_socks_config() -> tuple[int | None, set[str]]:
+    """Return (socks_port, configured_outbound_tags) from XRAY_CONFIG_PATH."""
+    if not XRAY_CONFIG_PATH.exists():
+        return None, set()
+    try:
+        cfg = json.loads(XRAY_CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            return None, set()
+        socks_port = None
+        for ib in cfg.get("inbounds") or []:
+            if isinstance(ib, dict) and ib.get("tag") == "just1k-probe-socks":
+                socks_port = int(ib.get("port") or 0) or None
+                break
+        outbound_tags = {
+            str(ob.get("tag"))
+            for ob in (cfg.get("outbounds") or [])
+            if isinstance(ob, dict) and ob.get("tag")
+        }
+        return socks_port, outbound_tags
+    except Exception:
+        return None, set()
+
+
+def _collect_ru_hub_probe_targets(links: Dict[str, Any], configured_tags: set[str]) -> list[Dict[str, Any]]:
+    """Pick up to 2 distinct exit-node probe tags per eu_hub IP active in Xray config."""
+    targets_by_ip: Dict[str, Dict[str, Any]] = {}
+
+    def _consider(items: Any, prefix: str, fb_prefix: str) -> None:
+        if not isinstance(items, list):
+            return
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip") or "").strip()
+            sni = str(item.get("sni") or "").strip()
+            if not ip:
+                continue
+            code = _clean_bridge_code(item.get("code"), f"{fb_prefix}{idx + 1}")
+            tag = f"{prefix}{code}"
+            if tag not in configured_tags:
+                continue
+            exit_key = _clean_bridge_code(item.get("location_code") or item.get("code"), code)
+            entry = targets_by_ip.get(ip)
+            if entry is None:
+                targets_by_ip[ip] = {
+                    "ip": ip,
+                    "sni": sni,
+                    "tag": tag,
+                    "tags": [tag],
+                    "_exit_keys": {exit_key},
+                }
+            elif len(entry["tags"]) < 2 and tag not in entry["tags"]:
+                if exit_key not in entry["_exit_keys"]:
+                    entry["tags"].append(tag)
+                    entry["_exit_keys"].add(exit_key)
+
+    std_cfg = links.get("standard") if isinstance(links.get("standard"), dict) else {}
+    bi_cfg = links.get("bi") if isinstance(links.get("bi"), dict) else {}
+    _consider(std_cfg.get("bridges"), "bridge-std-", "hub")
+    _consider(bi_cfg.get("bridges"), "bridge-bi-", "hub")
+    _consider(links.get("probe_bridges"), "bridge-probe-", "probe")
+    targets: list[Dict[str, Any]] = []
+    for entry in targets_by_ip.values():
+        entry.pop("_exit_keys", None)
+        targets.append(entry)
+    return targets
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("Unexpected EOF during SOCKS5 handshake")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _probe_via_socks5_sync(
+    socks_port: int,
+    bridge_tag: str,
+    probe_url: str,
+    min_bytes: int,
+    timeout: float,
+) -> tuple[bool, int, int | None, str | None]:
+    """Perform a SOCKS5 HTTP(S) GET via Xray's local probe inbound and read >= min_bytes."""
+    parsed = urlsplit(probe_url)
+    host = parsed.hostname
+    if not host:
+        return False, 0, None, "Invalid probe URL"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    started = time.monotonic()
+    deadline = started + timeout
+
+    def _remaining() -> float:
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            raise TimeoutError("Timeout (possible TSPU silent stall)")
+        return rem
+
+    raw_sock = None
+    tls_sock = None
+    total_bytes = 0
+    try:
+        raw_sock = socket.create_connection(("127.0.0.1", socks_port), timeout=_remaining())
+        raw_sock.settimeout(_remaining())
+
+        # 1. SOCKS5 greeting (username/password auth = 0x02)
+        raw_sock.sendall(b"\x05\x01\x02")
+        ver_method = _recv_exact(raw_sock, 2)
+        if ver_method != b"\x05\x02":
+            return False, 0, None, f"SOCKS5 auth method rejected: {ver_method!r}"
+
+        # 2. RFC 1929 username/password
+        raw_sock.settimeout(_remaining())
+        user_b = bridge_tag.encode("utf-8")[:255]
+        pass_b = b"just1k-probe"
+        raw_sock.sendall(b"\x01" + bytes([len(user_b)]) + user_b + bytes([len(pass_b)]) + pass_b)
+        auth_resp = _recv_exact(raw_sock, 2)
+        if auth_resp != b"\x01\x00":
+            return False, 0, None, "SOCKS5 auth failed"
+
+        # 3. SOCKS5 CONNECT (ATYP=0x03 domain)
+        raw_sock.settimeout(_remaining())
+        host_b = host.encode("idna")
+        raw_sock.sendall(
+            b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + port.to_bytes(2, "big")
+        )
+        hdr = _recv_exact(raw_sock, 4)
+        if hdr[1] != 0:
+            return False, 0, None, f"SOCKS5 connect error code {hdr[1]}"
+        atyp = hdr[3]
+        if atyp == 1:
+            _recv_exact(raw_sock, 4)
+        elif atyp == 3:
+            alen = _recv_exact(raw_sock, 1)[0]
+            _recv_exact(raw_sock, alen)
+        elif atyp == 4:
+            _recv_exact(raw_sock, 16)
+        _recv_exact(raw_sock, 2)
+
+        io_sock: socket.socket = raw_sock
+        if parsed.scheme == "https":
+            raw_sock.settimeout(_remaining())
+            ctx = ssl.create_default_context()
+            tls_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+            tls_sock.settimeout(_remaining())
+            io_sock = tls_sock
+
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host_b.decode('ascii')}\r\n"
+            f"User-Agent: just1k-bridge-probe/1.0\r\n"
+            f"Accept: */*\r\n"
+            f"Accept-Encoding: identity\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode("ascii")
+        io_sock.settimeout(_remaining())
+        io_sock.sendall(req)
+
+        header_buf = bytearray()
+        headers_parsed = False
+        status_code = 0
+        expected_content_len: Optional[int] = None
+        while total_bytes < min_bytes + 4096:
+            io_sock.settimeout(_remaining())
+            chunk = io_sock.recv(16384)
+            if not chunk:
+                break
+            if not headers_parsed:
+                header_buf.extend(chunk)
+                sep_idx = header_buf.find(b"\r\n\r\n")
+                if sep_idx != -1:
+                    headers_parsed = True
+                    raw_head = header_buf[:sep_idx].decode("latin-1", errors="replace")
+                    head_lines = raw_head.split("\r\n")
+                    parts = head_lines[0].split()
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        status_code = int(parts[1])
+                    for hline in head_lines[1:]:
+                        if ":" in hline:
+                            hk, hv = hline.split(":", 1)
+                            hv_s = hv.strip()
+                            if hk.strip().lower() == "content-length" and hv_s.isascii() and hv_s.isdigit():
+                                expected_content_len = int(hv_s)
+                                break
+                    body_part = header_buf[sep_idx + 4 :]
+                    total_bytes += len(body_part)
+                    if status_code < 200 or status_code >= 300 or status_code == 204:
+                        return False, total_bytes, None, f"HTTP {status_code}"
+                    if expected_content_len is not None and expected_content_len < min_bytes and total_bytes >= expected_content_len:
+                        break
+                    if total_bytes >= min_bytes:
+                        break
+                elif len(header_buf) > 16384:
+                    return False, 0, None, "HTTP header too large"
+            else:
+                total_bytes += len(chunk)
+                if expected_content_len is not None and expected_content_len < min_bytes and total_bytes >= expected_content_len:
+                    break
+                if total_bytes >= min_bytes:
+                    break
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        if not headers_parsed:
+            return False, total_bytes, elapsed_ms, "No HTTP response"
+        if total_bytes < min_bytes:
+            return False, total_bytes, elapsed_ms, f"Short payload ({total_bytes}/{min_bytes} bytes)"
+        return True, total_bytes, elapsed_ms, None
+    except socket.timeout:
+        return False, total_bytes, None, "Timeout (possible TSPU silent stall)"
+    except Exception as exc:
+        return False, total_bytes, None, str(exc) or type(exc).__name__
+    finally:
+        for s in (tls_sock, raw_sock):
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+
+async def _run_bridge_probe_cycle() -> None:
+    if _is_apply_in_progress():
+        return
+    node_meta = get_node_state_metadata()
+    if str(node_meta.get("role") or "") != "ru_hub":
+        return
+    socks_port, configured_tags = _get_probe_socks_config()
+    if not socks_port or not configured_tags:
+        return
+    links = _load_links_data()
+    if _is_apply_in_progress():
+        return
+    links_ips = _collect_links_bridge_ips(links)
+    targets = _collect_ru_hub_probe_targets(links, configured_tags)
+    if not targets:
+        with _bridge_health_lock:
+            for stale_ip in list(_bridge_health_state.keys()):
+                if stale_ip not in links_ips:
+                    _bridge_health_state.pop(stale_ip, None)
+        return
+
+    keep_ips = {t["ip"] for t in targets} | links_ips
+    with _bridge_health_lock:
+        for stale_ip in list(_bridge_health_state.keys()):
+            if stale_ip not in keep_ips:
+                _bridge_health_state.pop(stale_ip, None)
+
+    for idx, target in enumerate(targets):
+        if idx > 0:
+            # Strict sequential spacing to avoid triggering TSPU TLS concurrency policing
+            await asyncio.sleep(1.5)
+        if _is_apply_in_progress():
+            return
+        ip = target["ip"]
+        sni = target["sni"]
+        tags = list(target.get("tags") or ([target["tag"]] if target.get("tag") else []))
+        used_tag = tags[0] if tags else ""
+
+        ok = False
+        bytes_read = 0
+        latency_ms = None
+        err_msg = "No probe URL configured"
+        for tag_idx, tag in enumerate(tags):
+            if tag_idx > 0:
+                await asyncio.sleep(0.5)
+                if _is_apply_in_progress():
+                    return
+            used_tag = tag
+            for url_idx, probe_url in enumerate(BRIDGE_PROBE_URLS):
+                if url_idx > 0:
+                    await asyncio.sleep(0.5)
+                    if _is_apply_in_progress():
+                        return
+                ok, bytes_read, latency_ms, err_msg = await asyncio.to_thread(
+                    _probe_via_socks5_sync,
+                    socks_port,
+                    tag,
+                    probe_url,
+                    BRIDGE_PROBE_MIN_BYTES,
+                    BRIDGE_PROBE_TIMEOUT,
+                )
+                if _is_apply_in_progress():
+                    return
+                if ok:
+                    break
+            if ok:
+                break
+
+        if _is_apply_in_progress():
+            return
+        now_ts = time.time()
+        with _bridge_health_lock:
+            prev = _bridge_health_state.get(ip, {})
+            if ok:
+                fails = 0
+                succs = int(prev.get("consecutive_successes", 0)) + 1
+            else:
+                fails = int(prev.get("consecutive_fails", 0)) + 1
+                succs = 0
+            _bridge_health_state[ip] = {
+                "ip": ip,
+                "sni": sni,
+                "tag": used_tag,
+                "ok": ok,
+                "bytes_read": bytes_read,
+                "latency_ms": latency_ms,
+                "error": err_msg,
+                "consecutive_fails": fails,
+                "consecutive_successes": succs,
+                "checked_at": now_ts,
+            }
+
+
+def _get_bridge_health_snapshot() -> Dict[str, Dict[str, Any]]:
+    with _bridge_health_lock:
+        return copy.deepcopy(_bridge_health_state)
+
+
+async def _bridge_probe_loop() -> None:
+    await asyncio.sleep(5.0)
+    while True:
+        cycle_started = time.monotonic()
+        try:
+            await _run_bridge_probe_cycle()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Bridge probe cycle error: %s", exc)
+        elapsed = time.monotonic() - cycle_started
+        await asyncio.sleep(max(5.0, float(BRIDGE_PROBE_INTERVAL) - elapsed))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: restore clients to Xray strictly as ephemeral hints
@@ -762,6 +1314,7 @@ async def lifespan(app: FastAPI):
     target_inbounds = get_target_inbounds()
     logger.info("Starting Just1kBot Xray API Agent on inbounds: %s", target_inbounds)
     bg_task = None
+    bridge_probe_task = None
     try:
         retries = 5
         while retries > 0:
@@ -797,10 +1350,17 @@ async def lifespan(app: FastAPI):
             bg_task = asyncio.create_task(_background_retry_sync())
     except Exception as e:
         logger.error("Startup client restoration error: %s", e)
+    if str(get_node_state_metadata().get("role") or "") == "ru_hub":
+        bridge_probe_task = asyncio.create_task(_bridge_probe_loop())
     yield
     # Shutdown
-    if bg_task is not None and not bg_task.done():
-        bg_task.cancel()
+    tasks_to_await = []
+    for t in (bridge_probe_task, bg_task):
+        if t is not None and not t.done():
+            t.cancel()
+            tasks_to_await.append(t)
+    if tasks_to_await:
+        await asyncio.gather(*tasks_to_await, return_exceptions=True)
     grpc_client.close()
 
 
@@ -826,8 +1386,9 @@ async def track_bot_activity_middleware(request: Request, call_next):
                 if client_ip in ("", "127.0.0.1", "::1"):
                     xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
                     xri = (request.headers.get("X-Real-IP") or "").strip()
-                    client_ip = xri or xff or client_ip
-                _record_bot_activity(client_ip)
+                    client_ip = xri or xff
+                if client_ip and client_ip not in ("127.0.0.1", "::1"):
+                    _record_bot_activity(client_ip)
             except Exception:
                 pass
     return await call_next(request)
@@ -1058,11 +1619,12 @@ def _build_node_status_payload(
     links_data = _load_links_data()
     load_info = system_load_info if system_load_info is not None else _get_system_load_info(disk_usage_info)
 
+    domain_str = str(node_meta.get("domain") or "")
     payload: Dict[str, Any] = {
         "status": "ok" if is_running else "error",
         "role": str(node_meta.get("role") or ""),
         "country_code": str(node_meta.get("country_code") or ""),
-        "domain": str(node_meta.get("domain") or ""),
+        "domain": domain_str,
         "cdn_domain": get_cdn_domain(),
         "cdn_domains": get_cdn_domains(),
         "sub_path_prefix": get_sub_path_prefix(),
@@ -1070,6 +1632,8 @@ def _build_node_status_payload(
         "bridge_uuid": str(node_meta.get("tunnel_uuid") or ""),
         "modules": modules,
         "module_errors": _load_module_errors(),
+        "last_apply": _load_last_apply(),
+        "ssl_cert": _load_ssl_cert_info(domain_str),
         "links": links_data,
         "sni_routes": _get_sni_routes(links_data),
         "xhttp_locations": _get_xhttp_location_routes(),
@@ -1095,6 +1659,8 @@ def _build_node_status_payload(
             "last_synced_at": node_sync_state.get("last_synced_at"),
             "disk_usage": disk_usage_info or {},
         })
+        if str(node_meta.get("role") or "") == "ru_hub":
+            payload["bridge_health"] = _get_bridge_health_snapshot()
 
     return payload
 
@@ -1235,9 +1801,7 @@ def update_node_links(
             existing_matches = False
 
     if existing_matches:
-        pending_path = _apply_pending_path()
-        running_path = STATE_FILE_PATH.parent / ".apply_running"
-        if pending_path.exists() or running_path.exists():
+        if _is_apply_in_progress():
             return {
                 "status": "ok",
                 "role": role,

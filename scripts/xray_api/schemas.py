@@ -132,7 +132,7 @@ class InventoryRequest(BaseModel):
 class BridgeSpec(BaseModel):
     id: Optional[str] = Field(default=None, max_length=64)
     tag: Optional[str] = Field(default=None, max_length=64)
-    code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
     location_code: Optional[str] = None
     name: Optional[str] = None
     ip: str
@@ -155,7 +155,7 @@ class BridgeSpec(BaseModel):
 
 class SniRouteSpec(BaseModel):
     sni: str
-    bridge_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    bridge_code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
 
     @model_validator(mode="after")
     def validate_route(self) -> "SniRouteSpec":
@@ -165,7 +165,7 @@ class SniRouteSpec(BaseModel):
 
 
 class IncomingHubSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
+    code: Optional[str] = Field(default=None, max_length=48)
     ip: Optional[str] = None
     uuid: Optional[str] = None
     route_user: Optional[str] = None
@@ -180,11 +180,11 @@ class IncomingHubSpec(BaseModel):
 
 
 class HubRouteSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
+    code: Optional[str] = Field(default=None, max_length=48)
     ingress_uuid: Optional[str] = None
     route_user: str = Field(..., min_length=1, max_length=128)
     exit_id: Optional[str] = Field(default=None, max_length=64)
-    exit_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    exit_code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
 
     @model_validator(mode="after")
     def validate_hub_route(self) -> "HubRouteSpec":
@@ -220,6 +220,7 @@ class NodeLinksSectionSpec(BaseModel):
 class NodeLinksUpdateRequest(BaseModel):
     standard: Optional[NodeLinksSectionSpec] = None
     bi: Optional[NodeLinksSectionSpec] = None
+    probe_bridges: Optional[List[BridgeSpec]] = None
     exit_nodes: Optional[List[BridgeSpec]] = None
     allowed_ru_ips: Optional[List[str]] = None
     allowed_hub_ips: Optional[List[str]] = None

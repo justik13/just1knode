@@ -288,53 +288,61 @@ harden_node_permissions() {
     fi
 
     # Права на чтение/синхронизацию TLS сертификатов и конфигурации Xray
-    if [[ -d "${le_dir}/live" ]]; then
+    if [[ -d "${le_dir}/live" && ! -L "${le_dir}/live" ]]; then
         chmod 755 "$le_dir" 2>/dev/null || true
         if [[ $has_xrayapi -eq 1 ]]; then
-            chown root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
+            chown -h root:xrayapi "$le_dir" "${le_dir}/live" 2>/dev/null || true
         fi
         chmod 750 "${le_dir}/live" 2>/dev/null || true
     fi
-    if [[ -d "${xray_cfg_dir}" ]]; then
+    if [[ -d "${xray_cfg_dir}" && ! -L "${xray_cfg_dir}" ]]; then
         chmod 755 "$xray_cfg_dir" 2>/dev/null || true
     fi
-    if [[ -d "${xray_cfg_dir}/tls" ]]; then
+    if [[ -d "${xray_cfg_dir}/tls" && ! -L "${xray_cfg_dir}/tls" ]]; then
         if [[ $has_xrayapi -eq 1 ]]; then
-            chown root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
+            chown -h root:xrayapi "${xray_cfg_dir}/tls" 2>/dev/null || true
         fi
         chmod 750 "${xray_cfg_dir}/tls" 2>/dev/null || true
     fi
-    if [[ -f "${xray_cfg_dir}/config.json" ]]; then
+    if [[ -L "${xray_cfg_dir}/config.json" ]]; then
+        warn "Обнаружен неожиданный symlink ${xray_cfg_dir}/config.json — удаление для защиты от symlink PrivEsc."
+        rm -f "${xray_cfg_dir}/config.json" 2>/dev/null || true
+    elif [[ -f "${xray_cfg_dir}/config.json" ]]; then
         if [[ $has_xrayapi -eq 1 ]]; then
-            chown root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
+            chown -h root:xrayapi "${xray_cfg_dir}/config.json" 2>/dev/null || true
         fi
         chmod 640 "${xray_cfg_dir}/config.json" 2>/dev/null || true
     fi
 
     # Права на каталог состояния (SGID 2770; state.json — read-only 640 для группы xrayapi)
-    if [[ -d "${state_dir}" ]]; then
+    if [[ -d "${state_dir}" && ! -L "${state_dir}" ]]; then
         if [[ $has_xrayapi -eq 1 ]]; then
-            chown -R root:xrayapi "${state_dir}" 2>/dev/null || true
+            chown -Rh root:xrayapi "${state_dir}" 2>/dev/null || true
         fi
         chmod 2770 "${state_dir}" 2>/dev/null || true
-        if [[ -f "${clients_file}" ]]; then
-            if [[ $has_xrayapi -eq 1 ]]; then
-                chown root:xrayapi "${clients_file}" 2>/dev/null || true
+        local _f _m _pair
+        for _pair in \
+            "${clients_file}:660" \
+            "${state_file}:640" \
+            "${links_file}:660" \
+            "${state_dir}/last_apply.json:644" \
+            "${state_dir}/bot_status.json:640" \
+            "${state_dir}/module_errors.json:640" \
+            "${state_dir}/.applied_xray_hash:644" \
+            "${state_dir}/.apply_pending:660" \
+            "${state_dir}/.apply_running:644"; do
+            _f="${_pair%:*}"
+            _m="${_pair##*:}"
+            if [[ -L "$_f" ]]; then
+                warn "Обнаружен неожиданный symlink ${_f} — удаление для защиты от symlink PrivEsc."
+                rm -f "$_f" 2>/dev/null || true
+            elif [[ -f "$_f" ]]; then
+                if [[ $has_xrayapi -eq 1 ]]; then
+                    chown -h root:xrayapi "$_f" 2>/dev/null || true
+                fi
+                chmod "$_m" "$_f" 2>/dev/null || true
             fi
-            chmod 660 "${clients_file}" 2>/dev/null || true
-        fi
-        if [[ -f "${state_file}" ]]; then
-            if [[ $has_xrayapi -eq 1 ]]; then
-                chown root:xrayapi "${state_file}" 2>/dev/null || true
-            fi
-            chmod 640 "${state_file}" 2>/dev/null || true
-        fi
-        if [[ -f "${links_file}" ]]; then
-            if [[ $has_xrayapi -eq 1 ]]; then
-                chown root:xrayapi "${links_file}" 2>/dev/null || true
-            fi
-            chmod 660 "${links_file}" 2>/dev/null || true
-        fi
+        done
         if [[ $has_xrayapi -eq 1 ]]; then
             find "${state_dir}" -maxdepth 1 -type f -name "*.lock" -exec chown -h root:xrayapi {} + 2>/dev/null || true
             find "${state_dir}" -maxdepth 1 -type f -name "idempotency.db*" -exec chown -h root:xrayapi {} + 2>/dev/null || true

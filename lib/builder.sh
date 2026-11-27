@@ -27,6 +27,22 @@ cleaned = re.sub(
     count=1,
     flags=re.DOTALL,
 )
+if re.search(r"^\s*worker_rlimit_nofile\s+\d+\s*;", cleaned, flags=re.MULTILINE):
+    cleaned = re.sub(
+        r"^(\s*worker_rlimit_nofile\s+)\d+(\s*;)",
+        r"\g<1>65535\g<2>",
+        cleaned,
+        count=1,
+        flags=re.MULTILINE,
+    )
+elif re.search(r"^\s*events\s*\{", cleaned, flags=re.MULTILINE):
+    cleaned = re.sub(
+        r"^(\s*events\s*\{)",
+        "worker_rlimit_nofile 65535;\n\\1",
+        cleaned,
+        count=1,
+        flags=re.MULTILINE,
+    )
 if cleaned != text:
     d = os.path.dirname(os.path.abspath(main_conf))
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
