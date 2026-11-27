@@ -793,29 +793,43 @@ def main():
             loc_blocks = []
             sub_map_block = ""
             if bot_domain:
+                geo_entries = ["    default 0;"]
+                for cidr in seen_cidr:
+                    geo_entries.append(f"    {cidr} 1;")
                 sub_map_block = (
-                    "map $http_x_forwarded_for_y $just1k_sub_client_ip {\n"
-                    '    "~([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]+)\\s*$" $1;\n'
-                    "    default          $remote_addr;\n"
+                    "geo $realip_remote_addr $just1k_is_trusted_cdn_peer {\n"
+                    + "\n".join(geo_entries) + "\n"
                     "}\n\n"
-                    "map $http_x_forwarded_for_y $just1k_sub_xff {\n"
-                    '    "~([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]+)\\s*$" $1;\n'
-                    "    default          $proxy_add_x_forwarded_for;\n"
+                    "map $http_x_forwarded_for_y $just1k_yff_ip {\n"
+                    '    "~(?:^|[,\\s])([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]*:[0-9a-fA-F:.]*)\\s*$" $1;\n'
+                    '    default "";\n'
+                    "}\n\n"
+                    'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_client_ip {\n'
+                    '    "~^1:(.+)$" $1;\n'
+                    "    default     $remote_addr;\n"
+                    "}\n\n"
+                    'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_xff {\n'
+                    '    "~^1:(.+)$" "$1, $realip_remote_addr";\n'
+                    "    default     $proxy_add_x_forwarded_for;\n"
                     "}\n\n"
                 )
-                loc_blocks.append(
-                    "    location ^~ /sub/ {\n"
-                    f"        proxy_pass https://{bot_domain}/sub/;\n"
-                    "        proxy_http_version 1.1;\n"
-                    '        proxy_set_header Connection "";\n'
-                    "        proxy_ssl_server_name on;\n"
-                    f"        proxy_set_header Host {bot_domain};\n"
-                    "        proxy_set_header X-Real-IP $just1k_sub_client_ip;\n"
-                    "        proxy_set_header X-Forwarded-For $just1k_sub_xff;\n"
-                    "        proxy_buffering off;\n"
-                    "        proxy_request_buffering off;\n"
-                    "    }\n"
-                )
+                def _make_sub_proxy_loc(loc_prefix):
+                    clean_p = loc_prefix.rstrip("/") or "/sub"
+                    return (
+                        f"    location ^~ {clean_p}/ {{\n"
+                        f"        proxy_pass https://{bot_domain}{clean_p}/;\n"
+                        "        proxy_http_version 1.1;\n"
+                        "        proxy_ssl_server_name on;\n"
+                        f"        proxy_set_header Host {bot_domain};\n"
+                        "        proxy_set_header X-Real-IP $just1k_sub_client_ip;\n"
+                        "        proxy_set_header X-Forwarded-For $just1k_sub_xff;\n"
+                        "        proxy_buffering off;\n"
+                        "        proxy_request_buffering off;\n"
+                        "    }\n"
+                    )
+                loc_blocks.append(_make_sub_proxy_loc("/sub"))
+                if sub_prefix != "/sub" and not sub_prefix.startswith("/sub/") and is_valid_nginx_path(sub_prefix):
+                    loc_blocks.append(_make_sub_proxy_loc(sub_prefix))
 
             def make_xhttp_loc(c_path_raw, upstream_name, sp):
                 cp = str(c_path_raw or "").rstrip("/")

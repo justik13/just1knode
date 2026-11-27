@@ -165,7 +165,7 @@ class SniRouteSpec(BaseModel):
 
 
 class IncomingHubSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
+    code: Optional[str] = Field(default=None, max_length=48)
     ip: Optional[str] = None
     uuid: Optional[str] = None
     route_user: Optional[str] = None
@@ -180,11 +180,11 @@ class IncomingHubSpec(BaseModel):
 
 
 class HubRouteSpec(BaseModel):
-    code: Optional[str] = Field(default=None, max_length=32)
+    code: Optional[str] = Field(default=None, max_length=48)
     ingress_uuid: Optional[str] = None
     route_user: str = Field(..., min_length=1, max_length=128)
     exit_id: Optional[str] = Field(default=None, max_length=64)
-    exit_code: str = Field(..., min_length=1, max_length=32, pattern=r"^[a-zA-Z0-9_-]+$")
+    exit_code: str = Field(..., min_length=1, max_length=48, pattern=r"^[a-zA-Z0-9_-]+$")
 
     @model_validator(mode="after")
     def validate_hub_route(self) -> "HubRouteSpec":

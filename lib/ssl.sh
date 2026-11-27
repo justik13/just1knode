@@ -108,10 +108,11 @@ if [[ -d "$XRAY_TLS_DIR" ]]; then
         fi
     done
     if getent group xrayapi >/dev/null 2>&1; then
-        chown -R root:xrayapi "$XRAY_TLS_DIR" 2>/dev/null || true
+        chown -Rh root:xrayapi "$XRAY_TLS_DIR" 2>/dev/null || true
         chmod 750 "$XRAY_TLS_DIR" 2>/dev/null || true
-        chmod 640 "$XRAY_TLS_DIR"/*privkey.pem 2>/dev/null || true
-        chmod 644 "$XRAY_TLS_DIR"/*fullchain.pem 2>/dev/null || true
+        find "$XRAY_TLS_DIR" -maxdepth 1 -type l -delete 2>/dev/null || true
+        find "$XRAY_TLS_DIR" -maxdepth 1 -type f -name "*privkey.pem" -exec chmod 640 {} + 2>/dev/null || true
+        find "$XRAY_TLS_DIR" -maxdepth 1 -type f -name "*fullchain.pem" -exec chmod 644 {} + 2>/dev/null || true
     else
         chmod 750 "$XRAY_TLS_DIR" 2>/dev/null || true
     fi

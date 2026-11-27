@@ -321,7 +321,16 @@ harden_node_permissions() {
         fi
         chmod 2770 "${state_dir}" 2>/dev/null || true
         local _f _m _pair
-        for _pair in "${clients_file}:660" "${state_file}:640" "${links_file}:660"; do
+        for _pair in \
+            "${clients_file}:660" \
+            "${state_file}:640" \
+            "${links_file}:660" \
+            "${state_dir}/last_apply.json:644" \
+            "${state_dir}/bot_status.json:640" \
+            "${state_dir}/module_errors.json:640" \
+            "${state_dir}/.applied_xray_hash:644" \
+            "${state_dir}/.apply_pending:660" \
+            "${state_dir}/.apply_running:644"; do
             _f="${_pair%:*}"
             _m="${_pair##*:}"
             if [[ -L "$_f" ]]; then

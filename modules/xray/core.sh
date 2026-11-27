@@ -45,7 +45,13 @@ install_xray_binaries() {
 
     mkdir -p "$XRAY_CONFIG_DIR" "$XRAY_SHARE_DIR" "$(dirname "$XRAY_BIN")"
     unzip -q -o "$tmp_zip" xray -d "$(dirname "$XRAY_BIN")"
-    unzip -q -o "$tmp_zip" geoip.dat geosite.dat -d "$XRAY_SHARE_DIR/" || true
+    local _cur_role=""
+    if declare -F get_state_val >/dev/null 2>&1; then
+        _cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
+    fi
+    if [[ "$_cur_role" != "ru_hub" || ! -f "${XRAY_SHARE_DIR}/geoip.dat" || ! -f "${XRAY_SHARE_DIR}/geosite.dat" ]]; then
+        unzip -q -o "$tmp_zip" geoip.dat geosite.dat -d "$XRAY_SHARE_DIR/" || true
+    fi
     rm -f "$tmp_zip"
     chmod +x "$XRAY_BIN"
 }
@@ -116,8 +122,12 @@ update_xray_core() {
         install -m 755 "${tmp_extract}/xray" "$XRAY_BIN"
         local xray_asset_dir="${XRAY_SHARE_DIR:-/usr/local/share/xray}"
         mkdir -p "$xray_asset_dir"
+        local _cur_role=""
+        if declare -F get_state_val >/dev/null 2>&1; then
+            _cur_role="$(get_state_val "role" "unconfigured" 2>/dev/null || echo "unconfigured")"
+        fi
         for dat_f in geoip.dat geosite.dat; do
-            if [[ -f "${tmp_extract}/${dat_f}" ]]; then
+            if [[ -f "${tmp_extract}/${dat_f}" ]] && [[ "$_cur_role" != "ru_hub" || ! -f "${xray_asset_dir}/${dat_f}" ]]; then
                 install -m 644 "${tmp_extract}/${dat_f}" "${xray_asset_dir}/${dat_f}" 2>/dev/null || true
             fi
         done
@@ -179,6 +189,7 @@ update_xray_geodata() {
     local tmp_dir
     tmp_dir="$(mktemp -d /tmp/xray_geodata.XXXXXX 2>/dev/null || mktemp -d)"
     local updated=0
+    local failed=0
     local spec src_name dest_name expected_hash current_hash new_hash
 
     for spec in "geoip-lite.dat:geoip.dat" "geosite.dat:geosite.dat"; do
@@ -186,6 +197,7 @@ update_xray_geodata() {
         dest_name="${spec#*:}"
         expected_hash="$(curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}/${src_name}.sha256sum" 2>/dev/null | awk 'NR==1 {print $1}' | tr -cd '0-9a-fA-F' || true)"
         if [[ ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            failed=$((failed + 1))
             [[ $quiet -eq 0 ]] && warn "Не удалось получить SHA-256 для ${src_name}; обновление ${dest_name} пропущено."
             continue
         fi
@@ -199,6 +211,7 @@ update_xray_geodata() {
         fi
 
         if ! curl -fsSL --connect-timeout 15 --max-time 120 "${base_url}/${src_name}" -o "${tmp_dir}/${dest_name}" 2>/dev/null; then
+            failed=$((failed + 1))
             [[ $quiet -eq 0 ]] && warn "Не удалось скачать ${src_name}; используется текущая версия ${dest_name}."
             rm -f "${tmp_dir}/${dest_name}"
             continue
@@ -206,6 +219,7 @@ update_xray_geodata() {
 
         new_hash="$(sha256sum "${tmp_dir}/${dest_name}" 2>/dev/null | awk '{print $1}' || true)"
         if [[ "${new_hash,,}" != "${expected_hash,,}" ]]; then
+            failed=$((failed + 1))
             warn "Контрольная сумма SHA-256 для ${dest_name} не совпадает! Файл отклонён."
             rm -f "${tmp_dir}/${dest_name}"
             continue
@@ -215,6 +229,10 @@ update_xray_geodata() {
 
     if [[ $updated -eq 0 ]]; then
         rm -rf "$tmp_dir" 2>/dev/null || true
+        if [[ $failed -gt 0 ]]; then
+            [[ $quiet -eq 0 ]] && warn "Не удалось проверить/скачать обновления гео-баз (ошибок: ${failed}); используются локальные файлы."
+            return 1
+        fi
         [[ $quiet -eq 0 ]] && log "Гео-базы geoip.dat / geosite.dat уже актуальны."
         return 0
     fi

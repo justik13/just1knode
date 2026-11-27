@@ -80,7 +80,7 @@ def _apply_pending_path() -> Path:
     return STATE_FILE_PATH.parent / ".apply_pending"
 
 
-APPLY_RUNNING_STALE_SEC = 600
+APPLY_RUNNING_STALE_SEC = 150
 
 
 def _get_boot_time_epoch() -> Optional[float]:
@@ -139,7 +139,9 @@ def _module_errors_path() -> Path:
 def _atomic_write_json(path: Path, payload: Any, mode: int = 0o660) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{path}.lock")
-    with open(lock_path, "a", encoding="utf-8") as lock_fp:
+    lock_flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(str(lock_path), lock_flags, 0o660)
+    with os.fdopen(lock_fd, "a", encoding="utf-8") as lock_fp:
         fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
         try:
             fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
@@ -233,6 +235,7 @@ def _load_last_apply() -> Optional[Dict[str, Any]]:
 
 
 _SSL_CERT_CACHE_TTL = 300.0
+_SSL_CERT_NEG_CACHE_TTL = 15.0
 _ssl_cert_cache_lock = threading.Lock()
 _ssl_cert_cache: Dict[str, Any] = {
     "key": None,
@@ -264,27 +267,18 @@ def _find_node_cert_path(domain: str) -> Optional[Path]:
 
 def _parse_cert_not_after(cert_path: Path) -> Optional[datetime]:
     not_after_raw: Optional[str] = None
-    decode_fn = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
-    if callable(decode_fn):
-        try:
-            info = decode_fn(str(cert_path))
-            if isinstance(info, dict) and info.get("notAfter"):
-                not_after_raw = str(info["notAfter"]).strip()
-        except Exception:
-            not_after_raw = None
-    if not not_after_raw:
-        try:
-            proc = subprocess.run(
-                ["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
-            if proc.returncode == 0 and "=" in proc.stdout:
-                not_after_raw = proc.stdout.split("=", 1)[1].strip()
-        except Exception:
-            not_after_raw = None
+    try:
+        proc = subprocess.run(
+            ["openssl", "x509", "-enddate", "-noout", "-in", str(cert_path)],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+        if proc.returncode == 0 and "=" in proc.stdout:
+            not_after_raw = proc.stdout.split("=", 1)[1].strip()
+    except Exception:
+        not_after_raw = None
     if not not_after_raw:
         return None
     for fmt in ("%b %d %H:%M:%S %Y %Z", "%b  %d %H:%M:%S %Y %Z"):
@@ -309,9 +303,14 @@ def _load_ssl_cert_info(domain: str) -> Optional[Dict[str, Any]]:
     now_mono = time.monotonic()
     exp_dt: Optional[datetime] = None
     with _ssl_cert_cache_lock:
+        ttl = (
+            _SSL_CERT_CACHE_TTL
+            if _ssl_cert_cache["expires_dt"] is not None
+            else _SSL_CERT_NEG_CACHE_TTL
+        )
         if (
             _ssl_cert_cache["key"] == cache_key
-            and (now_mono - float(_ssl_cert_cache["checked_at"])) < _SSL_CERT_CACHE_TTL
+            and (now_mono - float(_ssl_cert_cache["checked_at"])) < ttl
         ):
             exp_dt = _ssl_cert_cache["expires_dt"]
         else:
@@ -1097,7 +1096,7 @@ def _probe_via_socks5_sync(
 
         # 3. SOCKS5 CONNECT (ATYP=0x03 domain)
         raw_sock.settimeout(_remaining())
-        host_b = host.encode("ascii")
+        host_b = host.encode("idna")
         raw_sock.sendall(
             b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + port.to_bytes(2, "big")
         )
@@ -1136,6 +1135,7 @@ def _probe_via_socks5_sync(
         header_buf = bytearray()
         headers_parsed = False
         status_code = 0
+        expected_content_len: Optional[int] = None
         while total_bytes < min_bytes + 4096:
             io_sock.settimeout(_remaining())
             chunk = io_sock.recv(16384)
@@ -1146,20 +1146,31 @@ def _probe_via_socks5_sync(
                 sep_idx = header_buf.find(b"\r\n\r\n")
                 if sep_idx != -1:
                     headers_parsed = True
-                    head_line = header_buf[:sep_idx].split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
-                    parts = head_line.split()
+                    raw_head = header_buf[:sep_idx].decode("latin-1", errors="replace")
+                    head_lines = raw_head.split("\r\n")
+                    parts = head_lines[0].split()
                     if len(parts) >= 2 and parts[1].isdigit():
                         status_code = int(parts[1])
+                    for hline in head_lines[1:]:
+                        if ":" in hline:
+                            hk, hv = hline.split(":", 1)
+                            if hk.strip().lower() == "content-length" and hv.strip().isdigit():
+                                expected_content_len = int(hv.strip())
+                                break
                     body_part = header_buf[sep_idx + 4 :]
                     total_bytes += len(body_part)
                     if status_code < 200 or status_code >= 300 or status_code == 204:
                         return False, total_bytes, None, f"HTTP {status_code}"
+                    if expected_content_len is not None and expected_content_len < min_bytes and total_bytes >= expected_content_len:
+                        break
                     if total_bytes >= min_bytes:
                         break
                 elif len(header_buf) > 16384:
                     return False, 0, None, "HTTP header too large"
             else:
                 total_bytes += len(chunk)
+                if expected_content_len is not None and expected_content_len < min_bytes and total_bytes >= expected_content_len:
+                    break
                 if total_bytes >= min_bytes:
                     break
 
@@ -1283,13 +1294,15 @@ def _get_bridge_health_snapshot() -> Dict[str, Dict[str, Any]]:
 async def _bridge_probe_loop() -> None:
     await asyncio.sleep(5.0)
     while True:
+        cycle_started = time.monotonic()
         try:
             await _run_bridge_probe_cycle()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.debug("Bridge probe cycle error: %s", exc)
-        await asyncio.sleep(BRIDGE_PROBE_INTERVAL)
+        elapsed = time.monotonic() - cycle_started
+        await asyncio.sleep(max(5.0, float(BRIDGE_PROBE_INTERVAL) - elapsed))
 
 
 @asynccontextmanager
@@ -1300,6 +1313,7 @@ async def lifespan(app: FastAPI):
     target_inbounds = get_target_inbounds()
     logger.info("Starting Just1kBot Xray API Agent on inbounds: %s", target_inbounds)
     bg_task = None
+    bridge_probe_task = None
     try:
         retries = 5
         while retries > 0:
@@ -1335,13 +1349,17 @@ async def lifespan(app: FastAPI):
             bg_task = asyncio.create_task(_background_retry_sync())
     except Exception as e:
         logger.error("Startup client restoration error: %s", e)
-    bridge_probe_task = asyncio.create_task(_bridge_probe_loop())
+    if str(get_node_state_metadata().get("role") or "") == "ru_hub":
+        bridge_probe_task = asyncio.create_task(_bridge_probe_loop())
     yield
     # Shutdown
-    if bridge_probe_task is not None and not bridge_probe_task.done():
-        bridge_probe_task.cancel()
-    if bg_task is not None and not bg_task.done():
-        bg_task.cancel()
+    tasks_to_await = []
+    for t in (bridge_probe_task, bg_task):
+        if t is not None and not t.done():
+            t.cancel()
+            tasks_to_await.append(t)
+    if tasks_to_await:
+        await asyncio.gather(*tasks_to_await, return_exceptions=True)
     grpc_client.close()
 
 
