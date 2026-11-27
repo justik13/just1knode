@@ -481,8 +481,6 @@ def main():
         else:
             loc_sources.extend([p for p in bi_bridges_raw if isinstance(p, dict) and p.get("code")])
 
-        used_ports = set()
-        used_ports.update({ib.get("port") for ib in cfg["inbounds"] if ib.get("port")})
         next_port = 8005
         location_nginx_routes = []
         bi_loc_inbounds_by_target = {}
@@ -544,7 +542,7 @@ def main():
                 bi_loc_inbounds_by_target.setdefault(target_bridge, []).append(r_tag)
                 location_nginx_routes.append((r_path, f"xray_xhttp_loc_{loc_slug}", spec_eff))
 
-        # Выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; нативный безопасный резолв хоста AsIs)
+        # Выход в Рунет (ТОЛЬКО для RU-сегмента и строго по российским доменам; резолв строго IPv4 через sockopt.domainStrategy)
         ru_domains = [
             "geosite:category-ru", "geosite:tld-ru",
             "domain:ru", "domain:su", "domain:xn--p1ai",
@@ -558,8 +556,8 @@ def main():
         cfg["outbounds"].append({
             "tag": "just1k-wl-direct",
             "protocol": "freedom",
-            "settings": {"domainStrategy": "UseIPv4"},
-            "streamSettings": {"sockopt": {"mark": 255}},
+            "settings": {},
+            "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "mark": 255}},
         })
 
         # Outbounds для Стандарта (std_bridges)
