@@ -1981,7 +1981,6 @@ async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, A
     )
 
 
-@app.post("/v1/clients/sync")
 def _sync_client_cached_lookup_sync(
     req: ClientSyncRequest, client_uuid: str, desired_state: str
 ) -> Optional[Dict[str, Any]]:
@@ -2067,6 +2066,7 @@ def _sync_client_cached_lookup_sync(
     return None
 
 
+@app.post("/v1/clients/sync")
 @app.post("/v1/clients")
 async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key)) -> Dict[str, Any]:
     """
