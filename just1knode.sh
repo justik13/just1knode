@@ -715,7 +715,10 @@ run_doctor() {
         log "3. Проверка конфигурации Xray..."
         local xray_bin="${XRAY_BIN:-/usr/local/bin/xray}"
         local xray_cfg="${XRAY_CONFIG:-/usr/local/etc/xray/config.json}"
-        if [[ -f "$xray_cfg" ]] && "$xray_bin" run -test -format json -config "$xray_cfg" 2>/dev/null; then
+        if [[ ! -f "$xray_cfg" ]]; then
+            echo -e "  ${RED}✗${NC} Файл конфигурации Xray не найден (${xray_cfg})"
+            failed=$((failed + 1))
+        elif "$xray_bin" run -test -format json -config "$xray_cfg"; then
             echo -e "  ${GREEN}✔${NC} Конфигурация Xray валидна"
         else
             echo -e "  ${RED}✗${NC} Ошибка конфигурации Xray"
