@@ -100,6 +100,40 @@ install_base_deps() {
         apt-get install -y -qq curl wget unzip jq python3 python3-pip python3-venv ufw openssl ca-certificates
 }
 
+ensure_nginx_nofile_limits() {
+    local systemd_dir="${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+    local dropin_dir="${systemd_dir}/nginx.service.d"
+    local dropin_file="${dropin_dir}/limits.conf"
+    local desired="[Service]
+LimitNOFILE=65535"
+    local changed=0
+
+    mkdir -p "$dropin_dir" 2>/dev/null || return 0
+    if [[ ! -f "$dropin_file" ]] || [[ "$(cat "$dropin_file" 2>/dev/null || true)" != "$desired" ]]; then
+        printf '%s\n' "$desired" > "$dropin_file" 2>/dev/null || true
+        chmod 644 "$dropin_file" 2>/dev/null || true
+        changed=1
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+    fi
+
+    NGINX_NEEDS_NOFILE_RESTART=0
+    if [[ $changed -eq 1 ]]; then
+        NGINX_NEEDS_NOFILE_RESTART=1
+    elif command -v pgrep >/dev/null 2>&1; then
+        local ngx_pid max_fd
+        ngx_pid="$(pgrep -x nginx 2>/dev/null | head -n1 || true)"
+        if [[ -n "$ngx_pid" && -r "/proc/${ngx_pid}/limits" ]]; then
+            max_fd="$(awk '/Max open files/{print $4}' "/proc/${ngx_pid}/limits" 2>/dev/null | head -n1 || true)"
+            if [[ "$max_fd" =~ ^[0-9]+$ && "$max_fd" -lt 65535 ]]; then
+                NGINX_NEEDS_NOFILE_RESTART=1
+            fi
+        fi
+    fi
+    return 0
+}
+
 install_nginx_if_missing() {
     if ! command -v nginx >/dev/null 2>&1; then
         log "Установка Nginx, mod-stream и Certbot..."
@@ -113,6 +147,7 @@ install_nginx_if_missing() {
             cp -L "$def_site" "${NGINX_CONF_DIR:-/etc/nginx}/sites-available/default.user.bak" 2>/dev/null || true
             rm -f "$def_site" 2>/dev/null || true
         fi
+        ensure_nginx_nofile_limits
         systemctl enable nginx 2>/dev/null || true
         systemctl restart nginx 2>/dev/null || true
     fi

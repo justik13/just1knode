@@ -790,14 +790,33 @@ def main():
                         cidr_lines.append(f"    set_real_ip_from {cidr};")
             real_ip_hdr = "X-Forwarded-For" if use_xff or not use_xri else "X-Real-IP"
             loc_blocks = []
+            sub_map_block = ""
             if bot_domain:
+                sub_map_block = (
+                    "map $http_x_real_ip $just1k_sub_fallback_ip {\n"
+                    '    "~^\\s*([^,\\s]+)" $1;\n'
+                    "    default          $remote_addr;\n"
+                    "}\n\n"
+                    "map $http_x_forwarded_for_y $just1k_sub_client_ip {\n"
+                    '    "~^\\s*([^,\\s]+)" $1;\n'
+                    "    default          $just1k_sub_fallback_ip;\n"
+                    "}\n\n"
+                    "map $http_x_forwarded_for_y $just1k_sub_xff {\n"
+                    '    "~^\\s*([^,\\s]+)" $1;\n'
+                    "    default          $proxy_add_x_forwarded_for;\n"
+                    "}\n\n"
+                )
                 loc_blocks.append(
                     "    location ^~ /sub/ {\n"
                     f"        proxy_pass https://{bot_domain}/sub/;\n"
+                    "        proxy_http_version 1.1;\n"
+                    '        proxy_set_header Connection "";\n'
                     "        proxy_ssl_server_name on;\n"
                     f"        proxy_set_header Host {bot_domain};\n"
-                    "        proxy_set_header X-Real-IP $remote_addr;\n"
-                    "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                    "        proxy_set_header X-Real-IP $just1k_sub_client_ip;\n"
+                    "        proxy_set_header X-Forwarded-For $just1k_sub_xff;\n"
+                    "        proxy_buffering off;\n"
+                    "        proxy_request_buffering off;\n"
                     "    }\n"
                 )
 
@@ -861,7 +880,8 @@ def main():
                     cdn_doms.append(str(m_cfg.get("cdn_domain") or m_cfg.get("domain") or "").strip())
             srv_names = " ".join([x for x in dict.fromkeys([domain] + cdn_doms) if x and x != "-"]) or (domain or "localhost")
             nginx_text = (
-                "\n".join(std_upstream_blocks)
+                sub_map_block
+                + "\n".join(std_upstream_blocks)
                 + catchall_block
                 + "server {\n"
                 + listen_block

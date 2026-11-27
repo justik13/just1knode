@@ -220,7 +220,14 @@ apply_v2_hub_configuration() {
         return 1
     fi
 
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    if declare -F ensure_nginx_nofile_limits >/dev/null 2>&1; then
+        ensure_nginx_nofile_limits
+    fi
+    if [[ "${NGINX_NEEDS_NOFILE_RESTART:-0}" == "1" ]]; then
+        systemctl restart nginx 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+    else
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    fi
     deploy_xray_systemd_service
 
     if is_traffic_limit_exceeded; then
