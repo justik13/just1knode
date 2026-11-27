@@ -25,7 +25,9 @@ def load_json(path, default, fail_closed=False):
     lock_fd = None
     try:
         if fcntl is not None:
-            lock_fd = open(lock_file, "a")
+            flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(lock_file, flags, 0o600)
+            lock_fd = os.fdopen(fd, "a", encoding="utf-8")
             fcntl.flock(lock_fd.fileno(), fcntl.LOCK_SH)
         with open(path, "r", encoding="utf-8", errors="replace") as fp:
             return json.load(fp)
@@ -136,7 +138,8 @@ def main():
 
     role = str(state.get("role", "unconfigured")).strip().lower()
     domain = str(state.get("domain", "")).strip()
-    bot_domain = str(state.get("bot_domain", "")).strip()
+    raw_bot_domain = str(state.get("bot_domain", "")).strip()
+    bot_domain = raw_bot_domain if raw_bot_domain and raw_bot_domain != "-" and is_valid_fqdn(raw_bot_domain) else ""
     sub_prefix = str(state.get("sub_path_prefix") or "/sub/wl").strip().rstrip("/") or "/sub/wl"
     if not sub_prefix.startswith("/"):
         sub_prefix = "/" + sub_prefix
@@ -413,6 +416,9 @@ def main():
                 "tlsSettings": build_tls_settings(c_file, k_file, domain),
             }
 
+            fb_obj = {"dest": fb_dest}
+            if will_need_nginx:
+                fb_obj["xver"] = 1
             cfg["inbounds"].append({
                 "tag": "just1k-vless-direct",
                 "listen": "0.0.0.0",
@@ -421,7 +427,7 @@ def main():
                 "settings": {
                     "clients": active_clients_list(vless_clients, "xtls-rprx-vision", revoked_vless),
                     "decryption": "none",
-                    "fallbacks": [{"dest": fb_dest}],
+                    "fallbacks": [fb_obj],
                 },
                 "streamSettings": ss_tls,
                 "sniffing": {"enabled": True, "destOverride": ["tls", "http", "quic"], "routeOnly": True},
@@ -735,7 +741,7 @@ def main():
             nginx_needed = True
             c_file, k_file = cert_pair(domain)
             listen_block = (
-                "    listen 127.0.0.1:8080;\n"
+                "    listen 127.0.0.1:8080 proxy_protocol;\n"
                 if has_vless_tls else
                 "    listen 443 ssl;\n"
                 f"    ssl_certificate {c_file};\n"
@@ -746,7 +752,7 @@ def main():
             if has_vless_tls:
                 catchall_block = (
                     "server {\n"
-                    "    listen 127.0.0.1:8080 default_server;\n"
+                    "    listen 127.0.0.1:8080 default_server proxy_protocol;\n"
                     "    server_name _;\n"
                     "    server_tokens off;\n"
                     "    return 444;\n"
@@ -774,6 +780,7 @@ def main():
                 )
             cidr_lines = []
             seen_cidr = set()
+            cdn_only_cidrs = []
             if has_vless_tls and will_need_nginx:
                 seen_cidr.add("127.0.0.1")
                 cidr_lines.append("    set_real_ip_from 127.0.0.1;")
@@ -788,16 +795,18 @@ def main():
                 for cidr in sp.get("cidrs", []):
                     if cidr not in seen_cidr:
                         seen_cidr.add(cidr)
+                        cdn_only_cidrs.append(cidr)
                         cidr_lines.append(f"    set_real_ip_from {cidr};")
             real_ip_hdr = "X-Forwarded-For" if use_xff or not use_xri else "X-Real-IP"
             loc_blocks = []
             sub_map_block = ""
             if bot_domain:
+                geo_peer_var = "$proxy_protocol_addr" if has_vless_tls else "$realip_remote_addr"
                 geo_entries = ["    default 0;"]
-                for cidr in seen_cidr:
+                for cidr in cdn_only_cidrs:
                     geo_entries.append(f"    {cidr} 1;")
                 sub_map_block = (
-                    "geo $realip_remote_addr $just1k_is_trusted_cdn_peer {\n"
+                    f"geo {geo_peer_var} $just1k_is_trusted_cdn_peer {{\n"
                     + "\n".join(geo_entries) + "\n"
                     "}\n\n"
                     "map $http_x_forwarded_for_y $just1k_yff_ip {\n"
@@ -806,11 +815,13 @@ def main():
                     "}\n\n"
                     'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_client_ip {\n'
                     '    "~^1:(.+)$" $1;\n'
-                    "    default     $remote_addr;\n"
+                    '    "~^1:$"     $remote_addr;\n'
+                    f"    default     {geo_peer_var};\n"
                     "}\n\n"
                     'map "${just1k_is_trusted_cdn_peer}:${just1k_yff_ip}" $just1k_sub_xff {\n'
-                    '    "~^1:(.+)$" "$1, $realip_remote_addr";\n'
-                    "    default     $proxy_add_x_forwarded_for;\n"
+                    f'    "~^1:(.+)$" "$1, {geo_peer_var}";\n'
+                    f'    "~^1:$"     "$remote_addr, {geo_peer_var}";\n'
+                    f"    default     {geo_peer_var};\n"
                     "}\n\n"
                 )
                 def _make_sub_proxy_loc(loc_prefix):

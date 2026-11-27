@@ -88,7 +88,7 @@ update_xray_core() {
     init_state_dir
 
     local current_ver
-    current_ver="$($XRAY_BIN version 2>/dev/null | awk 'NR==1 {print $2}')"
+    current_ver="$($XRAY_BIN version 2>/dev/null | awk 'NR==1 {print $2}' || true)"
     log "Текущая версия Xray: ${current_ver:-не установлена}"
 
     local force_update=0

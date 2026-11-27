@@ -1319,6 +1319,9 @@ reset_node() {
 
     systemctl stop just1knode-apply.path just1knode-apply.service just1knode-geodata.timer just1knode-geodata.service xray xray-api 2>/dev/null || true
     systemctl disable just1knode-apply.path just1knode-apply.service just1knode-geodata.timer xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
     remove_traffic_limit_timer
     remove_antiabuse_protection 2>/dev/null || true
     rm -f /etc/nginx/sites-enabled/just1k-origin.conf /etc/nginx/sites-available/just1k-origin.conf /etc/nginx/sites-enabled/just1k-ru-hub.conf /etc/nginx/sites-available/just1k-ru-hub.conf /etc/nginx/sites-enabled/just1k-vless-api.conf /etc/nginx/sites-available/just1k-vless-api.conf /etc/nginx/sites-enabled/just1k-fallback80.conf /etc/nginx/sites-available/just1k-fallback80.conf /etc/nginx/conf.d/just1k-origin.conf /etc/nginx/conf.d/just1k-bootstrap.conf /etc/nginx/conf.d/just1k-xhttp-upstreams.conf /etc/nginx/conf.d/xhttp-map.conf /etc/nginx/just1k-stream443.conf /etc/nginx/conf.d/just1k-stream443.conf /etc/nginx/streams-enabled/just1k-stream443.conf /etc/modules-load.d/just1knode.conf /etc/letsencrypt/renewal-hooks/deploy/20-just1knode-restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh /etc/letsencrypt/renewal-hooks/deploy/restart-xray-nginx.sh /etc/letsencrypt/renewal-hooks/pre/05-just1knode-nginx.sh /etc/letsencrypt/renewal-hooks/post/05-just1knode-nginx.sh /run/just1knode* 2>/dev/null || true
@@ -1493,6 +1496,9 @@ uninstall_node() {
     remove_traffic_limit_timer
     systemctl stop just1knode-apply.path just1knode-apply.service just1knode-geodata.timer just1knode-geodata.service xray xray-api 2>/dev/null || true
     systemctl disable just1knode-apply.path just1knode-apply.service just1knode-geodata.timer xray xray-api 2>/dev/null || true
+    rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.service" \
+          "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-geodata.timer" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
     rm -f "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray.service" \
           "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/xray-api.service" \
           "${SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}/just1knode-apply.path" \

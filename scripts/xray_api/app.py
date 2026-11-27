@@ -1123,7 +1123,7 @@ def _probe_via_socks5_sync(
 
         req = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
+            f"Host: {host_b.decode('ascii')}\r\n"
             f"User-Agent: just1k-bridge-probe/1.0\r\n"
             f"Accept: */*\r\n"
             f"Accept-Encoding: identity\r\n"
@@ -1154,8 +1154,9 @@ def _probe_via_socks5_sync(
                     for hline in head_lines[1:]:
                         if ":" in hline:
                             hk, hv = hline.split(":", 1)
-                            if hk.strip().lower() == "content-length" and hv.strip().isdigit():
-                                expected_content_len = int(hv.strip())
+                            hv_s = hv.strip()
+                            if hk.strip().lower() == "content-length" and hv_s.isascii() and hv_s.isdigit():
+                                expected_content_len = int(hv_s)
                                 break
                     body_part = header_buf[sep_idx + 4 :]
                     total_bytes += len(body_part)
@@ -1385,8 +1386,9 @@ async def track_bot_activity_middleware(request: Request, call_next):
                 if client_ip in ("", "127.0.0.1", "::1"):
                     xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
                     xri = (request.headers.get("X-Real-IP") or "").strip()
-                    client_ip = xri or xff or client_ip
-                _record_bot_activity(client_ip)
+                    client_ip = xri or xff
+                if client_ip and client_ip not in ("127.0.0.1", "::1"):
+                    _record_bot_activity(client_ip)
             except Exception:
                 pass
     return await call_next(request)
