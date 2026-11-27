@@ -634,6 +634,7 @@ def main():
                     "auth": "password",
                     "accounts": [{"user": t, "pass": "just1k-probe"} for t in all_probe_tags],
                     "udp": False,
+                    "userLevel": 1,
                 },
                 "sniffing": {"enabled": False},
             })
@@ -793,16 +794,12 @@ def main():
             sub_map_block = ""
             if bot_domain:
                 sub_map_block = (
-                    "map $http_x_real_ip $just1k_sub_fallback_ip {\n"
-                    '    "~^\\s*([^,\\s]+)" $1;\n'
+                    "map $http_x_forwarded_for_y $just1k_sub_client_ip {\n"
+                    '    "~([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]+)\\s*$" $1;\n'
                     "    default          $remote_addr;\n"
                     "}\n\n"
-                    "map $http_x_forwarded_for_y $just1k_sub_client_ip {\n"
-                    '    "~^\\s*([^,\\s]+)" $1;\n'
-                    "    default          $just1k_sub_fallback_ip;\n"
-                    "}\n\n"
                     "map $http_x_forwarded_for_y $just1k_sub_xff {\n"
-                    '    "~^\\s*([^,\\s]+)" $1;\n'
+                    '    "~([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:]+)\\s*$" $1;\n'
                     "    default          $proxy_add_x_forwarded_for;\n"
                     "}\n\n"
                 )

@@ -179,54 +179,56 @@ update_xray_geodata() {
     local tmp_dir
     tmp_dir="$(mktemp -d /tmp/xray_geodata.XXXXXX 2>/dev/null || mktemp -d)"
     local updated=0
-    local dat_name expected_hash current_hash new_hash
+    local spec src_name dest_name expected_hash current_hash new_hash
 
-    for dat_name in geoip.dat geosite.dat; do
-        expected_hash="$(curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}/${dat_name}.sha256sum" 2>/dev/null | awk 'NR==1 {print $1}' | tr -cd '0-9a-fA-F')"
+    for spec in "geoip-lite.dat:geoip.dat" "geosite.dat:geosite.dat"; do
+        src_name="${spec%%:*}"
+        dest_name="${spec#*:}"
+        expected_hash="$(curl -fsSL --connect-timeout 10 --max-time 30 "${base_url}/${src_name}.sha256sum" 2>/dev/null | awk 'NR==1 {print $1}' | tr -cd '0-9a-fA-F' || true)"
         if [[ ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
-            [[ $quiet -eq 0 ]] && warn "Не удалось получить SHA-256 для ${dat_name}; обновление гео-базы пропущено."
+            [[ $quiet -eq 0 ]] && warn "Не удалось получить SHA-256 для ${src_name}; обновление ${dest_name} пропущено."
             continue
         fi
 
-        if [[ -f "${asset_dir}/${dat_name}" ]]; then
-            current_hash="$(sha256sum "${asset_dir}/${dat_name}" 2>/dev/null | awk '{print $1}')"
+        if [[ -f "${asset_dir}/${dest_name}" ]]; then
+            current_hash="$(sha256sum "${asset_dir}/${dest_name}" 2>/dev/null | awk '{print $1}' || true)"
             if [[ "${current_hash,,}" == "${expected_hash,,}" ]]; then
-                cp -f "${asset_dir}/${dat_name}" "${tmp_dir}/${dat_name}" 2>/dev/null || true
+                cp -f "${asset_dir}/${dest_name}" "${tmp_dir}/${dest_name}" 2>/dev/null || true
                 continue
             fi
         fi
 
-        if ! curl -fsSL --connect-timeout 15 --max-time 120 "${base_url}/${dat_name}" -o "${tmp_dir}/${dat_name}" 2>/dev/null; then
-            [[ $quiet -eq 0 ]] && warn "Не удалось скачать ${dat_name}; используется текущая версия."
-            rm -f "${tmp_dir}/${dat_name}"
+        if ! curl -fsSL --connect-timeout 15 --max-time 120 "${base_url}/${src_name}" -o "${tmp_dir}/${dest_name}" 2>/dev/null; then
+            [[ $quiet -eq 0 ]] && warn "Не удалось скачать ${src_name}; используется текущая версия ${dest_name}."
+            rm -f "${tmp_dir}/${dest_name}"
             continue
         fi
 
-        new_hash="$(sha256sum "${tmp_dir}/${dat_name}" 2>/dev/null | awk '{print $1}')"
+        new_hash="$(sha256sum "${tmp_dir}/${dest_name}" 2>/dev/null | awk '{print $1}' || true)"
         if [[ "${new_hash,,}" != "${expected_hash,,}" ]]; then
-            warn "Контрольная сумма SHA-256 для ${dat_name} не совпадает! Файл отклонён."
-            rm -f "${tmp_dir}/${dat_name}"
+            warn "Контрольная сумма SHA-256 для ${dest_name} не совпадает! Файл отклонён."
+            rm -f "${tmp_dir}/${dest_name}"
             continue
         fi
         updated=1
     done
 
     if [[ $updated -eq 0 ]]; then
-        rm -rf "$tmp_dir"
+        rm -rf "$tmp_dir" 2>/dev/null || true
         [[ $quiet -eq 0 ]] && log "Гео-базы geoip.dat / geosite.dat уже актуальны."
         return 0
     fi
 
     # Дополняем временный каталог отсутствующим вторым файлом для корректного xray run -test
-    for dat_name in geoip.dat geosite.dat; do
-        if [[ ! -f "${tmp_dir}/${dat_name}" && -f "${asset_dir}/${dat_name}" ]]; then
-            cp -f "${asset_dir}/${dat_name}" "${tmp_dir}/${dat_name}" 2>/dev/null || true
+    for dest_name in geoip.dat geosite.dat; do
+        if [[ ! -f "${tmp_dir}/${dest_name}" && -f "${asset_dir}/${dest_name}" ]]; then
+            cp -f "${asset_dir}/${dest_name}" "${tmp_dir}/${dest_name}" 2>/dev/null || true
         fi
     done
 
     if [[ -f "$xray_cfg" ]]; then
         if ! XRAY_LOCATION_ASSET="$tmp_dir" "$xray_bin" run -test -format json -config "$xray_cfg" >/dev/null 2>&1; then
-            rm -rf "$tmp_dir"
+            rm -rf "$tmp_dir" 2>/dev/null || true
             warn "Тест конфигурации Xray с новыми гео-базами не прошёл; откат к текущим файлам."
             return 1
         fi
@@ -234,26 +236,51 @@ update_xray_geodata() {
 
     local bak_dir="${tmp_dir}/bak"
     mkdir -p "$bak_dir"
-    for dat_name in geoip.dat geosite.dat; do
-        [[ -f "${asset_dir}/${dat_name}" ]] && cp -f "${asset_dir}/${dat_name}" "${bak_dir}/${dat_name}" 2>/dev/null || true
-        if [[ -f "${tmp_dir}/${dat_name}" ]]; then
-            install -m 644 "${tmp_dir}/${dat_name}" "${asset_dir}/${dat_name}" 2>/dev/null || true
+    local install_failed=0
+    for dest_name in geoip.dat geosite.dat; do
+        [[ -f "${asset_dir}/${dest_name}" ]] && cp -f "${asset_dir}/${dest_name}" "${bak_dir}/${dest_name}" 2>/dev/null || true
+        if [[ -f "${tmp_dir}/${dest_name}" ]]; then
+            if ! install -m 644 "${tmp_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null; then
+                install_failed=1
+                break
+            fi
         fi
     done
 
+    if [[ $install_failed -ne 0 ]]; then
+        for dest_name in geoip.dat geosite.dat; do
+            [[ -f "${bak_dir}/${dest_name}" ]] && install -m 644 "${bak_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null || true
+        done
+        rm -rf "$tmp_dir" 2>/dev/null || true
+        warn "Не удалось установить обновлённые гео-базы в ${asset_dir}; выполнен откат."
+        return 1
+    fi
+
     if ! is_traffic_limit_exceeded && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet xray 2>/dev/null; then
         if ! systemctl restart xray 2>/dev/null || ! systemctl is-active --quiet xray 2>/dev/null; then
-            for dat_name in geoip.dat geosite.dat; do
-                [[ -f "${bak_dir}/${dat_name}" ]] && install -m 644 "${bak_dir}/${dat_name}" "${asset_dir}/${dat_name}" 2>/dev/null || true
+            for dest_name in geoip.dat geosite.dat; do
+                [[ -f "${bak_dir}/${dest_name}" ]] && install -m 644 "${bak_dir}/${dest_name}" "${asset_dir}/${dest_name}" 2>/dev/null || true
             done
             systemctl restart xray 2>/dev/null || true
-            rm -rf "$tmp_dir"
+            if declare -F ensure_xray_api_healthy >/dev/null 2>&1; then
+                ensure_xray_api_healthy 1 || true
+            fi
+            if declare -F ping_xray_api_health >/dev/null 2>&1; then
+                ping_xray_api_health || true
+            fi
+            rm -rf "$tmp_dir" 2>/dev/null || true
             warn "Сбой перезапуска Xray после обновления гео-баз; выполнен откат."
             return 1
         fi
+        if declare -F ensure_xray_api_healthy >/dev/null 2>&1; then
+            ensure_xray_api_healthy 1 || true
+        fi
+        if declare -F ping_xray_api_health >/dev/null 2>&1; then
+            ping_xray_api_health || true
+        fi
     fi
 
-    rm -rf "$tmp_dir"
+    rm -rf "$tmp_dir" 2>/dev/null || true
     log "Гео-базы geoip.dat / geosite.dat успешно обновлены."
     return 0
 }
@@ -266,11 +293,16 @@ deploy_geodata_update_timer() {
     local tmr_file="${systemd_dir}/just1knode-geodata.timer"
 
     if [[ "$role" != "ru_hub" ]]; then
+        local had_units=0
+        [[ -f "$svc_file" || -f "$tmr_file" ]] && had_units=1
         if command -v systemctl >/dev/null 2>&1; then
             systemctl stop just1knode-geodata.timer 2>/dev/null || true
             systemctl disable just1knode-geodata.timer 2>/dev/null || true
         fi
         rm -f "$svc_file" "$tmr_file" 2>/dev/null || true
+        if [[ $had_units -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload 2>/dev/null || true
+        fi
         return 0
     fi
 

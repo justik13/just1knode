@@ -261,6 +261,10 @@ apply_v2_hub_configuration() {
         apply_antiabuse_protection >/dev/null 2>&1 || true
     fi
 
+    if declare -F deploy_geodata_update_timer >/dev/null 2>&1; then
+        deploy_geodata_update_timer "$role" || true
+    fi
+
     heal_node_firewall_and_stealth
     return 0
 }

@@ -2022,7 +2022,16 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
             update)
                 case "${2:-}" in
                     core|xray) shift 2; update_xray_core "$@" ;;
-                    geo|geodata) shift 2; update_xray_geodata "$@" ;;
+                    geo|geodata)
+                        shift 2
+                        check_root
+                        init_state_dir
+                        acquire_just1knode_lock
+                        trap release_just1knode_lock RETURN EXIT
+                        update_xray_geodata "$@"
+                        release_just1knode_lock
+                        trap - RETURN EXIT
+                        ;;
                     config|heal) heal_node_config ;;
                     *) update_node "${2:-all}" ;;
                 esac
