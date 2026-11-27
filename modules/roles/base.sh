@@ -322,6 +322,7 @@ apply_pending_node_updates() {
     local max_passes=3
     local pass=0
 
+    # shellcheck disable=SC2329
     _cleanup_aborted_apply() {
         rm -f "$running_file" 2>/dev/null || true
         python3 - "$result_file" "1" "${role:-unconfigured}" "${LAST_APPLY_ERROR:-apply_aborted_or_timeout}" <<'PYEOF' 2>/dev/null || true
