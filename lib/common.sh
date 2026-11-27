@@ -153,24 +153,6 @@ install_nginx_if_missing() {
     fi
 }
 
-ensure_nginx_stream_module() {
-    install_nginx_if_missing
-    command -v nginx >/dev/null 2>&1 || return 1
-    if compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1; then
-        return 0
-    fi
-    if nginx -V 2>&1 | grep -qE -- '--with-stream([[:space:]]|$)'; then
-        return 0
-    fi
-    if command -v apt-get >/dev/null 2>&1; then
-        log "Доустановка модуля Nginx Stream (libnginx-mod-stream) для SNI-маршрутизации..."
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq libnginx-mod-stream >/dev/null 2>&1 || true
-    fi
-    compgen -G "/etc/nginx/modules-enabled/*stream*.conf" >/dev/null 2>&1
-}
-
 # Обнаружение Docker-контейнера, слушающего хостовый TCP-порт 80
 detect_host_port80_container() {
     command -v docker >/dev/null 2>&1 || return 0
