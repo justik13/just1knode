@@ -226,6 +226,24 @@ apply_v2_hub_configuration() {
             cp -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" "$prev_ngx_up_bak" 2>/dev/null || { rm -f "$prev_ngx_up_bak" 2>/dev/null || true; prev_ngx_up_bak=""; }
         fi
     fi
+    local prev_ngx_fb_bak=""
+    if [[ -f "${nginx_dir}/sites-available/just1k-fallback80.conf" && ! -L "${nginx_dir}/sites-available/just1k-fallback80.conf" ]]; then
+        prev_ngx_fb_bak="$(mktemp /tmp/just1k_ngx_fb_bak.XXXXXX 2>/dev/null || true)"
+        if [[ -n "$prev_ngx_fb_bak" ]]; then
+            cp -f "${nginx_dir}/sites-available/just1k-fallback80.conf" "$prev_ngx_fb_bak" 2>/dev/null || { rm -f "$prev_ngx_fb_bak" 2>/dev/null || true; prev_ngx_fb_bak=""; }
+        fi
+    fi
+    local prev_ngx_api_bak=""
+    if [[ -f "${nginx_dir}/sites-available/just1k-vless-api.conf" && ! -L "${nginx_dir}/sites-available/just1k-vless-api.conf" ]]; then
+        prev_ngx_api_bak="$(mktemp /tmp/just1k_ngx_api_bak.XXXXXX 2>/dev/null || true)"
+        if [[ -n "$prev_ngx_api_bak" ]]; then
+            cp -f "${nginx_dir}/sites-available/just1k-vless-api.conf" "$prev_ngx_api_bak" 2>/dev/null || { rm -f "$prev_ngx_api_bak" 2>/dev/null || true; prev_ngx_api_bak=""; }
+        fi
+    fi
+    local had_ngx_hub_enabled="false"
+    [[ -e "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" || -L "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" ]] && had_ngx_hub_enabled="true"
+    local had_ngx_fb_enabled="false"
+    [[ -e "${nginx_dir}/sites-enabled/just1k-fallback80.conf" || -L "${nginx_dir}/sites-enabled/just1k-fallback80.conf" ]] && had_ngx_fb_enabled="true"
 
     _restore_apply_backups() {
         if [[ -n "$prev_xray_cfg_bak" && -f "$prev_xray_cfg_bak" ]]; then
@@ -237,16 +255,32 @@ apply_v2_hub_configuration() {
         if [[ -n "$prev_ngx_hub_bak" && -f "$prev_ngx_hub_bak" ]]; then
             cp -f "$prev_ngx_hub_bak" "${nginx_dir}/sites-available/just1k-ru-hub.conf" 2>/dev/null || true
         fi
+        if [[ "$had_ngx_hub_enabled" == "true" && -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" ]]; then
+            ln -sf "${nginx_dir}/sites-available/just1k-ru-hub.conf" "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" 2>/dev/null || true
+        fi
         if [[ -n "$prev_ngx_up_bak" && -f "$prev_ngx_up_bak" ]]; then
             cp -f "$prev_ngx_up_bak" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
         fi
+        if [[ -n "$prev_ngx_fb_bak" && -f "$prev_ngx_fb_bak" ]]; then
+            cp -f "$prev_ngx_fb_bak" "${nginx_dir}/sites-available/just1k-fallback80.conf" 2>/dev/null || true
+        fi
+        if [[ "$had_ngx_fb_enabled" == "true" && -f "${nginx_dir}/sites-available/just1k-fallback80.conf" ]]; then
+            ln -sf "${nginx_dir}/sites-available/just1k-fallback80.conf" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
+        fi
+        if [[ -n "$prev_ngx_api_bak" && -f "$prev_ngx_api_bak" ]]; then
+            cp -f "$prev_ngx_api_bak" "${nginx_dir}/sites-available/just1k-vless-api.conf" 2>/dev/null || true
+        fi
+    }
+
+    _cleanup_apply_backups() {
+        rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" "$prev_ngx_fb_bak" "$prev_ngx_api_bak" 2>/dev/null || true
     }
 
     apply_node_sysctl_hardening
     _sync_all_role_certs
     if ! assemble_v2_hub_config; then
         LAST_APPLY_ERROR="assemble_v2_hub_config_failed"
-        rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
+        _cleanup_apply_backups
         return 1
     fi
 
@@ -258,7 +292,7 @@ apply_v2_hub_configuration() {
     if ! nginx -t >/dev/null 2>&1; then
         nginx -t || true
         _restore_apply_backups
-        rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
+        _cleanup_apply_backups
         LAST_APPLY_ERROR="nginx_test_failed"
         warn "Ошибка синтаксиса Nginx при применении конфигурации роли ${role}."
         return 1
@@ -284,7 +318,7 @@ apply_v2_hub_configuration() {
             _restore_apply_backups
             systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
             systemctl restart xray 2>/dev/null || true
-            rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
+            _cleanup_apply_backups
             LAST_APPLY_ERROR="xray_restart_failed"
             warn "Не удалось перезапустить службу Xray с новой конфигурацией!"
             return 1
@@ -305,17 +339,17 @@ apply_v2_hub_configuration() {
         ensure_xray_api_healthy 1 || warn "Служба xray-api не ответила вовремя."
         ping_xray_api_health
     fi
-    rm -f "$prev_xray_cfg_bak" "$prev_ngx_hub_bak" "$prev_ngx_up_bak" 2>/dev/null || true
-
-    if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
-        apply_antiabuse_protection >/dev/null 2>&1 || true
-    fi
+    _cleanup_apply_backups
 
     if declare -F deploy_geodata_update_timer >/dev/null 2>&1; then
         deploy_geodata_update_timer "$role" || true
     fi
 
     heal_node_firewall_and_stealth
+
+    if [[ "$role" == "exit_node" || "$role" == "ru_hub" || "$(get_state_val "abuse_protection" "disabled")" == "enabled" ]]; then
+        apply_antiabuse_protection >/dev/null 2>&1 || warn "Не удалось применить правила anti-abuse."
+    fi
     return 0
 }
 

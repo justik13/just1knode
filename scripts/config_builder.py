@@ -558,7 +558,7 @@ def main():
         cfg["outbounds"].append({
             "tag": "just1k-wl-direct",
             "protocol": "freedom",
-            "settings": {},
+            "settings": {"domainStrategy": "UseIPv4"},
             "streamSettings": {"sockopt": {"mark": 255}},
         })
 

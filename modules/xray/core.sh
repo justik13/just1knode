@@ -410,10 +410,12 @@ update_node() {
         if ! tar_entries="$(tar -tzf "$tmp_tar" 2>/dev/null)" || [[ -z "$tar_entries" ]] || printf '%s\n' "$tar_entries" | grep -Eq '(^/|^\.\./|/\.\./|/\.\.$|^\.\.$)'; then
             rm -rf "$tmp_tar" "$tmp_dir"
             error "Ошибка безопасности архива: обнаружены небезопасные пути (path traversal) или архив поврежден. Обновление прервано."
+            return 1
         fi
         if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 --no-same-owner 2>/dev/null; then
             rm -rf "$tmp_tar" "$tmp_dir"
             error "Ошибка целостности архива: распаковка не удалась. Обновление прервано."
+            return 1
         fi
 
         local node_src_dir=""
@@ -446,6 +448,7 @@ update_node() {
             if [[ $syntax_err -ne 0 ]]; then
                 rm -rf "$tmp_tar" "$tmp_dir"
                 error "Обновление прервано: обнаружены синтаксические ошибки в базовых файлах релиза."
+                return 1
             fi
         fi
 
@@ -581,6 +584,7 @@ update_node() {
                     rollback_node_components || true
                     rm -rf "$tmp_tar" "$tmp_dir"
                     error "Не удалось скопировать модули в ${node_dir}. Обновление прервано."
+                    return 1
                 fi
                 # Изоляция повреждённых транспортных модулей: не ломаем работающий узел, откатываем только проблемный модуль
                 if [[ ${#broken_transport_names[@]} -gt 0 ]]; then
@@ -642,12 +646,14 @@ update_node() {
                     rollback_node_components || true
                     rm -rf "$tmp_tar" "$tmp_dir"
                     error "Не удалось скопировать исходные файлы ${api_dir}. Обновление прервано."
+                    return 1
                 fi
                 if [[ -x "${api_dir}/venv/bin/pip" && -f "${api_dir}/requirements.txt" ]]; then
                     if ! "${api_dir}/venv/bin/pip" install -q -r "${api_dir}/requirements.txt" --no-cache-dir; then
                         rollback_node_components || true
                         rm -rf "$tmp_tar" "$tmp_dir"
                         error "Ошибка обновления зависимостей Python для xray-api. Обновление прервано."
+                        return 1
                     fi
                 fi
                 ensure_xrayapi_user
@@ -658,6 +664,7 @@ update_node() {
                         rollback_node_components || true
                         rm -rf "$tmp_tar" "$tmp_dir"
                         error "Не удалось обновить unit и окружение службы xray-api. Обновление прервано."
+                        return 1
                     fi
                 elif [[ -f "${api_dir}/xray-api.service" ]]; then
                     cp "${api_dir}/xray-api.service" /etc/systemd/system/xray-api.service 2>/dev/null || true
@@ -669,6 +676,7 @@ update_node() {
                         rollback_node_components || true
                         rm -rf "$tmp_tar" "$tmp_dir"
                         error "Служба xray-api не смогла перезапуститься после обновления."
+                        return 1
                     fi
                 fi
                 log "Компоненты ${api_dir} успешно обновлены с синхронизацией Python-зависимостей и перезапуском службы."
