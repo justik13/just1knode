@@ -1981,6 +1981,91 @@ async def get_traffic_snapshot(_: bool = Depends(verify_api_key)) -> Dict[str, A
     )
 
 
+def _sync_client_cached_lookup_sync(
+    req: ClientSyncRequest, client_uuid: str, desired_state: str
+) -> Optional[Dict[str, Any]]:
+    cached = completed_idempotent_ops.get(req.idempotency_key)
+    if cached is None:
+        return None
+    cached_epoch = cached.get("verified_epoch")
+    current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
+    if not current_epoch and epoch_manager:
+        current_epoch = epoch_manager.load_state().get("node_epoch")
+
+    effective_svc = resolve_effective_service(req.service)
+    client_id_matches = cached.get("client_id") == client_uuid
+    state_matches = cached.get("state") == desired_state
+    if not client_id_matches or not state_matches:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Idempotency key '{req.idempotency_key}' was previously used with different parameters",
+        )
+
+    version_matches = (req.version is None) or (cached.get("version") == req.version)
+    service_matches = cached.get("service") in (effective_svc, None) or req.service is None
+    epoch_valid = (
+        version_matches
+        and service_matches
+        and bool(cached_epoch)
+        and (cached_epoch == current_epoch)
+        and (not req.expected_node_epoch or cached_epoch == req.expected_node_epoch)
+    )
+
+    if epoch_valid:
+        try:
+            entries = client_store.load_client_entries()
+            stored_entry = entries.get(client_uuid)
+            if stored_entry:
+                svc_states = stored_entry.get("service_states") or {}
+                svc_state = svc_states.get(effective_svc) if effective_svc else None
+                stored_tombstone = stored_entry.get("tombstone", False) or (
+                    svc_state.get("tombstone", False) if svc_state else False
+                )
+                stored_ver = (
+                    svc_state.get("version")
+                    if (svc_state and svc_state.get("version") is not None)
+                    else stored_entry.get("version")
+                )
+                stored_active = (
+                    svc_state.get("is_active")
+                    if (svc_state and svc_state.get("is_active") is not None)
+                    else stored_entry.get("is_active")
+                )
+                want_active = desired_state == "active"
+                if (
+                    stored_tombstone
+                    or (
+                        req.version is not None
+                        and stored_ver is not None
+                        and stored_ver > req.version
+                    )
+                    or (stored_active is not None and bool(stored_active) != want_active)
+                ):
+                    logger.info(
+                        "Cached idempotent op for key %s invalidated by client_store (tombstone=%s, stored_ver=%s, req_ver=%s)",
+                        req.idempotency_key,
+                        stored_tombstone,
+                        stored_ver,
+                        req.version,
+                    )
+                    epoch_valid = False
+        except Exception as e:
+            logger.warning("Could not verify client_store for cached key %s: %s", req.idempotency_key, e)
+
+    if epoch_valid:
+        logger.info("Returning cached durable operation for key %s", req.idempotency_key)
+        return {**cached, "idempotent": True}
+    logger.info(
+        "Stale or mismatched cached operation for key %s (cached epoch %s, current %s, expected %s). Evicting and re-executing.",
+        req.idempotency_key,
+        cached_epoch,
+        current_epoch,
+        req.expected_node_epoch,
+    )
+    completed_idempotent_ops.pop(req.idempotency_key, None)
+    return None
+
+
 @app.post("/v1/clients/sync")
 @app.post("/v1/clients")
 async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key)) -> Dict[str, Any]:
@@ -1998,86 +2083,11 @@ async def sync_client(req: ClientSyncRequest, _: bool = Depends(verify_api_key))
     if req.idempotency_key:
         op_lock = await _get_inflight_op_lock(req.idempotency_key)
         async with op_lock:
-            cached = completed_idempotent_ops.get(req.idempotency_key)
-            if cached is not None:
-                cached_epoch = cached.get("verified_epoch")
-                current_epoch = (
-                    epoch_manager.get_current_running_epoch() if epoch_manager else None
-                )
-                if not current_epoch and epoch_manager:
-                    current_epoch = epoch_manager.load_state().get("node_epoch")
-
-                effective_svc = resolve_effective_service(req.service)
-                client_id_matches = cached.get("client_id") == client_uuid
-                state_matches = cached.get("state") == desired_state
-                if not client_id_matches or not state_matches:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Idempotency key '{req.idempotency_key}' was previously used with different parameters",
-                    )
-
-                version_matches = (req.version is None) or (cached.get("version") == req.version)
-                service_matches = cached.get("service") in (effective_svc, None) or req.service is None
-                epoch_valid = (
-                    version_matches
-                    and service_matches
-                    and bool(cached_epoch)
-                    and (cached_epoch == current_epoch)
-                    and (not req.expected_node_epoch or cached_epoch == req.expected_node_epoch)
-                )
-
-                if epoch_valid:
-                    try:
-                        entries = client_store.load_client_entries()
-                        stored_entry = entries.get(client_uuid)
-                        if stored_entry:
-                            svc_states = stored_entry.get("service_states") or {}
-                            svc_state = svc_states.get(effective_svc) if effective_svc else None
-                            stored_tombstone = stored_entry.get("tombstone", False) or (
-                                svc_state.get("tombstone", False) if svc_state else False
-                            )
-                            stored_ver = (
-                                svc_state.get("version")
-                                if (svc_state and svc_state.get("version") is not None)
-                                else stored_entry.get("version")
-                            )
-                            stored_active = (
-                                svc_state.get("is_active")
-                                if (svc_state and svc_state.get("is_active") is not None)
-                                else stored_entry.get("is_active")
-                            )
-                            want_active = desired_state == "active"
-                            if (
-                                stored_tombstone
-                                or (
-                                    req.version is not None
-                                    and stored_ver is not None
-                                    and stored_ver > req.version
-                                )
-                                or (stored_active is not None and bool(stored_active) != want_active)
-                            ):
-                                logger.info(
-                                    "Cached idempotent op for key %s invalidated by client_store (tombstone=%s, stored_ver=%s, req_ver=%s)",
-                                    req.idempotency_key,
-                                    stored_tombstone,
-                                    stored_ver,
-                                    req.version,
-                                )
-                                epoch_valid = False
-                    except Exception as e:
-                        logger.warning("Could not verify client_store for cached key %s: %s", req.idempotency_key, e)
-
-                if epoch_valid:
-                    logger.info("Returning cached durable operation for key %s", req.idempotency_key)
-                    return {**cached, "idempotent": True}
-                logger.info(
-                    "Stale or mismatched cached operation for key %s (cached epoch %s, current %s, expected %s). Evicting and re-executing.",
-                    req.idempotency_key,
-                    cached_epoch,
-                    current_epoch,
-                    req.expected_node_epoch,
-                )
-                completed_idempotent_ops.pop(req.idempotency_key, None)
+            cached_resp = await asyncio.to_thread(
+                _sync_client_cached_lookup_sync, req, client_uuid, desired_state
+            )
+            if cached_resp is not None:
+                return cached_resp
             async with _state_mutation_lock:
                 return await _sync_client_internal(req, client_uuid, desired_state)
 
@@ -2089,12 +2099,7 @@ _state_mutation_lock = asyncio.Lock()
 _batch_sync_lock = _state_mutation_lock
 
 
-@app.post("/v1/clients/batch-sync")
-async def batch_sync_clients(
-    req: ClientBatchSyncRequest,
-    _: bool = Depends(verify_api_key),
-) -> Dict[str, Any]:
-    """Batch-synchronizes a list of clients with per-UUID result tracking."""
+def _batch_sync_clients_sync(req: ClientBatchSyncRequest) -> Dict[str, Any]:
     node_meta = get_node_state_metadata()
     node_role = str(node_meta.get("role") or "").strip().lower()
     if node_role in ("eu_hub", "exit_node"):
@@ -2111,141 +2116,140 @@ async def batch_sync_clients(
     failed: Dict[str, str] = {}
     pending_mutations: List[tuple[str, bool, Optional[int], Optional[str], str, Dict[str, str]]] = []
     pending_idempotency: List[tuple[str, Dict[str, Any]]] = []
-    async with _state_mutation_lock:
-        try:
-            preloaded_entries = client_store.load_client_entries()
-        except Exception as exc:
-            logger.error("Failed to load client_store before batch-sync: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to load persisted client state: {exc}",
-            ) from exc
+    try:
+        preloaded_entries = client_store.load_client_entries()
+    except Exception as exc:
+        logger.error("Failed to load client_store before batch-sync: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load persisted client state: {exc}",
+        ) from exc
 
-        working_entries = copy.deepcopy(preloaded_entries)
-        try:
-            for item in req.clients:
-                try:
-                    clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
-                    desired_state = (
-                        "active"
-                        if (
-                            item.desired_state == "active"
-                            or (item.desired_state is None and item.is_active is True)
+    working_entries = copy.deepcopy(preloaded_entries)
+    try:
+        for item in req.clients:
+            try:
+                clean_uuid = str(uuid_lib.UUID((item.uuid or "").strip())).lower()
+                desired_state = (
+                    "active"
+                    if (
+                        item.desired_state == "active"
+                        or (item.desired_state is None and item.is_active is True)
+                    )
+                    else "disabled"
+                )
+                sync_res = _sync_client_unlocked_sync(
+                    item,
+                    clean_uuid,
+                    desired_state,
+                    persist_to_store=False,
+                    preloaded_entries=working_entries,
+                )
+                eff_svc = resolve_effective_service(item.service)
+                if isinstance(sync_res, dict) and sync_res.get("result") == "already_newer":
+                    node_tombstone = bool(sync_res.get("tombstone", False))
+                    node_state = sync_res.get("state")
+                    if (node_tombstone and desired_state == "active") or (node_state != desired_state):
+                        failed[clean_uuid] = (
+                            f"already_newer: node state={node_state} tombstone={node_tombstone} "
+                            f"version={sync_res.get('version')}"
                         )
-                        else "disabled"
-                    )
-                    sync_res = await _sync_client_internal(
-                        item,
-                        clean_uuid,
-                        desired_state,
-                        persist_to_store=False,
-                        preloaded_entries=working_entries,
-                    )
-                    eff_svc = resolve_effective_service(item.service)
-                    if isinstance(sync_res, dict) and sync_res.get("result") == "already_newer":
-                        node_tombstone = bool(sync_res.get("tombstone", False))
-                        node_state = sync_res.get("state")
-                        if (node_tombstone and desired_state == "active") or (node_state != desired_state):
-                            failed[clean_uuid] = (
-                                f"already_newer: node state={node_state} tombstone={node_tombstone} "
-                                f"version={sync_res.get('version')}"
-                            )
-                        else:
-                            succeeded.append(clean_uuid)
                     else:
-                        init_states = (
-                            sync_res.pop("initial_states", {})
-                            if isinstance(sync_res, dict)
-                            else {}
-                        )
-                        client_store._mutate_entry(
-                            working_entries,
-                            clean_uuid,
-                            active=(desired_state == "active"),
-                            version=item.version,
-                            email=item.email,
-                            service=eff_svc,
-                        )
-                        pending_mutations.append(
-                            (
-                                clean_uuid,
-                                desired_state == "active",
-                                item.version,
-                                item.email,
-                                eff_svc,
-                                init_states if isinstance(init_states, dict) else {},
-                            )
-                        )
-                        if getattr(item, "idempotency_key", None) and isinstance(sync_res, dict):
-                            pending_idempotency.append((item.idempotency_key, sync_res))
                         succeeded.append(clean_uuid)
-                except HTTPException as exc:
-                    failed[str(item.uuid)] = str(exc.detail)
-                except Exception as exc:
-                    failed[str(item.uuid)] = str(exc)
-        finally:
-            if pending_mutations:
-                lock_fd = None
-                persist_error: Optional[Exception] = None
-                try:
-                    client_store._ensure_dir()
-                    lock_fd = client_store._acquire_lock()
-                    entries = client_store.load_client_entries()
-                    for c_uid, is_act, ver, em, svc, _init_st in pending_mutations:
-                        disk_entry = entries.get(c_uid)
-                        if isinstance(disk_entry, dict):
-                            svc_key = client_store.canonicalize_service(svc)
-                            svc_states = disk_entry.get("service_states") or {}
-                            disk_svc = svc_states.get(svc_key) if svc_key else None
-                            disk_tomb = (
-                                disk_svc.get("tombstone", False)
-                                if isinstance(disk_svc, dict)
-                                else disk_entry.get("tombstone", False)
-                            )
-                            disk_ver = (
-                                disk_svc.get("version")
-                                if isinstance(disk_svc, dict)
-                                else disk_entry.get("version")
-                            )
-                            if disk_tomb or (ver is not None and disk_ver is not None and disk_ver > ver):
-                                continue
-                        client_store._mutate_entry(
-                            entries, c_uid, active=is_act, version=ver, email=em, service=svc
+                else:
+                    init_states = (
+                        sync_res.pop("initial_states", {})
+                        if isinstance(sync_res, dict)
+                        else {}
+                    )
+                    client_store._mutate_entry(
+                        working_entries,
+                        clean_uuid,
+                        active=(desired_state == "active"),
+                        version=item.version,
+                        email=item.email,
+                        service=eff_svc,
+                    )
+                    pending_mutations.append(
+                        (
+                            clean_uuid,
+                            desired_state == "active",
+                            item.version,
+                            item.email,
+                            eff_svc,
+                            init_states if isinstance(init_states, dict) else {},
                         )
-                    if not client_store.save_client_entries(entries):
-                        raise RuntimeError("save_client_entries returned False")
-                except Exception as exc:
-                    persist_error = exc
-                finally:
-                    if lock_fd is not None:
-                        client_store._release_lock(lock_fd)
+                    )
+                    if getattr(item, "idempotency_key", None) and isinstance(sync_res, dict):
+                        pending_idempotency.append((item.idempotency_key, sync_res))
+                    succeeded.append(clean_uuid)
+            except HTTPException as exc:
+                failed[str(item.uuid)] = str(exc.detail)
+            except Exception as exc:
+                failed[str(item.uuid)] = str(exc)
+    finally:
+        if pending_mutations:
+            lock_fd = None
+            persist_error: Optional[Exception] = None
+            try:
+                client_store._ensure_dir()
+                lock_fd = client_store._acquire_lock()
+                entries = client_store.load_client_entries()
+                for c_uid, is_act, ver, em, svc, _init_st in pending_mutations:
+                    disk_entry = entries.get(c_uid)
+                    if isinstance(disk_entry, dict):
+                        svc_key = client_store.canonicalize_service(svc)
+                        svc_states = disk_entry.get("service_states") or {}
+                        disk_svc = svc_states.get(svc_key) if svc_key else None
+                        disk_tomb = (
+                            disk_svc.get("tombstone", False)
+                            if isinstance(disk_svc, dict)
+                            else disk_entry.get("tombstone", False)
+                        )
+                        disk_ver = (
+                            disk_svc.get("version")
+                            if isinstance(disk_svc, dict)
+                            else disk_entry.get("version")
+                        )
+                        if disk_tomb or (ver is not None and disk_ver is not None and disk_ver > ver):
+                            continue
+                    client_store._mutate_entry(
+                        entries, c_uid, active=is_act, version=ver, email=em, service=svc
+                    )
+                if not client_store.save_client_entries(entries):
+                    raise RuntimeError("save_client_entries returned False")
+            except Exception as exc:
+                persist_error = exc
+            finally:
+                if lock_fd is not None:
+                    client_store._release_lock(lock_fd)
 
-                if persist_error is not None:
-                    logger.error("Batch client_store persist failed: %s", persist_error)
-                    for c_uid, _is_act, _ver, em, svc, init_states in reversed(pending_mutations):
-                        orig_entry = preloaded_entries.get(c_uid)
-                        for tag in get_target_inbounds(service=svc):
-                            try:
-                                mail = _xray_email_for_inbound(
-                                    c_uid,
-                                    tag,
-                                    svc,
-                                    explicit_email=em,
-                                    stored_entry=orig_entry,
-                                )
-                                init_st = init_states.get(tag, "disabled")
-                                grpc_client.ensure_user_state(
-                                    tag, c_uid, desired_state=init_st, flow=get_inbound_flow(tag), email=mail
-                                )
-                            except Exception:
-                                pass
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Failed to persist batch client state: {persist_error}",
-                    ) from persist_error
+            if persist_error is not None:
+                logger.error("Batch client_store persist failed: %s", persist_error)
+                for c_uid, _is_act, _ver, em, svc, init_states in reversed(pending_mutations):
+                    orig_entry = preloaded_entries.get(c_uid)
+                    for tag in get_target_inbounds(service=svc):
+                        try:
+                            mail = _xray_email_for_inbound(
+                                c_uid,
+                                tag,
+                                svc,
+                                explicit_email=em,
+                                stored_entry=orig_entry,
+                            )
+                            init_st = init_states.get(tag, "disabled")
+                            grpc_client.ensure_user_state(
+                                tag, c_uid, desired_state=init_st, flow=get_inbound_flow(tag), email=mail
+                            )
+                        except Exception:
+                            pass
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to persist batch client state: {persist_error}",
+                ) from persist_error
 
-                for idem_key, idem_resp in pending_idempotency:
-                    completed_idempotent_ops[idem_key] = idem_resp
+            for idem_key, idem_resp in pending_idempotency:
+                completed_idempotent_ops[idem_key] = idem_resp
 
     if not failed:
         node_sync_state["status"] = "synchronized"
@@ -2258,6 +2262,16 @@ async def batch_sync_clients(
     }
 
 
+@app.post("/v1/clients/batch-sync")
+async def batch_sync_clients(
+    req: ClientBatchSyncRequest,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """Batch-synchronizes a list of clients with per-UUID result tracking."""
+    async with _state_mutation_lock:
+        return await asyncio.to_thread(_batch_sync_clients_sync, req)
+
+
 async def _sync_client_internal(
     req: ClientSyncRequest,
     client_uuid: str,
@@ -2268,7 +2282,8 @@ async def _sync_client_internal(
 ) -> Dict[str, Any]:
     uuid_lock = await _get_inflight_op_lock(f"uuid:{client_uuid}")
     async with uuid_lock:
-        return await _sync_client_unlocked(
+        return await asyncio.to_thread(
+            _sync_client_unlocked_sync,
             req,
             client_uuid,
             desired_state,
@@ -2277,7 +2292,7 @@ async def _sync_client_internal(
         )
 
 
-async def _sync_client_unlocked(
+def _sync_client_unlocked_sync(
     req: ClientSyncRequest,
     client_uuid: str,
     desired_state: str,
@@ -2656,6 +2671,142 @@ async def _sync_client_unlocked(
     return resp
 
 
+def _delete_client_sync(
+    clean_uuid: str,
+    version: Optional[int],
+    service: Optional[str],
+) -> Dict[str, Any]:
+    node_meta = get_node_state_metadata()
+    node_role = str(node_meta.get("role") or "").strip().lower()
+    if node_role in ("eu_hub", "exit_node"):
+        curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
+        return {
+            "status": "success",
+            "message": f"Client deprovision is a no-op on {node_role} node",
+            "inbounds": [],
+            "running_epoch": curr_ep,
+        }
+
+    eff_service = resolve_effective_service(service) if service else None
+    target_inbounds = get_target_inbounds(service=eff_service) if eff_service else get_all_managed_inbounds()
+    if not target_inbounds:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No managed Xray inbounds configured on node",
+        )
+
+    current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
+    if not current_epoch and epoch_manager:
+        current_epoch = epoch_manager.load_state().get("node_epoch")
+    if not current_epoch:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
+        )
+    sync_active_users_with_epoch(current_epoch)
+
+    # Monotonic version check
+    if version is not None:
+        entries = client_store.load_client_entries()
+        curr_entry = entries.get(clean_uuid)
+        if curr_entry:
+            service_states = (
+                curr_entry.get("service_states")
+                if isinstance(curr_entry.get("service_states"), dict)
+                else {}
+            )
+            if eff_service:
+                curr_svc_state = (
+                    service_states.get(eff_service, {})
+                    if isinstance(service_states.get(eff_service), dict)
+                    else {}
+                )
+                curr_ver = curr_svc_state.get("version")
+                is_tombstone = curr_svc_state.get("tombstone", False)
+            else:
+                curr_ver = curr_entry.get("version")
+                is_tombstone = curr_entry.get("tombstone", False)
+
+            if curr_ver is not None and version == curr_ver and is_tombstone:
+                return {
+                    "status": "ok",
+                    "client_id": clean_uuid,
+                    "result": "applied",
+                    "state": "disabled",
+                    "version": curr_ver,
+                    "idempotent": True,
+                    "tombstone": True,
+                    "inbounds": target_inbounds,
+                }
+
+            if curr_ver is not None and (
+                version < curr_ver or (is_tombstone and version <= curr_ver)
+            ):
+                return {
+                    "status": "ok",
+                    "client_id": clean_uuid,
+                    "result": "already_newer",
+                    "fenced": True,
+                    "version": curr_ver,
+                    "inbounds": target_inbounds,
+                }
+
+    entries_for_del = client_store.load_client_entries()
+    stored_del_entry = (
+        entries_for_del.get(clean_uuid) if isinstance(entries_for_del, dict) else None
+    )
+    failed_inbounds: List[str] = []
+    for tag in target_inbounds:
+        try:
+            em = _xray_email_for_inbound(
+                clean_uuid,
+                tag,
+                eff_service,
+                stored_entry=stored_del_entry,
+            )
+            grpc_client.remove_user(tag, clean_uuid, email=em)
+        except Exception as e:
+            logger.error(
+                "Failed to delete user %s from inbound %s: %s", _mask_uuid(clean_uuid), tag, e
+            )
+            failed_inbounds.append(tag)
+
+    if failed_inbounds:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove user from inbounds: {failed_inbounds}",
+        )
+
+    epoch_after = epoch_manager.get_current_running_epoch() if epoch_manager else current_epoch
+    if epoch_after != current_epoch:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail="epoch_drift_during_mutation: Xray instance changed during delete",
+        )
+
+    try:
+        client_store.delete_client(clean_uuid, version=version, service=eff_service)
+    except Exception as e:
+        logger.error("Could not delete client tombstone from store: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to persist client tombstone to disk",
+        ) from e
+
+    completed_idempotent_ops.evict_by_client_id(clean_uuid)
+
+    return {
+        "status": "ok",
+        "client_id": clean_uuid,
+        "result": "applied",
+        "action": "deleted",
+        "fenced": False,
+        "version": version,
+        "service": eff_service,
+        "inbounds": target_inbounds,
+    }
+
+
 @app.delete("/v1/clients/{uuid}")
 async def delete_client(
     uuid: str,
@@ -2676,135 +2827,7 @@ async def delete_client(
 
     uuid_lock = await _get_inflight_op_lock(f"uuid:{clean_uuid}")
     async with _state_mutation_lock, uuid_lock:
-        node_meta = get_node_state_metadata()
-        node_role = str(node_meta.get("role") or "").strip().lower()
-        if node_role in ("eu_hub", "exit_node"):
-            curr_ep = (epoch_manager.get_current_running_epoch() if epoch_manager else "") or ""
-            return {
-                "status": "success",
-                "message": f"Client deprovision is a no-op on {node_role} node",
-                "inbounds": [],
-                "running_epoch": curr_ep,
-            }
-
-        eff_service = resolve_effective_service(service) if service else None
-        target_inbounds = get_target_inbounds(service=eff_service) if eff_service else get_all_managed_inbounds()
-        if not target_inbounds:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No managed Xray inbounds configured on node",
-            )
-
-        current_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
-        if not current_epoch and epoch_manager:
-            current_epoch = epoch_manager.load_state().get("node_epoch")
-        if not current_epoch:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Node epoch is unavailable: Xray not running or persistent storage degraded",
-            )
-        sync_active_users_with_epoch(current_epoch)
-
-        # Monotonic version check
-        if version is not None:
-            entries = client_store.load_client_entries()
-            curr_entry = entries.get(clean_uuid)
-            if curr_entry:
-                service_states = (
-                    curr_entry.get("service_states")
-                    if isinstance(curr_entry.get("service_states"), dict)
-                    else {}
-                )
-                if eff_service:
-                    curr_svc_state = (
-                        service_states.get(eff_service, {})
-                        if isinstance(service_states.get(eff_service), dict)
-                        else {}
-                    )
-                    curr_ver = curr_svc_state.get("version")
-                    is_tombstone = curr_svc_state.get("tombstone", False)
-                else:
-                    curr_ver = curr_entry.get("version")
-                    is_tombstone = curr_entry.get("tombstone", False)
-
-                if curr_ver is not None and version == curr_ver and is_tombstone:
-                    return {
-                        "status": "ok",
-                        "client_id": clean_uuid,
-                        "result": "applied",
-                        "state": "disabled",
-                        "version": curr_ver,
-                        "idempotent": True,
-                        "tombstone": True,
-                        "inbounds": target_inbounds,
-                    }
-
-                if curr_ver is not None and (
-                    version < curr_ver or (is_tombstone and version <= curr_ver)
-                ):
-                    return {
-                        "status": "ok",
-                        "client_id": clean_uuid,
-                        "result": "already_newer",
-                        "fenced": True,
-                        "version": curr_ver,
-                        "inbounds": target_inbounds,
-                    }
-
-        entries_for_del = client_store.load_client_entries()
-        stored_del_entry = (
-            entries_for_del.get(clean_uuid) if isinstance(entries_for_del, dict) else None
-        )
-        failed_inbounds: List[str] = []
-        for tag in target_inbounds:
-            try:
-                em = _xray_email_for_inbound(
-                    clean_uuid,
-                    tag,
-                    eff_service,
-                    stored_entry=stored_del_entry,
-                )
-                grpc_client.remove_user(tag, clean_uuid, email=em)
-            except Exception as e:
-                logger.error(
-                    "Failed to delete user %s from inbound %s: %s", _mask_uuid(clean_uuid), tag, e
-                )
-                failed_inbounds.append(tag)
-
-        if failed_inbounds:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to remove user from inbounds: {failed_inbounds}",
-            )
-
-        epoch_after = epoch_manager.get_current_running_epoch() if epoch_manager else current_epoch
-        if epoch_after != current_epoch:
-            raise HTTPException(
-                status_code=status.HTTP_412_PRECONDITION_FAILED,
-                detail="epoch_drift_during_mutation: Xray instance changed during delete",
-            )
-
-        try:
-            client_store.delete_client(clean_uuid, version=version, service=eff_service)
-        except Exception as e:
-            logger.error("Could not delete client tombstone from store: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to persist client tombstone to disk",
-            ) from e
-
-        completed_idempotent_ops.evict_by_client_id(clean_uuid)
-
-        return {
-            "status": "ok",
-            "client_id": clean_uuid,
-            "result": "applied",
-            "action": "deleted",
-            "fenced": False,
-            "version": version,
-            "service": eff_service,
-            "inbounds": target_inbounds,
-        }
+        return await asyncio.to_thread(_delete_client_sync, clean_uuid, version, service)
 
 
 @app.post("/v1/clients/inventory")

@@ -154,6 +154,17 @@ print(
         prev_ngx_bak="$(mktemp "/tmp/just1k-ru-hub.bak.XXXXXX" 2>/dev/null || mktemp)"
         cp -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" "$prev_ngx_bak" 2>/dev/null || true
     fi
+    local prev_upstreams_bak=""
+    if [[ -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" ]]; then
+        prev_upstreams_bak="$(mktemp "/tmp/just1k-xhttp-up.bak.XXXXXX" 2>/dev/null || mktemp)"
+        cp -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" "$prev_upstreams_bak" 2>/dev/null || true
+    fi
+    local had_default_enabled="false"
+    [[ -e "${nginx_dir}/sites-enabled/default" || -L "${nginx_dir}/sites-enabled/default" ]] && had_default_enabled="true"
+    local had_fb_enabled="false"
+    [[ -e "${nginx_dir}/sites-enabled/just1k-fallback80.conf" || -L "${nginx_dir}/sites-enabled/just1k-fallback80.conf" ]] && had_fb_enabled="true"
+    local had_hub_enabled="false"
+    [[ -e "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" || -L "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" ]] && had_hub_enabled="true"
     if [[ "$nginx_needed" == "true" ]]; then
         # Atomically retire legacy origin.conf if present
         rm -f "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
@@ -181,15 +192,31 @@ print(
         if [[ -n "$prev_ngx_bak" && -f "$prev_ngx_bak" ]]; then
             cp -f "$prev_ngx_bak" "${nginx_dir}/sites-available/just1k-ru-hub.conf" 2>/dev/null || true
         fi
+        if [[ "$had_hub_enabled" == "true" && -f "${nginx_dir}/sites-available/just1k-ru-hub.conf" ]]; then
+            ln -sf "${nginx_dir}/sites-available/just1k-ru-hub.conf" "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" 2>/dev/null || true
+        elif [[ "$had_hub_enabled" == "false" ]]; then
+            rm -f "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" 2>/dev/null || true
+        fi
+        if [[ -n "$prev_upstreams_bak" && -f "$prev_upstreams_bak" ]]; then
+            cp -f "$prev_upstreams_bak" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
+        fi
+        if [[ "$had_fb_enabled" == "true" && -f "${nginx_dir}/sites-available/just1k-fallback80.conf" ]]; then
+            ln -sf "${nginx_dir}/sites-available/just1k-fallback80.conf" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
+        elif [[ "$had_fb_enabled" == "false" ]]; then
+            rm -f "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true
+        fi
+        if [[ "$had_default_enabled" == "true" && -f "${nginx_dir}/sites-available/default" ]]; then
+            ln -sf "${nginx_dir}/sites-available/default" "${nginx_dir}/sites-enabled/default" 2>/dev/null || true
+        fi
         if [[ -n "$prev_xray_bak" && -f "$prev_xray_bak" ]]; then
             cp -f "$prev_xray_bak" "$cfg_file" 2>/dev/null || true
             ensure_xray_config_permissions "$cfg_file"
         fi
-        rm -f "$prev_ngx_bak" "$prev_xray_bak" 2>/dev/null || true
+        rm -f "$prev_ngx_bak" "$prev_upstreams_bak" "$prev_xray_bak" 2>/dev/null || true
         warn "Ошибка валидации Nginx (nginx -t); конфигурация откатана."
         return 1
     fi
-    rm -f "$prev_ngx_bak" "$prev_xray_bak" 2>/dev/null || true
+    rm -f "$prev_ngx_bak" "$prev_upstreams_bak" "$prev_xray_bak" 2>/dev/null || true
 
     setup_base_api_nginx || return 1
     return 0

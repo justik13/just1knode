@@ -908,6 +908,20 @@ for u in urls:
 # 2. Блокировка BitTorrent L7 хэндшейка, DHT пакетов и трекеров через xt_string
 # =============================================================================
 
+_ensure_iptables_jump_first() {
+    local chain="$1"
+    local target="$2"
+    local top_rule=""
+    top_rule="$(iptables -S "$chain" 2>/dev/null | sed -n '2p' || true)"
+    if [[ "$top_rule" == "-A ${chain} -j ${target}" ]]; then
+        return 0
+    fi
+    while iptables -C "$chain" -j "$target" 2>/dev/null; do
+        iptables -D "$chain" -j "$target" 2>/dev/null || break
+    done
+    iptables -I "$chain" 1 -j "$target"
+}
+
 _cleanup_legacy_ufw_before_rules_antiabuse() {
     local before_rules="/etc/ufw/before.rules"
     if [[ -f "$before_rules" ]] && grep -Fq "# START JUST1KNODE ANTI-ABUSE" "$before_rules" 2>/dev/null; then
@@ -937,7 +951,7 @@ check_antiabuse_rules() {
     iptables -L JUST1KNODE-ANTIABUSE >/dev/null 2>&1 || return 1
 
     iptables -C FORWARD -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
-    iptables -C OUTPUT -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
+    [[ "$(iptables -S OUTPUT 2>/dev/null | sed -n '2p' || true)" == "-A OUTPUT -j JUST1KNODE-ANTIABUSE" ]] || missing=$((missing + 1))
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
         iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || missing=$((missing + 1))
     fi
@@ -1004,10 +1018,10 @@ apply_antiabuse_protection() {
         iptables -A JUST1KNODE-ANTIABUSE -p tcp -m string --string "/announce?info_hash=" --algo bm -j DROP
     fi
 
-    iptables -C FORWARD -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I FORWARD 1 -j JUST1KNODE-ANTIABUSE
-    iptables -C OUTPUT -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I OUTPUT 1 -j JUST1KNODE-ANTIABUSE
+    _ensure_iptables_jump_first FORWARD JUST1KNODE-ANTIABUSE
+    _ensure_iptables_jump_first OUTPUT JUST1KNODE-ANTIABUSE
     if iptables -L DOCKER-USER >/dev/null 2>&1; then
-        iptables -C DOCKER-USER -j JUST1KNODE-ANTIABUSE 2>/dev/null || iptables -I DOCKER-USER 1 -j JUST1KNODE-ANTIABUSE
+        _ensure_iptables_jump_first DOCKER-USER JUST1KNODE-ANTIABUSE
     fi
 
     if check_antiabuse_rules; then
