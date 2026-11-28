@@ -375,22 +375,23 @@ update_node_detached() {
         return 1
     fi
 
-    : > "$log_file" && chmod 600 "$log_file"
+    touch "$log_file" && chmod 600 "$log_file"
     info "Обновление запущено как служба ${unit} (переживёт обрыв SSH). Лог: ${log_file}"
 
-    # systemd-юнит не наследует окружение: пробрасываем переопределения (JUST1KNODE_REPO_URL, XRAY_* и т.д.)
+    # systemd-юнит не наследует окружение: пробрасываем переопределения путей, веток и версий
     local -a env_args=()
     local env_name
     while IFS= read -r env_name; do
         env_args+=(-E "$env_name")
-    done < <(compgen -e | grep -E '^(JUST1KNODE_|XRAY_|INSTALL_DIR$|STATE_DIR$|NGINX_CONF_DIR$|SYSTEMD_SYSTEM_DIR$)' || true)
+    done < <(compgen -e | grep -E '^(JUST1KNODE_|JUST1KBOT_|XRAY_|INSTALL_DIR$|STATE_DIR$|STATE_FILE$|CLIENTS_FILE$|LINKS_FILE$|BACKUP_DIR$|LETSENCRYPT_DIR$|NGINX_CONF_DIR$|SYSTEMD_SYSTEM_DIR$)' || true)
 
-    tail -n +1 -F "$log_file" 2>/dev/null &
+    tail -n 0 -F "$log_file" 2>/dev/null &
     local tail_pid=$!
     local rc=0
+    # shellcheck disable=SC2016
     systemd-run --quiet --wait --collect --unit="$unit" "${env_args[@]}" \
-        -p StandardOutput="file:${log_file}" -p StandardError=inherit \
-        "$bin_path" update "$target" || rc=$?
+        -p StandardOutput="append:${log_file}" -p StandardError=inherit \
+        /bin/bash -c ': > "$1" && exec "$2" update "$3"' _ "$log_file" "$bin_path" "$target" || rc=$?
     sleep 1
     kill "$tail_pid" 2>/dev/null || true
     wait "$tail_pid" 2>/dev/null || true
