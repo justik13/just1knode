@@ -1037,11 +1037,16 @@ run_doctor() {
             fi
         fi
 
+        local cdn_specs_json="{}"
+        if declare -F export_loaded_cdn_specs_json >/dev/null 2>&1; then
+            cdn_specs_json="$(export_loaded_cdn_specs_json 2>/dev/null || echo "{}")"
+        fi
+
         local cdn_entries=()
         local _cdn_entry
         while IFS= read -r _cdn_entry; do
             [[ -n "$_cdn_entry" ]] && cdn_entries+=("$_cdn_entry")
-        done < <(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" "$check_target" <<'PYEOF' 2>/dev/null || true
+        done < <(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" "$check_target" "$cdn_specs_json" <<'PYEOF' 2>/dev/null || true
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -1056,6 +1061,17 @@ try:
 except Exception:
     xcfg = {}
 check_target = sys.argv[3]
+try:
+    cdn_specs = json.loads(sys.argv[4])
+    if not isinstance(cdn_specs, dict):
+        cdn_specs = {}
+except Exception:
+    cdn_specs = {}
+
+tag_to_cdn = {"just1k-wl-default": "cdn_yandex", "just1k-wl-turboflare": "cdn_turboflare"}
+for k, sp in cdn_specs.items():
+    if isinstance(sp, dict) and sp.get("tag"):
+        tag_to_cdn[str(sp["tag"])] = str(k)
 
 loc_paths_by_cdn = {}
 base_paths_by_cdn = {}
@@ -1070,12 +1086,10 @@ for ib in (xcfg.get("inbounds") or []):
     if not p:
         continue
     if tag.startswith("just1k-wl-inbound-") and "__" in tag:
-        cdn_id = tag.split("__", 1)[1]
+        cdn_id = tag.rsplit("__", 1)[1]
         loc_paths_by_cdn.setdefault(cdn_id, p)
-    elif tag == "just1k-wl-default":
-        base_paths_by_cdn["cdn_yandex"] = p
-    elif tag == "just1k-wl-turboflare":
-        base_paths_by_cdn["cdn_turboflare"] = p
+    elif tag in tag_to_cdn:
+        base_paths_by_cdn[tag_to_cdn[tag]] = p
 
 secret_base = str(st.get("secret_base_path") or "").strip().rstrip("/")
 seen = {}
@@ -1087,14 +1101,16 @@ for k, m in mods.items():
             continue
         x_path = loc_paths_by_cdn.get(k) or base_paths_by_cdn.get(k) or ""
         if not x_path and secret_base:
-            subp = "default" if k == "cdn_yandex" else k.replace("cdn_", "", 1)
-            x_path = f"{secret_base}/{subp}"
+            subp = str((cdn_specs.get(k) or {}).get("subpath") or "").strip().strip("/")
+            if subp:
+                x_path = f"{secret_base}/{subp}"
         if dom not in seen or (x_path and not seen[dom]):
             seen[dom] = x_path
 
 top_cdn = str(st.get("cdn_domain") or "").strip()
 if top_cdn and top_cdn != "-" and top_cdn != check_target and top_cdn not in seen:
-    x_path = loc_paths_by_cdn.get("cdn_yandex") or base_paths_by_cdn.get("cdn_yandex") or (f"{secret_base}/default" if secret_base else "")
+    top_subp = str((cdn_specs.get("cdn_yandex") or {}).get("subpath") or "default").strip().strip("/")
+    x_path = loc_paths_by_cdn.get("cdn_yandex") or base_paths_by_cdn.get("cdn_yandex") or (f"{secret_base}/{top_subp}" if secret_base else "")
     seen[top_cdn] = x_path
 
 for dom, xp in seen.items():
@@ -1102,7 +1118,31 @@ for dom, xp in seen.items():
 PYEOF
 )
 
-        local cdn_entry cdn_domain xhttp_probe_path
+        _doctor_probe_xhttp() {
+            local label="$1"
+            local probe_url="$2"
+            local resolve_arg="${3:-}"
+            local xhttp_code xhttp_err=0
+            if [[ -n "$resolve_arg" ]]; then
+                xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "$resolve_arg" "$probe_url" 2>/dev/null)" || xhttp_err=$?
+            else
+                xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$probe_url" 2>/dev/null)" || xhttp_err=$?
+            fi
+            if [[ $xhttp_err -eq 0 && "$xhttp_code" != "404" && "$xhttp_code" != "502" && "$xhttp_code" != "504" && "$xhttp_code" != "000" ]]; then
+                echo -e "  ${GREEN}✔${NC} ${label} достигает Xray (HTTP ${xhttp_code})"
+            elif [[ "$xhttp_code" == "404" ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул 404 Not Found! Проверьте совпадение secret_base_path, Nginx и origin в панели CDN."
+                failed=$((failed + 1))
+            elif [[ "$xhttp_code" == "502" || "$xhttp_code" == "504" ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул ${xhttp_code} (ошибка upstream/Xray)!"
+                failed=$((failed + 1))
+            else
+                echo -e "  ${RED}✗${NC} ${label} недоступен (HTTP ${xhttp_code}, err: ${xhttp_err})"
+                failed=$((failed + 1))
+            fi
+        }
+
+        local cdn_entry cdn_domain xhttp_probe_path seen_local_xhttp="|"
         for cdn_entry in "${cdn_entries[@]}"; do
             cdn_domain="${cdn_entry%%|*}"
             xhttp_probe_path="${cdn_entry#*|}"
@@ -1147,21 +1187,11 @@ PYEOF
             fi
 
             if [[ -n "$xhttp_probe_path" ]]; then
-                local xhttp_code
-                local xhttp_err=0
-                xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${xhttp_probe_path}" 2>/dev/null)" || xhttp_err=$?
-                if [[ $xhttp_err -eq 0 && "$xhttp_code" != "404" && "$xhttp_code" != "502" && "$xhttp_code" != "504" && "$xhttp_code" != "000" ]]; then
-                    echo -e "  ${GREEN}✔${NC} XHTTP-маршрут через CDN (${xhttp_probe_path}) достигает Xray (HTTP ${xhttp_code})"
-                elif [[ "$xhttp_code" == "404" ]]; then
-                    echo -e "  ${RED}✗${NC} XHTTP-маршрут через CDN (${xhttp_probe_path}) вернул 404 Not Found! Проверьте совпадение secret_base_path и origin в панели CDN."
-                    failed=$((failed + 1))
-                elif [[ "$xhttp_code" == "502" || "$xhttp_code" == "504" ]]; then
-                    echo -e "  ${RED}✗${NC} XHTTP-маршрут через CDN (${xhttp_probe_path}) вернул ${xhttp_code} (ошибка upstream/Xray)!"
-                    failed=$((failed + 1))
-                else
-                    echo -e "  ${RED}✗${NC} XHTTP-маршрут через CDN (${xhttp_probe_path}) недоступен (HTTP ${xhttp_code}, err: ${xhttp_err})"
-                    failed=$((failed + 1))
+                if [[ "$seen_local_xhttp" != *"|${xhttp_probe_path}|"* ]]; then
+                    seen_local_xhttp+="${xhttp_probe_path}|"
+                    _doctor_probe_xhttp "Локальный XHTTP (${xhttp_probe_path})" "https://${check_target}${xhttp_probe_path}" "${check_target}:443:127.0.0.1"
                 fi
+                _doctor_probe_xhttp "XHTTP через CDN (${cdn_domain}${xhttp_probe_path})" "https://${cdn_domain}${xhttp_probe_path}"
             fi
         done
     fi

@@ -703,7 +703,7 @@ def _get_xhttp_location_routes() -> List[Dict[str, Any]]:
         if tag.startswith("just1k-wl-inbound-"):
             raw_suffix = tag[len("just1k-wl-inbound-"):]
             if "__" in raw_suffix:
-                loc_code, cdn_hint = raw_suffix.split("__", 1)
+                loc_code, cdn_hint = raw_suffix.rsplit("__", 1)
             else:
                 loc_code = raw_suffix
                 cdn_hint = enabled_cdns[0] if enabled_cdns else None
@@ -814,6 +814,30 @@ _last_restore_attempt_epoch: Optional[str] = None
 _RESTORE_FAILURE_COOLDOWN_SEC = 60.0
 
 
+def _active_services_for_entry(meta: Dict[str, Any]) -> List[Optional[str]]:
+    """Return active service namespaces for a stored client entry."""
+    service_states = meta.get("service_states")
+    if isinstance(service_states, dict) and service_states:
+        return [
+            s
+            for s, st in service_states.items()
+            if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
+        ]
+    if not meta.get("is_active", True) or meta.get("tombstone", False):
+        return []
+    return meta.get("services") or ([meta.get("service")] if meta.get("service") else [None])
+
+
+def _is_entry_active_for_service(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
+    """Return True if stored entry is active for eff_service (or any service when None)."""
+    active_services = _active_services_for_entry(meta)
+    if not active_services:
+        return False
+    if eff_service is None:
+        return True
+    return eff_service in active_services or None in active_services
+
+
 def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     """Restores active persisted clients from disk into Xray RAM as temporary crash-recovery hint.
 
@@ -831,18 +855,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     for client_uuid, meta in entries.items():
         if not isinstance(meta, dict):
             continue
-        service_states = meta.get("service_states")
-        if isinstance(service_states, dict) and service_states:
-            active_services = [
-                s
-                for s, st in service_states.items()
-                if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
-            ]
-        else:
-            if not meta.get("is_active", True) or meta.get("tombstone", False):
-                continue
-            active_services = meta.get("services") or ([meta.get("service")] if meta.get("service") else [None])
-
+        active_services = _active_services_for_entry(meta)
         if not active_services:
             continue
 
@@ -2875,13 +2888,12 @@ async def get_clients_inventory(
     except Exception as e:
         logger.warning("Could not load stored client entries for inventory: %s", e)
 
+    eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
     if not client_ids:
         client_ids = [
             cid
             for cid, meta in stored_entries.items()
-            if isinstance(meta, dict)
-            and not meta.get("tombstone", False)
-            and meta.get("is_active", True) is True
+            if isinstance(meta, dict) and _is_entry_active_for_service(meta, eff_req_svc)
         ]
 
     inventory: Dict[str, Any] = {}
@@ -2892,7 +2904,6 @@ async def get_clients_inventory(
             continue
 
         inbound_presence: Dict[str, bool] = {}
-        eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
         stored_cid_entry = (
             stored_entries.get(clean_cid) if isinstance(stored_entries, dict) else None
         )
