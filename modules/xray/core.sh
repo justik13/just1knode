@@ -378,10 +378,17 @@ update_node_detached() {
     : > "$log_file" && chmod 600 "$log_file"
     info "Обновление запущено как служба ${unit} (переживёт обрыв SSH). Лог: ${log_file}"
 
+    # systemd-юнит не наследует окружение: пробрасываем переопределения (JUST1KNODE_REPO_URL, XRAY_* и т.д.)
+    local -a env_args=()
+    local env_name
+    while IFS= read -r env_name; do
+        env_args+=(-E "$env_name")
+    done < <(compgen -e | grep -E '^(JUST1KNODE_|XRAY_|INSTALL_DIR$|STATE_DIR$|NGINX_CONF_DIR$|SYSTEMD_SYSTEM_DIR$)' || true)
+
     tail -n +1 -F "$log_file" 2>/dev/null &
     local tail_pid=$!
     local rc=0
-    systemd-run --quiet --wait --collect --unit="$unit" \
+    systemd-run --quiet --wait --collect --unit="$unit" "${env_args[@]}" \
         -p StandardOutput="file:${log_file}" -p StandardError=inherit \
         "$bin_path" update "$target" || rc=$?
     sleep 1
