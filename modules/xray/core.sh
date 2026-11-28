@@ -354,6 +354,50 @@ EOF
     fi
 }
 
+# Запуск CLI-команды `just1knode update` как transient-юнита systemd: обрыв SSH
+# убивает только просмотр лога, а само обновление доходит до конца.
+# Внутри юнита (INVOCATION_ID задан systemd) и без systemd-run — обычный запуск.
+update_node_detached() {
+    local target="${1:-all}"
+    if [[ -n "${INVOCATION_ID:-}" ]] || ! command -v systemd-run >/dev/null 2>&1; then
+        update_node "$target"
+        return
+    fi
+    check_root
+
+    local unit="just1knode-update"
+    local log_file="/var/log/just1knode-update.log"
+    local bin_path="${INSTALL_DIR:-/opt/just1knode}/just1knode.sh"
+    [[ -x "$bin_path" ]] || bin_path="/usr/local/bin/just1knode"
+
+    if systemctl is-active --quiet "${unit}.service"; then
+        error "Обновление уже выполняется. Лог: tail -f ${log_file}"
+        return 1
+    fi
+
+    touch "$log_file" && chmod 600 "$log_file"
+    info "Обновление запущено как служба ${unit} (переживёт обрыв SSH). Лог: ${log_file}"
+
+    # systemd-юнит не наследует окружение: пробрасываем переопределения путей, веток и версий
+    local -a env_args=()
+    local env_name
+    while IFS= read -r env_name; do
+        env_args+=(-E "$env_name")
+    done < <(compgen -e | grep -E '^(JUST1KNODE_|JUST1KBOT_|XRAY_|INSTALL_DIR$|STATE_DIR$|STATE_FILE$|CLIENTS_FILE$|LINKS_FILE$|BACKUP_DIR$|LETSENCRYPT_DIR$|NGINX_CONF_DIR$|SYSTEMD_SYSTEM_DIR$)' || true)
+
+    tail -n 0 -F "$log_file" 2>/dev/null &
+    local tail_pid=$!
+    local rc=0
+    # shellcheck disable=SC2016
+    systemd-run --quiet --wait --collect --unit="$unit" "${env_args[@]}" \
+        -p StandardOutput="append:${log_file}" -p StandardError=inherit \
+        /bin/bash -c ': > "$1" && exec "$2" update "$3"' _ "$log_file" "$bin_path" "$target" || rc=$?
+    sleep 1
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+    return "$rc"
+}
+
 update_node() {
     title "КОМПЛЕКСНОЕ ОБНОВЛЕНИЕ УТИЛИТЫ И КОНФИГУРАЦИИ УЗЛА"
     check_root

@@ -2230,7 +2230,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                         trap - EXIT
                         ;;
                     config|heal) heal_node_config ;;
-                    *) update_node "${2:-all}" ;;
+                    *) update_node_detached "${2:-all}" ;;
                 esac
                 ;;
             reset) reset_node ;;
