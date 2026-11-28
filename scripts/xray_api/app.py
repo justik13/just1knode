@@ -2226,9 +2226,15 @@ def _batch_sync_clients_sync(req: ClientBatchSyncRequest) -> Dict[str, Any]:
                 if isinstance(sync_res, dict) and sync_res.get("result") == "already_newer":
                     node_tombstone = bool(sync_res.get("tombstone", False))
                     node_state = sync_res.get("state")
-                    if (node_tombstone and desired_state == "active") or (node_state != desired_state):
+                    node_all_verified = bool(sync_res.get("all_inbounds_verified", True))
+                    if (
+                        (node_tombstone and desired_state == "active")
+                        or (node_state != desired_state)
+                        or not node_all_verified
+                    ):
                         failed[clean_uuid] = (
                             f"already_newer: node state={node_state} tombstone={node_tombstone} "
+                            f"all_inbounds_verified={node_all_verified} "
                             f"version={sync_res.get('version')}"
                         )
                     else:
@@ -2907,6 +2913,43 @@ async def delete_client(
         return await asyncio.to_thread(_delete_client_sync, clean_uuid, version, service)
 
 
+def _inventory_entry_version(
+    stored_entry: Optional[Dict[str, Any]],
+    eff_service: Optional[str],
+) -> Optional[int]:
+    """Resolve stored monotonic version scoped to eff_service (or entry-wide when unfiltered)."""
+    if not isinstance(stored_entry, dict):
+        return None
+    service_states = stored_entry.get("service_states")
+    raw_ver: Any = None
+    if eff_service:
+        if isinstance(service_states, dict) and service_states:
+            svc_meta = service_states.get(eff_service)
+            if not isinstance(svc_meta, dict):
+                for s_key, st_val in service_states.items():
+                    if client_store.canonicalize_service(s_key) == eff_service and isinstance(st_val, dict):
+                        svc_meta = st_val
+                        break
+            if isinstance(svc_meta, dict):
+                raw_ver = svc_meta.get("version")
+        elif _entry_legacy_fallback_service(stored_entry) == eff_service:
+            raw_ver = stored_entry.get("version")
+    else:
+        raw_ver = stored_entry.get("version")
+        if not (isinstance(raw_ver, int) and not isinstance(raw_ver, bool)) and isinstance(service_states, dict):
+            int_vers = [
+                st.get("version")
+                for st in service_states.values()
+                if isinstance(st, dict)
+                and isinstance(st.get("version"), int)
+                and not isinstance(st.get("version"), bool)
+            ]
+            raw_ver = max(int_vers, default=None)
+    if isinstance(raw_ver, int) and not isinstance(raw_ver, bool):
+        return raw_ver
+    return None
+
+
 @app.post("/v1/clients/inventory")
 @app.get("/v1/clients/inventory")
 async def get_clients_inventory(
@@ -2995,10 +3038,12 @@ async def get_clients_inventory(
         else:
             observed_state = "partial"
 
+        entry_version = _inventory_entry_version(stored_cid_entry, eff_req_svc)
         inventory[clean_cid] = {
             "observed_state": observed_state,
             "inbounds": inbound_presence,
             "all_inbounds_matched": (all_active or all_disabled),
+            "version": entry_version,
         }
 
     return {
