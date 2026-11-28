@@ -94,6 +94,19 @@ def is_valid_nginx_path(val):
     return True
 
 
+def is_valid_secret_base_path(val):
+    if not is_valid_nginx_path(val):
+        return False
+    clean = val.rstrip("/")
+    if len(clean) < 3 or "//" in clean:
+        return False
+    if clean in ("/.", "/sub", "/std", "/none") or "/./" in clean or clean.endswith("/."):
+        return False
+    if clean.startswith(("/sub/", "/std/")):
+        return False
+    return True
+
+
 def main():
     if len(sys.argv) < 13:
         sys.stderr.write(
@@ -144,11 +157,20 @@ def main():
     if not sub_prefix.startswith("/"):
         sub_prefix = "/" + sub_prefix
 
-    secret_base = str(state.get("secret_base_path") or "").strip().rstrip("/")
-    if not secret_base or secret_base in ("/", "/none"):
-        secret_base = "/assets_" + secrets.token_hex(4)
-    elif not secret_base.startswith("/"):
-        secret_base = "/" + secret_base
+    bi_links_sec = links.get("bi") if isinstance(links.get("bi"), dict) else {}
+    links_secret_raw = str(
+        bi_links_sec.get("secret_base_path") or links.get("secret_base_path") or ""
+    ).strip().rstrip("/")
+    if links_secret_raw and not links_secret_raw.startswith("/"):
+        links_secret_raw = "/" + links_secret_raw
+    if is_valid_secret_base_path(links_secret_raw):
+        secret_base = links_secret_raw
+    else:
+        secret_base = str(state.get("secret_base_path") or "").strip().rstrip("/")
+        if not secret_base or secret_base in ("/", "/none"):
+            secret_base = "/assets_" + secrets.token_hex(4)
+        elif not secret_base.startswith("/"):
+            secret_base = "/" + secret_base
 
     modules = state.get("modules") if isinstance(state.get("modules"), dict) else {}
 
@@ -563,6 +585,7 @@ def main():
         # Outbounds для Стандарта (std_bridges)
         std_outbounds = {}
         std_tags_by_loc = {}
+        std_default_by_loc = {}
         std_all_tags = []
         std_default_tag = None
         for idx, p in enumerate(std_bridges_raw):
@@ -580,12 +603,15 @@ def main():
             std_tags_by_loc.setdefault(loc_key, []).append(ob_tag)
             std_all_tags.append(ob_tag)
             cfg["outbounds"].append(ob)
+            if p.get("is_default") and loc_key not in std_default_by_loc:
+                std_default_by_loc[loc_key] = ob_tag
             if not std_default_tag or p.get("is_default"):
                 std_default_tag = ob_tag
 
         # Outbounds для БИ (bi_bridges)
         bi_outbounds = {}
         bi_tags_by_loc = {}
+        bi_default_by_loc = {}
         bi_all_tags = []
         bi_default_tag = None
         for idx, p in enumerate(bi_bridges_raw):
@@ -603,6 +629,8 @@ def main():
             bi_tags_by_loc.setdefault(loc_key, []).append(ob_tag)
             bi_all_tags.append(ob_tag)
             cfg["outbounds"].append(ob)
+            if p.get("is_default") and loc_key not in bi_default_by_loc:
+                bi_default_by_loc[loc_key] = ob_tag
             if not bi_default_tag or p.get("is_default"):
                 bi_default_tag = ob_tag
 
@@ -653,13 +681,19 @@ def main():
         balancers = []
         observed_tags = set()
 
-        def _route_target_for_tags(bal_tag, tags, fallback_tag):
+        def _route_target_for_tags(bal_tag, tags, fallback_tag, preferred_tag=None):
             if len(tags) >= 2:
                 if not any(b["tag"] == bal_tag for b in balancers):
+                    eff_fallback = (
+                        preferred_tag
+                        if preferred_tag in tags
+                        else (fallback_tag if fallback_tag in tags else tags[0])
+                    )
                     balancers.append({
                         "tag": bal_tag,
                         "selector": list(tags),
                         "strategy": {"type": "leastPing"},
+                        "fallbackTag": eff_fallback,
                     })
                     observed_tags.update(tags)
                 return {"balancerTag": bal_tag}
@@ -672,13 +706,15 @@ def main():
         for lc, s_tag in std_location_rules:
             loc_tags = std_tags_by_loc.get(lc) or ([std_outbounds[lc]] if lc in std_outbounds else [])
             if loc_tags:
-                target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
+                loc_pref = std_default_by_loc.get(lc) or std_default_tag
+                target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block", loc_pref)
                 std_loc_rules.append({"type": "field", "inboundTag": [s_tag], **target_kw})
 
         # 2. Локационные правила прямого VLESS TLS (443): строгая маршрутизация по user regex
         for lc, loc_tags in std_tags_by_loc.items():
             if loc_tags:
-                target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block")
+                loc_pref = std_default_by_loc.get(lc) or std_default_tag
+                target_kw = _route_target_for_tags(f"bal-std-{lc}", loc_tags, "just1k-wl-block", loc_pref)
                 std_loc_rules.append({
                     "type": "field",
                     "inboundTag": ["just1k-vless-direct"],
@@ -704,7 +740,8 @@ def main():
                 continue
             target_tags = bi_tags_by_loc.get(b_code) or ([bi_outbounds[b_code]] if b_code in bi_outbounds else [])
             if target_tags:
-                target_kw = _route_target_for_tags(f"bal-bi-{b_code}", target_tags, "just1k-wl-block")
+                bi_pref = bi_default_by_loc.get(b_code) or bi_default_tag
+                target_kw = _route_target_for_tags(f"bal-bi-{b_code}", target_tags, "just1k-wl-block", bi_pref)
                 rules.append({"type": "field", "inboundTag": loc_tags, **target_kw})
 
         # Zero-Trust Fallback: иностранный трафик без моста ИДЁТ В BLACKHOLE, НИКОГДА НЕ В DIRECT!

@@ -819,13 +819,6 @@ for t, p in xray_inbound_ports.items():
                 lines.append('    keepalive_timeout 300s;')
                 lines.append('}')
                 lines.append('')
-                lines.append(f'upstream xray_xhttp_relay_{c_tag} {{')
-                lines.append(f'    server 127.0.0.1:{port_num};')
-                lines.append('    keepalive 128;')
-                lines.append('    keepalive_requests 100000;')
-                lines.append('    keepalive_timeout 300s;')
-                lines.append('}')
-                lines.append('')
             except Exception:
                 continue
     elif t.startswith('just1k-wl-') and t not in ('just1k-wl-default', 'just1k-wl-api-grpc'):

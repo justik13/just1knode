@@ -165,6 +165,8 @@ print(
     [[ -e "${nginx_dir}/sites-enabled/just1k-fallback80.conf" || -L "${nginx_dir}/sites-enabled/just1k-fallback80.conf" ]] && had_fb_enabled="true"
     local had_hub_enabled="false"
     [[ -e "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" || -L "${nginx_dir}/sites-enabled/just1k-ru-hub.conf" ]] && had_hub_enabled="true"
+    local had_upstreams_conf="false"
+    [[ -e "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" || -L "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" ]] && had_upstreams_conf="true"
     if [[ "$nginx_needed" == "true" ]]; then
         # Atomically retire legacy origin.conf if present
         rm -f "${nginx_dir}/sites-enabled/just1k-origin.conf" "${nginx_dir}/sites-available/just1k-origin.conf" 2>/dev/null || true
@@ -199,6 +201,8 @@ print(
         fi
         if [[ -n "$prev_upstreams_bak" && -f "$prev_upstreams_bak" ]]; then
             cp -f "$prev_upstreams_bak" "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
+        elif [[ "$had_upstreams_conf" == "false" ]]; then
+            rm -f "${nginx_dir}/conf.d/just1k-xhttp-upstreams.conf" 2>/dev/null || true
         fi
         if [[ "$had_fb_enabled" == "true" && -f "${nginx_dir}/sites-available/just1k-fallback80.conf" ]]; then
             ln -sf "${nginx_dir}/sites-available/just1k-fallback80.conf" "${nginx_dir}/sites-enabled/just1k-fallback80.conf" 2>/dev/null || true

@@ -198,6 +198,27 @@ class NodeLinksSectionSpec(BaseModel):
     bridges: List[BridgeSpec] = Field(default_factory=list)
     sni_routes: List[SniRouteSpec] = Field(default_factory=list)
     locations: List[Dict[str, Any]] = Field(default_factory=list)
+    secret_base_path: Optional[str] = Field(default=None, max_length=128)
+
+    @field_validator("secret_base_path")
+    @classmethod
+    def validate_secret_base_path(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip().rstrip("/")
+        if not cleaned:
+            return None
+        validated = _validate_nginx_path_strict(cleaned)
+        if (
+            len(validated) < 3
+            or "//" in validated
+            or validated in ("/.", "/sub", "/std", "/none")
+            or "/./" in validated
+            or validated.endswith("/.")
+            or validated.startswith(("/sub/", "/std/"))
+        ):
+            raise ValueError(f"Invalid secret_base_path: {value!r}")
+        return validated
 
     @field_validator("locations")
     @classmethod

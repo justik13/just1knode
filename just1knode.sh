@@ -981,68 +981,72 @@ run_doctor() {
         warnings=$((warnings + 1))
     fi
 
-    if [[ "$role" == "ru_hub" ]] && is_module_enabled "vless_xhttp" 2>/dev/null && [[ -n "$(get_state_val "bot_domain" "")" && "$(get_state_val "bot_domain" "")" != "-" ]]; then
-        local sub_prefix
+    if [[ "$role" == "ru_hub" ]] && is_module_enabled "vless_xhttp" 2>/dev/null; then
+        local bot_dom_val sub_prefix check_target
+        bot_dom_val="$(get_state_val "bot_domain" "")"
         sub_prefix="$(get_state_val "sub_path_prefix" 2>/dev/null || true)"
         if [[ -z "$sub_prefix" ]]; then
             sub_prefix="${WHITE_INTERNET_SUB_PATH_PREFIX:-/sub/wl}"
         fi
         sub_prefix="${sub_prefix%/}"
         [[ ! "$sub_prefix" =~ ^/ ]] && sub_prefix="/$sub_prefix"
+        check_target="${domain:-localhost}"
 
-        log "8. Проверка Nginx-проксирования подписок (${sub_prefix})..."
-        local check_target="${domain:-localhost}"
-        local sub_code
-        local sub_err=0
-        sub_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "${check_target}:443:127.0.0.1" "https://${check_target}${sub_prefix}/ping" 2>/dev/null)" || sub_err=$?
-        if [[ "$sub_code" == "200" && $sub_err -eq 0 ]]; then
-            echo -e "  ${GREEN}✔${NC} Nginx прокси подписок (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
-        elif [[ $sub_err -eq 60 ]]; then
-            echo -e "  ${RED}✗${NC} ОШИБКА TLS: Сертификат для https://${check_target} недействителен или просрочен (curl error 60)!"
-            failed=$((failed + 1))
-        elif [[ "$sub_code" == "502" ]]; then
-            local current_bot_domain
-            current_bot_domain="$(get_state_val "bot_domain" "<не задан>")"
-            echo -e "  ${RED}✗${NC} ОШИБКА 502 Bad Gateway: Nginx не может связаться с ботом (bot_domain: '$current_bot_domain')!"
-            echo -e "      ${YELLOW}→${NC} Проверьте цепочку SSL (proxy_ssl_verify_depth), DNS и логи: tail -n 10 /var/log/nginx/error.log"
-            failed=$((failed + 1))
-        elif [[ "$sub_code" == "504" ]]; then
-            local current_bot_domain
-            current_bot_domain="$(get_state_val "bot_domain" "<не задан>")"
-            echo -e "  ${RED}✗${NC} ОШИБКА 504 Gateway Timeout: Nginx не дождался ответа от бота (bot_domain: '$current_bot_domain')!"
-            echo -e "      ${YELLOW}→${NC} Возможные причины: IP бота блокируется ТСПУ (TCP SYN drop), бот перегружен/не отвечает или сбой DNS."
-            echo -e "      ${YELLOW}→${NC} Проверьте логи: tail -n 10 /var/log/nginx/error.log и убедитесь, что домен бота проксируется через CDN/Cloudflare."
-            failed=$((failed + 1))
-        elif [[ "$sub_code" == "404" ]]; then
-            echo -e "  ${RED}✗${NC} ОШИБКА 404 Not Found: Nginx прокси отвечает 404 (эндпоинт ${sub_prefix}/ping не найден на боте)!"
-            failed=$((failed + 1))
-        elif [[ $sub_err -eq 28 ]]; then
-            echo -e "  ${RED}✗${NC} ТАЙМАУТ ПОДКЛЮЧЕНИЯ (curl error 28): Запрос к https://${check_target}${sub_prefix}/ping превысил лимит времени!"
-            echo -e "      ${YELLOW}→${NC} Nginx или вышестоящий бот зависли при обработке. Проверьте: tail -n 10 /var/log/nginx/error.log"
-            failed=$((failed + 1))
-        elif [[ "$sub_code" == "000" || $sub_err -ne 0 ]]; then
-            # Accepted risk: the -k probe below hits only the public /ping
-            # endpoint with no secrets, to tell "TLS broken" apart from
-            # "nginx down". Either outcome still fails this check.
-            local insecure_code
-            insecure_code="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "${check_target}:443:127.0.0.1" "https://${check_target}${sub_prefix}/ping" 2>/dev/null || echo "000")"
-            if [[ "$insecure_code" == "200" ]]; then
-                echo -e "  ${RED}✗${NC} TLS ОШИБКА: Nginx отвечает 200 OK только без проверки сертификата (curl -k). Проверьте Let's Encrypt / CA!"
+        if [[ -n "$bot_dom_val" && "$bot_dom_val" != "-" ]]; then
+            log "8. Проверка Nginx-проксирования подписок (${sub_prefix})..."
+            local sub_code
+            local sub_err=0
+            sub_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "${check_target}:443:127.0.0.1" "https://${check_target}${sub_prefix}/ping" 2>/dev/null)" || sub_err=$?
+            if [[ "$sub_code" == "200" && $sub_err -eq 0 ]]; then
+                echo -e "  ${GREEN}✔${NC} Nginx прокси подписок (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
+            elif [[ $sub_err -eq 60 ]]; then
+                echo -e "  ${RED}✗${NC} ОШИБКА TLS: Сертификат для https://${check_target} недействителен или просрочен (curl error 60)!"
                 failed=$((failed + 1))
+            elif [[ "$sub_code" == "502" ]]; then
+                echo -e "  ${RED}✗${NC} ОШИБКА 502 Bad Gateway: Nginx не может связаться с ботом (bot_domain: '$bot_dom_val')!"
+                echo -e "      ${YELLOW}→${NC} Проверьте цепочку SSL (proxy_ssl_verify_depth), DNS и логи: tail -n 10 /var/log/nginx/error.log"
+                failed=$((failed + 1))
+            elif [[ "$sub_code" == "504" ]]; then
+                echo -e "  ${RED}✗${NC} ОШИБКА 504 Gateway Timeout: Nginx не дождался ответа от бота (bot_domain: '$bot_dom_val')!"
+                echo -e "      ${YELLOW}→${NC} Возможные причины: IP бота блокируется ТСПУ (TCP SYN drop), бот перегружен/не отвечает или сбой DNS."
+                echo -e "      ${YELLOW}→${NC} Проверьте логи: tail -n 10 /var/log/nginx/error.log и убедитесь, что домен бота проксируется через CDN/Cloudflare."
+                failed=$((failed + 1))
+            elif [[ "$sub_code" == "404" ]]; then
+                echo -e "  ${RED}✗${NC} ОШИБКА 404 Not Found: Nginx прокси отвечает 404 (эндпоинт ${sub_prefix}/ping не найден на боте)!"
+                failed=$((failed + 1))
+            elif [[ $sub_err -eq 28 ]]; then
+                echo -e "  ${RED}✗${NC} ТАЙМАУТ ПОДКЛЮЧЕНИЯ (curl error 28): Запрос к https://${check_target}${sub_prefix}/ping превысил лимит времени!"
+                echo -e "      ${YELLOW}→${NC} Nginx или вышестоящий бот зависли при обработке. Проверьте: tail -n 10 /var/log/nginx/error.log"
+                failed=$((failed + 1))
+            elif [[ "$sub_code" == "000" || $sub_err -ne 0 ]]; then
+                # Accepted risk: the -k probe below hits only the public /ping
+                # endpoint with no secrets, to tell "TLS broken" apart from
+                # "nginx down". Either outcome still fails this check.
+                local insecure_code
+                insecure_code="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "${check_target}:443:127.0.0.1" "https://${check_target}${sub_prefix}/ping" 2>/dev/null || echo "000")"
+                if [[ "$insecure_code" == "200" ]]; then
+                    echo -e "  ${RED}✗${NC} TLS ОШИБКА: Nginx отвечает 200 OK только без проверки сертификата (curl -k). Проверьте Let's Encrypt / CA!"
+                    failed=$((failed + 1))
+                else
+                    echo -e "  ${RED}✗${NC} Не удалось выполнить запрос к https://${check_target}${sub_prefix}/ping (Nginx недоступен, код: $sub_code, err: $sub_err)"
+                    failed=$((failed + 1))
+                fi
             else
-                echo -e "  ${RED}✗${NC} Не удалось выполнить запрос к https://${check_target}${sub_prefix}/ping (Nginx недоступен, код: $sub_code, err: $sub_err)"
+                echo -e "  ${RED}✗${NC} ОШИБКА: Nginx прокси вернул неожиданный HTTP код: $sub_code (ожидался 200 OK)!"
                 failed=$((failed + 1))
             fi
-        else
-            echo -e "  ${RED}✗${NC} ОШИБКА: Nginx прокси вернул неожиданный HTTP код: $sub_code (ожидался 200 OK)!"
-            failed=$((failed + 1))
         fi
 
-        local cdn_domains=()
-        local _cdn_dom
-        while IFS= read -r _cdn_dom; do
-            [[ -n "$_cdn_dom" && "$_cdn_dom" != "$check_target" && "$_cdn_dom" != "-" ]] && cdn_domains+=("$_cdn_dom")
-        done < <(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" <<'PYEOF' 2>/dev/null || true
+        local cdn_specs_json="{}"
+        if declare -F export_loaded_cdn_specs_json >/dev/null 2>&1; then
+            cdn_specs_json="$(export_loaded_cdn_specs_json 2>/dev/null || echo "{}")"
+        fi
+
+        local cdn_entries=()
+        local _cdn_entry
+        while IFS= read -r _cdn_entry; do
+            [[ -n "$_cdn_entry" ]] && cdn_entries+=("$_cdn_entry")
+        done < <(python3 - "${STATE_FILE:-/etc/just1knode/state.json}" "${XRAY_CONFIG:-/usr/local/etc/xray/config.json}" "$check_target" "$cdn_specs_json" <<'PYEOF' 2>/dev/null || true
 import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
@@ -1051,59 +1055,191 @@ except Exception:
     st = {}
 if not isinstance(st, dict):
     st = {}
-seen = []
-def add_dom(val):
-    s = str(val or "").strip()
-    if s and s != "-" and s not in seen:
-        seen.append(s)
+try:
+    with open(sys.argv[2], "r", encoding="utf-8") as f:
+        xcfg = json.load(f)
+except Exception:
+    xcfg = {}
+check_target = sys.argv[3]
+try:
+    cdn_specs = json.loads(sys.argv[4])
+    if not isinstance(cdn_specs, dict):
+        cdn_specs = {}
+except Exception:
+    cdn_specs = {}
+
+tag_to_cdn = {"just1k-wl-default": "cdn_yandex", "just1k-wl-turboflare": "cdn_turboflare"}
+for k, sp in cdn_specs.items():
+    if isinstance(sp, dict) and sp.get("tag"):
+        tag_to_cdn[str(sp["tag"])] = str(k)
+
+paths_by_cdn = {}
+untyped_loc_paths = []
+
+
+def _add_path(bucket, val):
+    if val and val not in bucket:
+        bucket.append(val)
+
+
+for ib in (xcfg.get("inbounds") or []):
+    if not isinstance(ib, dict):
+        continue
+    tag = str(ib.get("tag") or "")
+    ss = ib.get("streamSettings") if isinstance(ib.get("streamSettings"), dict) else {}
+    if ss.get("network") != "xhttp":
+        continue
+    p = str((ss.get("xhttpSettings") or {}).get("path") or "").strip()
+    if not p:
+        continue
+    if tag.startswith("just1k-wl-inbound-"):
+        if "__" in tag:
+            cdn_id = tag.rsplit("__", 1)[1]
+            _add_path(paths_by_cdn.setdefault(cdn_id, []), p)
+        else:
+            _add_path(untyped_loc_paths, p)
+    elif tag in tag_to_cdn:
+        _add_path(paths_by_cdn.setdefault(tag_to_cdn[tag], []), p)
+
+secret_base = str(st.get("secret_base_path") or "").strip().rstrip("/")
 mods = st.get("modules") if isinstance(st.get("modules"), dict) else {}
-for k, m in mods.items():
-    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled"):
-        add_dom(m.get("cdn_domain") or m.get("domain"))
-add_dom(st.get("cdn_domain"))
-for d in seen:
-    print(d)
+enabled_cdns = [
+    (k, m)
+    for k, m in mods.items()
+    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled")
+]
+for p in untyped_loc_paths:
+    target_k = enabled_cdns[0][0] if enabled_cdns else "cdn_yandex"
+    _add_path(paths_by_cdn.setdefault(target_k, []), p)
+
+emitted = []
+seen_pairs = set()
+seen_cdns = set()
+
+
+def _emit(dom_val, xp_val):
+    pair = (dom_val, xp_val)
+    if pair not in seen_pairs:
+        seen_pairs.add(pair)
+        seen_cdns.add(dom_val)
+        emitted.append(pair)
+
+
+for k, m in enabled_cdns:
+    dom = str(m.get("cdn_domain") or m.get("domain") or "").strip()
+    if not dom or dom == "-" or dom == check_target:
+        continue
+    c_paths = list(paths_by_cdn.get(k) or [])
+    if not c_paths and secret_base:
+        subp = str((cdn_specs.get(k) or {}).get("subpath") or "").strip().strip("/")
+        if subp:
+            c_paths.append(f"{secret_base}/{subp}")
+    if c_paths:
+        for xp in c_paths:
+            _emit(dom, xp)
+    else:
+        _emit(dom, "")
+
+top_cdn = str(st.get("cdn_domain") or "").strip()
+if top_cdn and top_cdn != "-" and top_cdn != check_target and top_cdn not in seen_cdns:
+    top_subp = str((cdn_specs.get("cdn_yandex") or {}).get("subpath") or "default").strip().strip("/")
+    c_paths = list(paths_by_cdn.get("cdn_yandex") or [])
+    if not c_paths and secret_base:
+        c_paths.append(f"{secret_base}/{top_subp}")
+    if c_paths:
+        for xp in c_paths:
+            _emit(top_cdn, xp)
+    else:
+        _emit(top_cdn, "")
+
+for dom, xp in emitted:
+    print(f"{dom}|{xp}")
 PYEOF
 )
 
-        local cdn_domain
-        for cdn_domain in "${cdn_domains[@]}"; do
-            log "9. Проверка доступности CDN подписок (${cdn_domain})..."
-            local cdn_code
-            local cdn_err=0
-            cdn_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null)" || cdn_err=$?
-            if [[ "$cdn_code" == "200" && $cdn_err -eq 0 ]]; then
-                echo -e "  ${GREEN}✔${NC} Публичный CDN прокси (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
-            elif [[ $cdn_err -eq 60 ]]; then
-                echo -e "  ${RED}✗${NC} ОШИБКА TLS CDN: Сертификат для https://${cdn_domain} не прошел валидацию (curl error 60)!"
-                failed=$((failed + 1))
-            elif [[ "$cdn_code" == "502" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте узел ru_hub и CDN кэш)!"
-                failed=$((failed + 1))
-            elif [[ "$cdn_code" == "504" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: узел ru_hub или вышестоящий бот не ответили вовремя!"
-                echo -e "      ${YELLOW}→${NC} Проверьте доступность узла ru_hub и домена бота, а также логи /var/log/nginx/error.log на узле ru_hub."
-                failed=$((failed + 1))
-            elif [[ "$cdn_code" == "404" ]]; then
-                echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/ru_hub)!"
-                failed=$((failed + 1))
-            elif [[ $cdn_err -eq 28 ]]; then
-                echo -e "  ${RED}✗${NC} ТАЙМАУТ CDN (curl error 28): https://${cdn_domain}${sub_prefix}/ping не ответил вовремя!"
-                echo -e "      ${YELLOW}→${NC} Проверьте статус сети CDN и доступность домена из РФ."
-                failed=$((failed + 1))
-            elif [[ "$cdn_code" == "000" || $cdn_err -ne 0 ]]; then
-                local cdn_insecure
-                cdn_insecure="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null || echo "000")"
-                if [[ "$cdn_insecure" == "200" ]]; then
-                    echo -e "  ${RED}✗${NC} TLS ОШИБКА CDN: ${cdn_domain} отвечает 200 OK только без проверки SSL (curl -k)!"
-                    failed=$((failed + 1))
-                else
-                    echo -e "  ${RED}✗${NC} CDN ${cdn_domain} недоступен по сети с этого узла (код: $cdn_code, err: $cdn_err)"
-                    failed=$((failed + 1))
-                fi
+        _doctor_probe_xhttp() {
+            local label="$1"
+            local probe_url="$2"
+            local resolve_arg="${3:-}"
+            local xhttp_code xhttp_err=0
+            if [[ -n "$resolve_arg" ]]; then
+                xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --resolve "$resolve_arg" "$probe_url" 2>/dev/null)" || xhttp_err=$?
             else
-                echo -e "  ${RED}✗${NC} ОШИБКА: CDN вернул неожиданный HTTP код: $cdn_code (ожидался 200 OK)!"
+                xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$probe_url" 2>/dev/null)" || xhttp_err=$?
+            fi
+            if [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "200" || "$xhttp_code" == "400" || "$xhttp_code" == "405" || "$xhttp_code" == "409" || "$xhttp_code" == "413" ) ]]; then
+                echo -e "  ${GREEN}✔${NC} ${label} достигает Xray (HTTP ${xhttp_code})"
+            elif [[ "$xhttp_code" == "404" ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул 404 Not Found! Проверьте совпадение secret_base_path, Nginx и origin в панели CDN."
                 failed=$((failed + 1))
+            elif [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "301" || "$xhttp_code" == "302" || "$xhttp_code" == "303" || "$xhttp_code" == "307" || "$xhttp_code" == "308" ) ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул редирект HTTP ${xhttp_code}! Возможен перехват до Xray (редирект HTTP/CDN)."
+                failed=$((failed + 1))
+            elif [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "401" || "$xhttp_code" == "403" || "$xhttp_code" == "429" || "$xhttp_code" == "451" ) ]]; then
+                echo -e "  ${RED}✗${NC} ${label} заблокирован на CDN/WAF/Nginx (HTTP ${xhttp_code}, Xray не достигнут)!"
+                failed=$((failed + 1))
+            elif [[ "$xhttp_code" == "502" || "$xhttp_code" == "504" ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул ${xhttp_code} (ошибка upstream/Xray)!"
+                failed=$((failed + 1))
+            else
+                echo -e "  ${RED}✗${NC} ${label} недоступен или вернул неожиданный код (HTTP ${xhttp_code}, err: ${xhttp_err})"
+                failed=$((failed + 1))
+            fi
+        }
+
+        local cdn_entry cdn_domain xhttp_probe_path seen_local_xhttp="|" seen_ping_cdns="|"
+        for cdn_entry in "${cdn_entries[@]}"; do
+            cdn_domain="${cdn_entry%%|*}"
+            xhttp_probe_path="${cdn_entry#*|}"
+            if [[ "$seen_ping_cdns" != *"|${cdn_domain}|"* ]]; then
+                seen_ping_cdns+="${cdn_domain}|"
+                log "9. Проверка доступности CDN (${cdn_domain})..."
+                if [[ -n "$bot_dom_val" && "$bot_dom_val" != "-" ]]; then
+                    local cdn_code
+                    local cdn_err=0
+                    cdn_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null)" || cdn_err=$?
+                    if [[ "$cdn_code" == "200" && $cdn_err -eq 0 ]]; then
+                        echo -e "  ${GREEN}✔${NC} Публичный CDN прокси (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
+                    elif [[ $cdn_err -eq 60 ]]; then
+                        echo -e "  ${RED}✗${NC} ОШИБКА TLS CDN: Сертификат для https://${cdn_domain} не прошел валидацию (curl error 60)!"
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "502" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте узел ru_hub и CDN кэш)!"
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "504" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: узел ru_hub или вышестоящий бот не ответили вовремя!"
+                        echo -e "      ${YELLOW}→${NC} Проверьте доступность узла ru_hub и домена бота, а также логи /var/log/nginx/error.log на узле ru_hub."
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "404" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/ru_hub)!"
+                        failed=$((failed + 1))
+                    elif [[ $cdn_err -eq 28 ]]; then
+                        echo -e "  ${RED}✗${NC} ТАЙМАУТ CDN (curl error 28): https://${cdn_domain}${sub_prefix}/ping не ответил вовремя!"
+                        echo -e "      ${YELLOW}→${NC} Проверьте статус сети CDN и доступность домена из РФ."
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "000" || $cdn_err -ne 0 ]]; then
+                        local cdn_insecure
+                        cdn_insecure="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null || echo "000")"
+                        if [[ "$cdn_insecure" == "200" ]]; then
+                            echo -e "  ${RED}✗${NC} TLS ОШИБКА CDN: ${cdn_domain} отвечает 200 OK только без проверки SSL (curl -k)!"
+                            failed=$((failed + 1))
+                        else
+                            echo -e "  ${RED}✗${NC} CDN ${cdn_domain} недоступен по сети с этого узла (код: $cdn_code, err: $cdn_err)"
+                            failed=$((failed + 1))
+                        fi
+                    else
+                        echo -e "  ${RED}✗${NC} ОШИБКА: CDN вернул неожиданный HTTP код: $cdn_code (ожидался 200 OK)!"
+                        failed=$((failed + 1))
+                    fi
+                fi
+            fi
+
+            if [[ -n "$xhttp_probe_path" ]]; then
+                if [[ "$seen_local_xhttp" != *"|${xhttp_probe_path}|"* ]]; then
+                    seen_local_xhttp+="${xhttp_probe_path}|"
+                    _doctor_probe_xhttp "Локальный XHTTP (${xhttp_probe_path})" "https://${check_target}${xhttp_probe_path}" "${check_target}:443:127.0.0.1"
+                fi
+                _doctor_probe_xhttp "XHTTP через CDN (${cdn_domain}${xhttp_probe_path})" "https://${cdn_domain}${xhttp_probe_path}"
             fi
         done
     fi

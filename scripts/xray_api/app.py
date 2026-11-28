@@ -468,6 +468,26 @@ def _mask_uuid(val: str) -> str:
     return f"{val[:8]}...masked"
 
 
+def _extract_secret_base_from_xhttp_path(tag: str, raw_path: Any) -> str:
+    """Extract multi-segment secret base path from an XHTTP inbound path without truncating to 1 segment."""
+    if not isinstance(raw_path, str) or not raw_path.startswith("/"):
+        return ""
+    parts = [p for p in raw_path.strip("/").split("/") if p]
+    if not parts:
+        return ""
+    known_subpaths = {"default", "turboflare", "tf"}
+    if tag.startswith("just1k-wl-inbound-"):
+        raw_suffix = tag[len("just1k-wl-inbound-"):]
+        loc_code = raw_suffix.rsplit("__", 1)[0] if "__" in raw_suffix else raw_suffix
+        if loc_code and len(parts) >= 2 and parts[-1] == loc_code:
+            parts = parts[:-1]
+        if len(parts) >= 2 and parts[-1] in known_subpaths:
+            parts = parts[:-1]
+    elif len(parts) >= 2 and parts[-1] in known_subpaths:
+        parts = parts[:-1]
+    return f"/{'/'.join(parts)}"
+
+
 def get_secret_base_path() -> str:
     """Discovers canonical secret XHTTP base path configured for this RU hub node.
 
@@ -478,7 +498,9 @@ def get_secret_base_path() -> str:
             with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
                 st = json.load(f)
                 if isinstance(st, dict) and st.get("secret_base_path"):
-                    return st["secret_base_path"]
+                    raw_base = str(st["secret_base_path"]).strip().rstrip("/")
+                    if raw_base and raw_base != "-":
+                        return raw_base if raw_base.startswith("/") else f"/{raw_base}"
         except Exception as e:
             logger.warning("Could not read secret_base_path from %s: %s", STATE_FILE_PATH, e)
 
@@ -490,22 +512,24 @@ def get_secret_base_path() -> str:
                 inbounds = cfg.get("inbounds", [])
                 # Priority 1: tags matching just1k-wl-default
                 for ib in inbounds:
-                    tag = ib.get("tag", "")
+                    if not isinstance(ib, dict):
+                        continue
+                    tag = str(ib.get("tag") or "")
                     if tag == "just1k-wl-default":
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if path and path.startswith("/"):
-                            parts = [p for p in path.strip("/").split("/") if p]
-                            if parts:
-                                return f"/{parts[0]}"
+                        extracted = _extract_secret_base_from_xhttp_path(tag, path)
+                        if extracted:
+                            return extracted
                 # Priority 2: tags starting strictly with just1k-wl- (managed namespace)
                 for ib in inbounds:
-                    tag = ib.get("tag", "")
+                    if not isinstance(ib, dict):
+                        continue
+                    tag = str(ib.get("tag") or "")
                     if tag.startswith("just1k-wl-"):
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if path and path.startswith("/"):
-                            parts = [p for p in path.strip("/").split("/") if p]
-                            if parts:
-                                return f"/{parts[0]}"
+                        extracted = _extract_secret_base_from_xhttp_path(tag, path)
+                        if extracted:
+                            return extracted
         except Exception:
             pass
 
@@ -703,7 +727,7 @@ def _get_xhttp_location_routes() -> List[Dict[str, Any]]:
         if tag.startswith("just1k-wl-inbound-"):
             raw_suffix = tag[len("just1k-wl-inbound-"):]
             if "__" in raw_suffix:
-                loc_code, cdn_hint = raw_suffix.split("__", 1)
+                loc_code, cdn_hint = raw_suffix.rsplit("__", 1)
             else:
                 loc_code = raw_suffix
                 cdn_hint = enabled_cdns[0] if enabled_cdns else None
@@ -814,6 +838,78 @@ _last_restore_attempt_epoch: Optional[str] = None
 _RESTORE_FAILURE_COOLDOWN_SEC = 60.0
 
 
+def _entry_legacy_fallback_service(meta: Dict[str, Any]) -> str:
+    """Resolve canonical service for legacy entries lacking explicit service metadata."""
+    email_val = str(meta.get("email") or "").strip().lower()
+    if email_val.endswith(":wi"):
+        return "white_internet"
+    if email_val.endswith(":std"):
+        return "vless"
+    return resolve_effective_service(None)
+
+
+def _active_services_for_entry(meta: Dict[str, Any]) -> List[str]:
+    """Return canonicalized active service namespaces for a stored client entry."""
+    if meta.get("tombstone", False):
+        return []
+    service_states = meta.get("service_states")
+    if isinstance(service_states, dict) and service_states:
+        active: List[str] = []
+        for s, st in service_states.items():
+            if s and isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False):
+                canon = resolve_effective_service(str(s))
+                if canon not in active:
+                    active.append(canon)
+        return active
+    if not meta.get("is_active", True):
+        return []
+    raw_services = meta.get("services")
+    if isinstance(raw_services, list) and raw_services:
+        active = []
+        for s in raw_services:
+            if s:
+                canon = resolve_effective_service(str(s))
+                if canon not in active:
+                    active.append(canon)
+        return active
+    if meta.get("service"):
+        return [resolve_effective_service(str(meta["service"]))]
+    return [_entry_legacy_fallback_service(meta)]
+
+
+def _is_entry_active_for_service(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
+    """Return True if stored entry is active for eff_service (or any service when None)."""
+    active_services = _active_services_for_entry(meta)
+    if not active_services:
+        return False
+    if eff_service is None:
+        return True
+    return resolve_effective_service(eff_service) in active_services
+
+
+_INVENTORY_INACTIVE_LOOKBACK_SEC = 48 * 3600.0
+
+
+def _should_include_in_inventory(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
+    """Include active entries plus recent inactive/tombstoned service entries for residual cleanup."""
+    if _is_entry_active_for_service(meta, eff_service):
+        return True
+    if eff_service is not None:
+        canon_req = resolve_effective_service(eff_service)
+        service_states = meta.get("service_states")
+        if isinstance(service_states, dict):
+            now_ts = time.time()
+            for s, st in service_states.items():
+                if not s or resolve_effective_service(str(s)) != canon_req:
+                    continue
+                if isinstance(st, dict):
+                    raw_ts = st.get("updated_at") or meta.get("updated_at")
+                    if isinstance(raw_ts, (int, float)) and (now_ts - float(raw_ts)) > _INVENTORY_INACTIVE_LOOKBACK_SEC:
+                        continue
+                return True
+    return False
+
+
 def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     """Restores active persisted clients from disk into Xray RAM as temporary crash-recovery hint.
 
@@ -831,18 +927,7 @@ def restore_persisted_clients_to_xray() -> tuple[int, bool]:
     for client_uuid, meta in entries.items():
         if not isinstance(meta, dict):
             continue
-        service_states = meta.get("service_states")
-        if isinstance(service_states, dict) and service_states:
-            active_services = [
-                s
-                for s, st in service_states.items()
-                if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
-            ]
-        else:
-            if not meta.get("is_active", True) or meta.get("tombstone", False):
-                continue
-            active_services = meta.get("services") or ([meta.get("service")] if meta.get("service") else [None])
-
+        active_services = _active_services_for_entry(meta)
         if not active_services:
             continue
 
@@ -2224,9 +2309,15 @@ def _batch_sync_clients_sync(req: ClientBatchSyncRequest) -> Dict[str, Any]:
                 if isinstance(sync_res, dict) and sync_res.get("result") == "already_newer":
                     node_tombstone = bool(sync_res.get("tombstone", False))
                     node_state = sync_res.get("state")
-                    if (node_tombstone and desired_state == "active") or (node_state != desired_state):
+                    node_all_verified = bool(sync_res.get("all_inbounds_verified", True))
+                    if (
+                        (node_tombstone and desired_state == "active")
+                        or (node_state != desired_state)
+                        or not node_all_verified
+                    ):
                         failed[clean_uuid] = (
                             f"already_newer: node state={node_state} tombstone={node_tombstone} "
+                            f"all_inbounds_verified={node_all_verified} "
                             f"version={sync_res.get('version')}"
                         )
                     else:
@@ -2905,15 +2996,45 @@ async def delete_client(
         return await asyncio.to_thread(_delete_client_sync, clean_uuid, version, service)
 
 
-@app.post("/v1/clients/inventory")
-@app.get("/v1/clients/inventory")
-async def get_clients_inventory(
-    req: Optional[InventoryRequest] = None,
-    _: bool = Depends(verify_api_key),
-) -> Dict[str, Any]:
-    """
-    Returns verified observed runtime inventory directly from Xray memory across all managed inbounds.
-    """
+def _inventory_entry_version(
+    stored_entry: Optional[Dict[str, Any]],
+    eff_service: Optional[str],
+) -> Optional[int]:
+    """Resolve stored monotonic version scoped to eff_service (or entry-wide when unfiltered)."""
+    if not isinstance(stored_entry, dict):
+        return None
+    service_states = stored_entry.get("service_states")
+    raw_ver: Any = None
+    if eff_service:
+        if isinstance(service_states, dict) and service_states:
+            svc_meta = service_states.get(eff_service)
+            if not isinstance(svc_meta, dict):
+                for s_key, st_val in service_states.items():
+                    if client_store.canonicalize_service(s_key) == eff_service and isinstance(st_val, dict):
+                        svc_meta = st_val
+                        break
+            if isinstance(svc_meta, dict):
+                raw_ver = svc_meta.get("version")
+        elif _entry_legacy_fallback_service(stored_entry) == eff_service:
+            raw_ver = stored_entry.get("version")
+    else:
+        raw_ver = stored_entry.get("version")
+        if not (isinstance(raw_ver, int) and not isinstance(raw_ver, bool)) and isinstance(service_states, dict):
+            int_vers = [
+                st.get("version")
+                for st in service_states.values()
+                if isinstance(st, dict)
+                and isinstance(st.get("version"), int)
+                and not isinstance(st.get("version"), bool)
+            ]
+            raw_ver = max(int_vers, default=None)
+    if isinstance(raw_ver, int) and not isinstance(raw_ver, bool):
+        return raw_ver
+    return None
+
+
+def _get_clients_inventory_sync(req: Optional[InventoryRequest] = None) -> Dict[str, Any]:
+    """Run blocking client_store read, epoch sync, and Xray gRPC presence probes off the event loop."""
     target_inbounds = (
         get_target_inbounds(service=req.service)
         if (req and req.service)
@@ -2940,7 +3061,7 @@ async def get_clients_inventory(
 
     stored_entries = {}
     try:
-        stored_entries = await asyncio.to_thread(client_store.load_client_entries)
+        stored_entries = client_store.load_client_entries()
     except ClientStoreCorruptedError as e:
         logger.critical("Inventory cannot load entries from corrupt store: %s", e)
         raise HTTPException(
@@ -2950,13 +3071,12 @@ async def get_clients_inventory(
     except Exception as e:
         logger.warning("Could not load stored client entries for inventory: %s", e)
 
+    eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
     if not client_ids:
         client_ids = [
             cid
             for cid, meta in stored_entries.items()
-            if isinstance(meta, dict)
-            and not meta.get("tombstone", False)
-            and meta.get("is_active", True) is True
+            if isinstance(meta, dict) and _should_include_in_inventory(meta, eff_req_svc)
         ]
 
     inventory: Dict[str, Any] = {}
@@ -2967,7 +3087,6 @@ async def get_clients_inventory(
             continue
 
         inbound_presence: Dict[str, bool] = {}
-        eff_req_svc = resolve_effective_service(req.service) if (req and req.service) else None
         stored_cid_entry = (
             stored_entries.get(clean_cid) if isinstance(stored_entries, dict) else None
         )
@@ -2995,10 +3114,12 @@ async def get_clients_inventory(
         else:
             observed_state = "partial"
 
+        entry_version = _inventory_entry_version(stored_cid_entry, eff_req_svc)
         inventory[clean_cid] = {
             "observed_state": observed_state,
             "inbounds": inbound_presence,
             "all_inbounds_matched": (all_active or all_disabled),
+            "version": entry_version,
         }
 
     return {
@@ -3008,6 +3129,18 @@ async def get_clients_inventory(
         "inventory": inventory,
         "count": len(inventory),
     }
+
+
+@app.post("/v1/clients/inventory")
+@app.get("/v1/clients/inventory")
+async def get_clients_inventory(
+    req: Optional[InventoryRequest] = None,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """
+    Returns verified observed runtime inventory directly from Xray memory across all managed inbounds.
+    """
+    return await asyncio.to_thread(_get_clients_inventory_sync, req)
 
 
 

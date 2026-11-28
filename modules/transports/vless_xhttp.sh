@@ -30,6 +30,20 @@ vless_xhttp_has_child_cdns() {
     is_any_child_module_enabled "vless_xhttp"
 }
 
+_restore_xhttp_state_key() {
+    local key="$1"
+    local prev_val="$2"
+    if [[ "$prev_val" == "__MISSING__" ]]; then
+        if declare -F del_state_val >/dev/null 2>&1; then
+            del_state_val "$key" 2>/dev/null || true
+        else
+            set_state_val "$key" "" 2>/dev/null || true
+        fi
+    else
+        set_state_val "$key" "$prev_val" 2>/dev/null || true
+    fi
+}
+
 vless_xhttp_install() {
     check_root
     init_state_dir
@@ -50,11 +64,15 @@ vless_xhttp_install() {
         return 1
     fi
 
+    local prev_secret prev_bot_dom prev_sub_prefix
+    prev_secret="$(get_state_val "secret_base_path" "__MISSING__")"
+    prev_bot_dom="$(get_state_val "bot_domain" "__MISSING__")"
+    prev_sub_prefix="$(get_state_val "sub_path_prefix" "__MISSING__")"
+
     local secret_path
     secret_path="$(get_state_val "secret_base_path" "")"
     if [[ -z "$secret_path" || "$secret_path" == "-" ]]; then
         secret_path="/assets_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
-        set_state_val "secret_base_path" "$secret_path"
     fi
 
     local cur_bot_dom input_bot_dom=""
@@ -94,6 +112,7 @@ except Exception:
 
     local mod_json
     mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "bot_domain": sys.argv[1], "sub_path_prefix": sys.argv[2]}))' "$input_bot_dom" "$sub_prefix")"
+    set_state_val "secret_base_path" "$secret_path"
     set_module_config "vless_xhttp" "$mod_json"
     [[ -n "$input_bot_dom" ]] && set_state_val "bot_domain" "$input_bot_dom"
     set_state_val "sub_path_prefix" "$sub_prefix"
@@ -108,6 +127,9 @@ except Exception:
         else
             remove_module_config "vless_xhttp"
         fi
+        _restore_xhttp_state_key "secret_base_path" "$prev_secret"
+        _restore_xhttp_state_key "bot_domain" "$prev_bot_dom"
+        _restore_xhttp_state_key "sub_path_prefix" "$prev_sub_prefix"
         warn "Не удалось применить базовый модуль VLESS XHTTP. Выполнен откат."
         return 1
     fi

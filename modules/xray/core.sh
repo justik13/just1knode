@@ -476,6 +476,7 @@ update_node() {
                 if ! cp -a "${node_dir}/." "$node_backup/" 2>/dev/null; then
                     rm -rf "$backup_root" "$tmp_tar" "$tmp_dir"
                     error "Не удалось создать резервную копию ${node_dir}. Обновление отменено."
+                    return 1
                 fi
             fi
 
@@ -489,6 +490,7 @@ update_node() {
                 if ! cp -a "${api_dir}/." "$code_backup/" 2>/dev/null; then
                     rm -rf "$backup_root" "$tmp_tar" "$tmp_dir"
                     error "Не удалось создать резервную копию исходных файлов ${api_dir}. Обновление отменено."
+                    return 1
                 fi
                 rm -rf "$code_backup"/venv*
 
@@ -497,6 +499,7 @@ update_node() {
                     if ! cp -a "${api_dir}/venv" "$venv_backup" 2>/dev/null; then
                         rm -rf "$backup_root" "$venv_backup" "$tmp_tar" "$tmp_dir"
                         error "Не удалось создать резервную копию venv для ${api_dir}. Обновление отменено."
+                        return 1
                     fi
                 fi
             fi
