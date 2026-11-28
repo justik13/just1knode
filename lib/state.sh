@@ -240,6 +240,8 @@ try:
         if isinstance(mods, dict) and arg1 in mods:
             del mods[arg1]
             data['modules'] = mods
+    elif action == 'del_key':
+        data.pop(arg1, None)
     else:
         raise ValueError('Unknown mutation action: ' + action)
 
@@ -266,6 +268,10 @@ finally:
 
 set_state_json_val() {
     _state_mutate_json "set_json" "$1" "$2"
+}
+
+del_state_val() {
+    _state_mutate_json "del_key" "$1" ""
 }
 
 is_module_enabled() {

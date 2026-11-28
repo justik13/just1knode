@@ -468,6 +468,26 @@ def _mask_uuid(val: str) -> str:
     return f"{val[:8]}...masked"
 
 
+def _extract_secret_base_from_xhttp_path(tag: str, raw_path: Any) -> str:
+    """Extract multi-segment secret base path from an XHTTP inbound path without truncating to 1 segment."""
+    if not isinstance(raw_path, str) or not raw_path.startswith("/"):
+        return ""
+    parts = [p for p in raw_path.strip("/").split("/") if p]
+    if not parts:
+        return ""
+    known_subpaths = {"default", "turboflare", "tf"}
+    if tag.startswith("just1k-wl-inbound-"):
+        raw_suffix = tag[len("just1k-wl-inbound-"):]
+        loc_code = raw_suffix.rsplit("__", 1)[0] if "__" in raw_suffix else raw_suffix
+        if loc_code and len(parts) >= 2 and parts[-1] == loc_code:
+            parts = parts[:-1]
+        if len(parts) >= 2 and parts[-1] in known_subpaths:
+            parts = parts[:-1]
+    elif len(parts) >= 2 and parts[-1] in known_subpaths:
+        parts = parts[:-1]
+    return f"/{'/'.join(parts)}"
+
+
 def get_secret_base_path() -> str:
     """Discovers canonical secret XHTTP base path configured for this RU hub node.
 
@@ -478,7 +498,9 @@ def get_secret_base_path() -> str:
             with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
                 st = json.load(f)
                 if isinstance(st, dict) and st.get("secret_base_path"):
-                    return st["secret_base_path"]
+                    raw_base = str(st["secret_base_path"]).strip().rstrip("/")
+                    if raw_base and raw_base != "-":
+                        return raw_base if raw_base.startswith("/") else f"/{raw_base}"
         except Exception as e:
             logger.warning("Could not read secret_base_path from %s: %s", STATE_FILE_PATH, e)
 
@@ -490,22 +512,24 @@ def get_secret_base_path() -> str:
                 inbounds = cfg.get("inbounds", [])
                 # Priority 1: tags matching just1k-wl-default
                 for ib in inbounds:
-                    tag = ib.get("tag", "")
+                    if not isinstance(ib, dict):
+                        continue
+                    tag = str(ib.get("tag") or "")
                     if tag == "just1k-wl-default":
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if path and path.startswith("/"):
-                            parts = [p for p in path.strip("/").split("/") if p]
-                            if parts:
-                                return f"/{parts[0]}"
+                        extracted = _extract_secret_base_from_xhttp_path(tag, path)
+                        if extracted:
+                            return extracted
                 # Priority 2: tags starting strictly with just1k-wl- (managed namespace)
                 for ib in inbounds:
-                    tag = ib.get("tag", "")
+                    if not isinstance(ib, dict):
+                        continue
+                    tag = str(ib.get("tag") or "")
                     if tag.startswith("just1k-wl-"):
                         path = ib.get("streamSettings", {}).get("xhttpSettings", {}).get("path", "")
-                        if path and path.startswith("/"):
-                            parts = [p for p in path.strip("/").split("/") if p]
-                            if parts:
-                                return f"/{parts[0]}"
+                        extracted = _extract_secret_base_from_xhttp_path(tag, path)
+                        if extracted:
+                            return extracted
         except Exception:
             pass
 
@@ -814,18 +838,43 @@ _last_restore_attempt_epoch: Optional[str] = None
 _RESTORE_FAILURE_COOLDOWN_SEC = 60.0
 
 
-def _active_services_for_entry(meta: Dict[str, Any]) -> List[Optional[str]]:
-    """Return active service namespaces for a stored client entry."""
+def _entry_legacy_fallback_service(meta: Dict[str, Any]) -> str:
+    """Resolve canonical service for legacy entries lacking explicit service metadata."""
+    email_val = str(meta.get("email") or "").strip().lower()
+    if email_val.endswith(":wi"):
+        return "white_internet"
+    if email_val.endswith(":std"):
+        return "vless"
+    return resolve_effective_service(None)
+
+
+def _active_services_for_entry(meta: Dict[str, Any]) -> List[str]:
+    """Return canonicalized active service namespaces for a stored client entry."""
+    if meta.get("tombstone", False):
+        return []
     service_states = meta.get("service_states")
     if isinstance(service_states, dict) and service_states:
-        return [
-            s
-            for s, st in service_states.items()
-            if isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False)
-        ]
-    if not meta.get("is_active", True) or meta.get("tombstone", False):
+        active: List[str] = []
+        for s, st in service_states.items():
+            if s and isinstance(st, dict) and st.get("is_active") is True and not st.get("tombstone", False):
+                canon = resolve_effective_service(str(s))
+                if canon not in active:
+                    active.append(canon)
+        return active
+    if not meta.get("is_active", True):
         return []
-    return meta.get("services") or ([meta.get("service")] if meta.get("service") else [None])
+    raw_services = meta.get("services")
+    if isinstance(raw_services, list) and raw_services:
+        active = []
+        for s in raw_services:
+            if s:
+                canon = resolve_effective_service(str(s))
+                if canon not in active:
+                    active.append(canon)
+        return active
+    if meta.get("service"):
+        return [resolve_effective_service(str(meta["service"]))]
+    return [_entry_legacy_fallback_service(meta)]
 
 
 def _is_entry_active_for_service(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
@@ -835,7 +884,22 @@ def _is_entry_active_for_service(meta: Dict[str, Any], eff_service: Optional[str
         return False
     if eff_service is None:
         return True
-    return eff_service in active_services or None in active_services
+    return resolve_effective_service(eff_service) in active_services
+
+
+def _should_include_in_inventory(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
+    """Include active entries plus service-tracked entries (even inactive/tombstoned) for residual cleanup."""
+    if _is_entry_active_for_service(meta, eff_service):
+        return True
+    if eff_service is not None:
+        canon_req = resolve_effective_service(eff_service)
+        service_states = meta.get("service_states")
+        if isinstance(service_states, dict):
+            return any(
+                s and resolve_effective_service(str(s)) == canon_req
+                for s in service_states
+            )
+    return False
 
 
 def restore_persisted_clients_to_xray() -> tuple[int, bool]:
@@ -2860,7 +2924,7 @@ async def get_clients_inventory(
     running_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
     if not running_epoch and epoch_manager:
         running_epoch = epoch_manager.load_state().get("node_epoch")
-    sync_active_users_with_epoch(running_epoch)
+    await asyncio.to_thread(sync_active_users_with_epoch, running_epoch)
 
     if not target_inbounds:
         return {
@@ -2893,7 +2957,7 @@ async def get_clients_inventory(
         client_ids = [
             cid
             for cid, meta in stored_entries.items()
-            if isinstance(meta, dict) and _is_entry_active_for_service(meta, eff_req_svc)
+            if isinstance(meta, dict) and _should_include_in_inventory(meta, eff_req_svc)
         ]
 
     inventory: Dict[str, Any] = {}

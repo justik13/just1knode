@@ -30,7 +30,43 @@ vless_xhttp_has_child_cdns() {
     is_any_child_module_enabled "vless_xhttp"
 }
 
+_normalize_xhttp_secret_path() {
+    local raw="$1"
+    raw="$(echo "$raw" | tr -d '[:space:]')"
+    if [[ -n "$raw" && "${raw:0:1}" != "/" ]]; then
+        raw="/${raw}"
+    fi
+    raw="${raw%/}"
+    printf '%s' "$raw"
+}
+
+_is_valid_xhttp_secret_path() {
+    local p="$1"
+    [[ "$p" =~ ^/[A-Za-z0-9._/~-]+$ ]] || return 1
+    (( ${#p} >= 3 )) || return 1
+    [[ "$p" != *".."* && "$p" != *"//"* ]] || return 1
+    [[ "$p" != "/." && "$p" != *"/./"* && "$p" != *"/." ]] || return 1
+    [[ "$p" != "/sub" && "$p" != "/sub/"* && "$p" != "/std" && "$p" != "/std/"* ]] || return 1
+    return 0
+}
+
+_restore_xhttp_state_key() {
+    local key="$1"
+    local prev_val="$2"
+    if [[ "$prev_val" == "__MISSING__" ]]; then
+        if declare -F del_state_val >/dev/null 2>&1; then
+            del_state_val "$key" 2>/dev/null || true
+        else
+            set_state_val "$key" "" 2>/dev/null || true
+        fi
+    else
+        set_state_val "$key" "$prev_val" 2>/dev/null || true
+    fi
+}
+
 vless_xhttp_install() {
+    local arg_secret="${1:-}"
+    local arg_bot_dom="${2:-}"
     check_root
     init_state_dir
     local role domain
@@ -50,30 +86,45 @@ vless_xhttp_install() {
         return 1
     fi
 
-    local secret_path input_secret_path=""
-    secret_path="$(get_state_val "secret_base_path" "")"
-    if [[ -z "$secret_path" || "$secret_path" == "-" ]]; then
-        secret_path="/assets_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
-    fi
-    if [[ -t 0 ]]; then
-        echo -e "${DIM:-}Секретный префикс XHTTP (одинаковый для всех ru_hub за общим CDN, Enter чтобы оставить текущий):${NC}"
-        read -rp "Секретный префикс [${secret_path}]: " input_secret_path || true
-        input_secret_path="${input_secret_path:-$secret_path}"
-        input_secret_path="$(echo "$input_secret_path" | tr -d '[:space:]')"
-        [[ -n "$input_secret_path" && "${input_secret_path:0:1}" != "/" ]] && input_secret_path="/${input_secret_path}"
-        input_secret_path="${input_secret_path%/}"
-        if [[ "$input_secret_path" =~ ^/[A-Za-z0-9._-]+$ ]] && [[ "$input_secret_path" != "/sub" && "$input_secret_path" != "/std" && "$input_secret_path" != *".."* ]]; then
-            secret_path="$input_secret_path"
-        else
-            warn "Некорректный префикс '$input_secret_path' (ожидается вид /assets_xxxxxxxx). Оставлен '$secret_path'."
+    local prev_secret prev_bot_dom prev_sub_prefix
+    prev_secret="$(get_state_val "secret_base_path" "__MISSING__")"
+    prev_bot_dom="$(get_state_val "bot_domain" "__MISSING__")"
+    prev_sub_prefix="$(get_state_val "sub_path_prefix" "__MISSING__")"
+
+    local secret_path input_secret_path="" explicit_secret=""
+    explicit_secret="${arg_secret:-${JUST1KNODE_SECRET_BASE_PATH:-}}"
+    if [[ -n "$explicit_secret" ]]; then
+        input_secret_path="$(_normalize_xhttp_secret_path "$explicit_secret")"
+        if ! _is_valid_xhttp_secret_path "$input_secret_path"; then
+            warn "Некорректный секретный префикс '$explicit_secret' (ожидается /assets_xxxxxxxx или /assets/v1, минимум 2 символа пути, без '..' и '//')."
+            return 1
+        fi
+        secret_path="$input_secret_path"
+    else
+        secret_path="$(get_state_val "secret_base_path" "")"
+        if [[ -z "$secret_path" || "$secret_path" == "-" ]]; then
+            secret_path="/assets_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
+        fi
+        if [[ -t 0 ]]; then
+            echo -e "${DIM:-}Секретный префикс XHTTP (одинаковый для всех ru_hub за общим CDN, Enter чтобы оставить текущий):${NC}"
+            read -rp "Секретный префикс [${secret_path}]: " input_secret_path || true
+            input_secret_path="${input_secret_path:-$secret_path}"
+            input_secret_path="$(_normalize_xhttp_secret_path "$input_secret_path")"
+            if _is_valid_xhttp_secret_path "$input_secret_path"; then
+                secret_path="$input_secret_path"
+            else
+                warn "Некорректный префикс '$input_secret_path' (ожидается вид /assets_xxxxxxxx или /assets/v1). Оставлен '$secret_path'."
+            fi
         fi
     fi
-    set_state_val "secret_base_path" "$secret_path"
 
-    local cur_bot_dom input_bot_dom=""
+    local cur_bot_dom input_bot_dom="" explicit_bot_dom=""
     cur_bot_dom="$(get_state_val "bot_domain" "")"
     [[ "$cur_bot_dom" == "-" ]] && cur_bot_dom=""
-    if [[ -t 0 ]]; then
+    explicit_bot_dom="${arg_bot_dom:-${JUST1KNODE_BOT_DOMAIN:-}}"
+    if [[ -n "$explicit_bot_dom" ]]; then
+        input_bot_dom="$(normalize_domain "$explicit_bot_dom" 2>/dev/null || echo "$explicit_bot_dom")"
+    elif [[ -t 0 ]]; then
         echo -e "${DIM:-}Опционально: домен Telegram-бота для проксирования /sub/ (Enter чтобы пропустить):${NC}"
         read -rp "Домен бота [${cur_bot_dom:-нет}]: " input_bot_dom || true
         input_bot_dom="${input_bot_dom:-$cur_bot_dom}"
@@ -107,6 +158,7 @@ except Exception:
 
     local mod_json
     mod_json="$(python3 -c 'import json,sys; print(json.dumps({"enabled": True, "bot_domain": sys.argv[1], "sub_path_prefix": sys.argv[2]}))' "$input_bot_dom" "$sub_prefix")"
+    set_state_val "secret_base_path" "$secret_path"
     set_module_config "vless_xhttp" "$mod_json"
     [[ -n "$input_bot_dom" ]] && set_state_val "bot_domain" "$input_bot_dom"
     set_state_val "sub_path_prefix" "$sub_prefix"
@@ -121,6 +173,9 @@ except Exception:
         else
             remove_module_config "vless_xhttp"
         fi
+        _restore_xhttp_state_key "secret_base_path" "$prev_secret"
+        _restore_xhttp_state_key "bot_domain" "$prev_bot_dom"
+        _restore_xhttp_state_key "sub_path_prefix" "$prev_sub_prefix"
         warn "Не удалось применить базовый модуль VLESS XHTTP. Выполнен откат."
         return 1
     fi

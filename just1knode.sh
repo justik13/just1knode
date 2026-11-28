@@ -1073,8 +1073,15 @@ for k, sp in cdn_specs.items():
     if isinstance(sp, dict) and sp.get("tag"):
         tag_to_cdn[str(sp["tag"])] = str(k)
 
-loc_paths_by_cdn = {}
-base_paths_by_cdn = {}
+paths_by_cdn = {}
+untyped_loc_paths = []
+
+
+def _add_path(bucket, val):
+    if val and val not in bucket:
+        bucket.append(val)
+
+
 for ib in (xcfg.get("inbounds") or []):
     if not isinstance(ib, dict):
         continue
@@ -1085,35 +1092,67 @@ for ib in (xcfg.get("inbounds") or []):
     p = str((ss.get("xhttpSettings") or {}).get("path") or "").strip()
     if not p:
         continue
-    if tag.startswith("just1k-wl-inbound-") and "__" in tag:
-        cdn_id = tag.rsplit("__", 1)[1]
-        loc_paths_by_cdn.setdefault(cdn_id, p)
+    if tag.startswith("just1k-wl-inbound-"):
+        if "__" in tag:
+            cdn_id = tag.rsplit("__", 1)[1]
+            _add_path(paths_by_cdn.setdefault(cdn_id, []), p)
+        else:
+            _add_path(untyped_loc_paths, p)
     elif tag in tag_to_cdn:
-        base_paths_by_cdn[tag_to_cdn[tag]] = p
+        _add_path(paths_by_cdn.setdefault(tag_to_cdn[tag], []), p)
 
 secret_base = str(st.get("secret_base_path") or "").strip().rstrip("/")
-seen = {}
 mods = st.get("modules") if isinstance(st.get("modules"), dict) else {}
-for k, m in mods.items():
-    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled"):
-        dom = str(m.get("cdn_domain") or m.get("domain") or "").strip()
-        if not dom or dom == "-" or dom == check_target:
-            continue
-        x_path = loc_paths_by_cdn.get(k) or base_paths_by_cdn.get(k) or ""
-        if not x_path and secret_base:
-            subp = str((cdn_specs.get(k) or {}).get("subpath") or "").strip().strip("/")
-            if subp:
-                x_path = f"{secret_base}/{subp}"
-        if dom not in seen or (x_path and not seen[dom]):
-            seen[dom] = x_path
+enabled_cdns = [
+    (k, m)
+    for k, m in mods.items()
+    if str(k).startswith("cdn_") and isinstance(m, dict) and m.get("enabled")
+]
+for p in untyped_loc_paths:
+    target_k = enabled_cdns[0][0] if enabled_cdns else "cdn_yandex"
+    _add_path(paths_by_cdn.setdefault(target_k, []), p)
+
+emitted = []
+seen_pairs = set()
+seen_cdns = set()
+
+
+def _emit(dom_val, xp_val):
+    pair = (dom_val, xp_val)
+    if pair not in seen_pairs:
+        seen_pairs.add(pair)
+        seen_cdns.add(dom_val)
+        emitted.append(pair)
+
+
+for k, m in enabled_cdns:
+    dom = str(m.get("cdn_domain") or m.get("domain") or "").strip()
+    if not dom or dom == "-" or dom == check_target:
+        continue
+    c_paths = list(paths_by_cdn.get(k) or [])
+    if not c_paths and secret_base:
+        subp = str((cdn_specs.get(k) or {}).get("subpath") or "").strip().strip("/")
+        if subp:
+            c_paths.append(f"{secret_base}/{subp}")
+    if c_paths:
+        for xp in c_paths:
+            _emit(dom, xp)
+    else:
+        _emit(dom, "")
 
 top_cdn = str(st.get("cdn_domain") or "").strip()
-if top_cdn and top_cdn != "-" and top_cdn != check_target and top_cdn not in seen:
+if top_cdn and top_cdn != "-" and top_cdn != check_target and top_cdn not in seen_cdns:
     top_subp = str((cdn_specs.get("cdn_yandex") or {}).get("subpath") or "default").strip().strip("/")
-    x_path = loc_paths_by_cdn.get("cdn_yandex") or base_paths_by_cdn.get("cdn_yandex") or (f"{secret_base}/{top_subp}" if secret_base else "")
-    seen[top_cdn] = x_path
+    c_paths = list(paths_by_cdn.get("cdn_yandex") or [])
+    if not c_paths and secret_base:
+        c_paths.append(f"{secret_base}/{top_subp}")
+    if c_paths:
+        for xp in c_paths:
+            _emit(top_cdn, xp)
+    else:
+        _emit(top_cdn, "")
 
-for dom, xp in seen.items():
+for dom, xp in emitted:
     print(f"{dom}|{xp}")
 PYEOF
 )
@@ -1128,61 +1167,70 @@ PYEOF
             else
                 xhttp_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$probe_url" 2>/dev/null)" || xhttp_err=$?
             fi
-            if [[ $xhttp_err -eq 0 && "$xhttp_code" != "404" && "$xhttp_code" != "502" && "$xhttp_code" != "504" && "$xhttp_code" != "000" ]]; then
+            if [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "200" || "$xhttp_code" == "400" || "$xhttp_code" == "405" || "$xhttp_code" == "409" || "$xhttp_code" == "413" ) ]]; then
                 echo -e "  ${GREEN}✔${NC} ${label} достигает Xray (HTTP ${xhttp_code})"
             elif [[ "$xhttp_code" == "404" ]]; then
                 echo -e "  ${RED}✗${NC} ${label} вернул 404 Not Found! Проверьте совпадение secret_base_path, Nginx и origin в панели CDN."
+                failed=$((failed + 1))
+            elif [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "301" || "$xhttp_code" == "302" || "$xhttp_code" == "303" || "$xhttp_code" == "307" || "$xhttp_code" == "308" ) ]]; then
+                echo -e "  ${RED}✗${NC} ${label} вернул редирект HTTP ${xhttp_code}! Возможен перехват до Xray (редирект HTTP/CDN)."
+                failed=$((failed + 1))
+            elif [[ $xhttp_err -eq 0 && ( "$xhttp_code" == "401" || "$xhttp_code" == "403" || "$xhttp_code" == "429" || "$xhttp_code" == "451" ) ]]; then
+                echo -e "  ${RED}✗${NC} ${label} заблокирован на CDN/WAF/Nginx (HTTP ${xhttp_code}, Xray не достигнут)!"
                 failed=$((failed + 1))
             elif [[ "$xhttp_code" == "502" || "$xhttp_code" == "504" ]]; then
                 echo -e "  ${RED}✗${NC} ${label} вернул ${xhttp_code} (ошибка upstream/Xray)!"
                 failed=$((failed + 1))
             else
-                echo -e "  ${RED}✗${NC} ${label} недоступен (HTTP ${xhttp_code}, err: ${xhttp_err})"
+                echo -e "  ${RED}✗${NC} ${label} недоступен или вернул неожиданный код (HTTP ${xhttp_code}, err: ${xhttp_err})"
                 failed=$((failed + 1))
             fi
         }
 
-        local cdn_entry cdn_domain xhttp_probe_path seen_local_xhttp="|"
+        local cdn_entry cdn_domain xhttp_probe_path seen_local_xhttp="|" seen_ping_cdns="|"
         for cdn_entry in "${cdn_entries[@]}"; do
             cdn_domain="${cdn_entry%%|*}"
             xhttp_probe_path="${cdn_entry#*|}"
-            log "9. Проверка доступности CDN (${cdn_domain})..."
-            if [[ -n "$bot_dom_val" && "$bot_dom_val" != "-" ]]; then
-                local cdn_code
-                local cdn_err=0
-                cdn_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null)" || cdn_err=$?
-                if [[ "$cdn_code" == "200" && $cdn_err -eq 0 ]]; then
-                    echo -e "  ${GREEN}✔${NC} Публичный CDN прокси (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
-                elif [[ $cdn_err -eq 60 ]]; then
-                    echo -e "  ${RED}✗${NC} ОШИБКА TLS CDN: Сертификат для https://${cdn_domain} не прошел валидацию (curl error 60)!"
-                    failed=$((failed + 1))
-                elif [[ "$cdn_code" == "502" ]]; then
-                    echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте узел ru_hub и CDN кэш)!"
-                    failed=$((failed + 1))
-                elif [[ "$cdn_code" == "504" ]]; then
-                    echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: узел ru_hub или вышестоящий бот не ответили вовремя!"
-                    echo -e "      ${YELLOW}→${NC} Проверьте доступность узла ru_hub и домена бота, а также логи /var/log/nginx/error.log на узле ru_hub."
-                    failed=$((failed + 1))
-                elif [[ "$cdn_code" == "404" ]]; then
-                    echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/ru_hub)!"
-                    failed=$((failed + 1))
-                elif [[ $cdn_err -eq 28 ]]; then
-                    echo -e "  ${RED}✗${NC} ТАЙМАУТ CDN (curl error 28): https://${cdn_domain}${sub_prefix}/ping не ответил вовремя!"
-                    echo -e "      ${YELLOW}→${NC} Проверьте статус сети CDN и доступность домена из РФ."
-                    failed=$((failed + 1))
-                elif [[ "$cdn_code" == "000" || $cdn_err -ne 0 ]]; then
-                    local cdn_insecure
-                    cdn_insecure="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null || echo "000")"
-                    if [[ "$cdn_insecure" == "200" ]]; then
-                        echo -e "  ${RED}✗${NC} TLS ОШИБКА CDN: ${cdn_domain} отвечает 200 OK только без проверки SSL (curl -k)!"
+            if [[ "$seen_ping_cdns" != *"|${cdn_domain}|"* ]]; then
+                seen_ping_cdns+="${cdn_domain}|"
+                log "9. Проверка доступности CDN (${cdn_domain})..."
+                if [[ -n "$bot_dom_val" && "$bot_dom_val" != "-" ]]; then
+                    local cdn_code
+                    local cdn_err=0
+                    cdn_code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null)" || cdn_err=$?
+                    if [[ "$cdn_code" == "200" && $cdn_err -eq 0 ]]; then
+                        echo -e "  ${GREEN}✔${NC} Публичный CDN прокси (${sub_prefix}/ping) отвечает 200 OK (TLS валиден)"
+                    elif [[ $cdn_err -eq 60 ]]; then
+                        echo -e "  ${RED}✗${NC} ОШИБКА TLS CDN: Сертификат для https://${cdn_domain} не прошел валидацию (curl error 60)!"
                         failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "502" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 502 Bad Gateway (проверьте узел ru_hub и CDN кэш)!"
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "504" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 504 Gateway Timeout: узел ru_hub или вышестоящий бот не ответили вовремя!"
+                        echo -e "      ${YELLOW}→${NC} Проверьте доступность узла ru_hub и домена бота, а также логи /var/log/nginx/error.log на узле ru_hub."
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "404" ]]; then
+                        echo -e "  ${RED}✗${NC} CDN вернул 404 Not Found (эндпоинт ${sub_prefix}/ping не найден на CDN/ru_hub)!"
+                        failed=$((failed + 1))
+                    elif [[ $cdn_err -eq 28 ]]; then
+                        echo -e "  ${RED}✗${NC} ТАЙМАУТ CDN (curl error 28): https://${cdn_domain}${sub_prefix}/ping не ответил вовремя!"
+                        echo -e "      ${YELLOW}→${NC} Проверьте статус сети CDN и доступность домена из РФ."
+                        failed=$((failed + 1))
+                    elif [[ "$cdn_code" == "000" || $cdn_err -ne 0 ]]; then
+                        local cdn_insecure
+                        cdn_insecure="$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 10 "https://${cdn_domain}${sub_prefix}/ping" 2>/dev/null || echo "000")"
+                        if [[ "$cdn_insecure" == "200" ]]; then
+                            echo -e "  ${RED}✗${NC} TLS ОШИБКА CDN: ${cdn_domain} отвечает 200 OK только без проверки SSL (curl -k)!"
+                            failed=$((failed + 1))
+                        else
+                            echo -e "  ${RED}✗${NC} CDN ${cdn_domain} недоступен по сети с этого узла (код: $cdn_code, err: $cdn_err)"
+                            failed=$((failed + 1))
+                        fi
                     else
-                        echo -e "  ${RED}✗${NC} CDN ${cdn_domain} недоступен по сети с этого узла (код: $cdn_code, err: $cdn_err)"
+                        echo -e "  ${RED}✗${NC} ОШИБКА: CDN вернул неожиданный HTTP код: $cdn_code (ожидался 200 OK)!"
                         failed=$((failed + 1))
                     fi
-                else
-                    echo -e "  ${RED}✗${NC} ОШИБКА: CDN вернул неожиданный HTTP код: $cdn_code (ожидался 200 OK)!"
-                    failed=$((failed + 1))
                 fi
             fi
 
@@ -2103,7 +2151,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     case "$_m_act" in
                         install|setup)
                             if declare -F "${_m_id}_install" >/dev/null 2>&1; then
-                                "${_m_id}_install"
+                                "${_m_id}_install" "${@:4}"
                             else
                                 error "Модуль '$_m_id' не поддерживает установку."
                                 exit 1
