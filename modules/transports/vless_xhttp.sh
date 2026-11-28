@@ -50,12 +50,25 @@ vless_xhttp_install() {
         return 1
     fi
 
-    local secret_path
+    local secret_path input_secret_path=""
     secret_path="$(get_state_val "secret_base_path" "")"
     if [[ -z "$secret_path" || "$secret_path" == "-" ]]; then
         secret_path="/assets_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
-        set_state_val "secret_base_path" "$secret_path"
     fi
+    if [[ -t 0 ]]; then
+        echo -e "${DIM:-}Секретный префикс XHTTP (одинаковый для всех ru_hub за общим CDN, Enter чтобы оставить текущий):${NC}"
+        read -rp "Секретный префикс [${secret_path}]: " input_secret_path || true
+        input_secret_path="${input_secret_path:-$secret_path}"
+        input_secret_path="$(echo "$input_secret_path" | tr -d '[:space:]')"
+        [[ -n "$input_secret_path" && "${input_secret_path:0:1}" != "/" ]] && input_secret_path="/${input_secret_path}"
+        input_secret_path="${input_secret_path%/}"
+        if [[ "$input_secret_path" =~ ^/[A-Za-z0-9._-]+$ ]] && [[ "$input_secret_path" != "/sub" && "$input_secret_path" != "/std" && "$input_secret_path" != *".."* ]]; then
+            secret_path="$input_secret_path"
+        else
+            warn "Некорректный префикс '$input_secret_path' (ожидается вид /assets_xxxxxxxx). Оставлен '$secret_path'."
+        fi
+    fi
+    set_state_val "secret_base_path" "$secret_path"
 
     local cur_bot_dom input_bot_dom=""
     cur_bot_dom="$(get_state_val "bot_domain" "")"

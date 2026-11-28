@@ -660,6 +660,7 @@ def main():
                         "tag": bal_tag,
                         "selector": list(tags),
                         "strategy": {"type": "leastPing"},
+                        "fallbackTag": fallback_tag if fallback_tag in tags else tags[0],
                     })
                     observed_tags.update(tags)
                 return {"balancerTag": bal_tag}
