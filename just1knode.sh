@@ -2151,7 +2151,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" || -z "${BASH_SOURCE[0]:-}" ]]; then
                     case "$_m_act" in
                         install|setup)
                             if declare -F "${_m_id}_install" >/dev/null 2>&1; then
-                                "${_m_id}_install" "${@:4}"
+                                "${_m_id}_install"
                             else
                                 error "Модуль '$_m_id' не поддерживает установку."
                                 exit 1

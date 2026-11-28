@@ -887,18 +887,26 @@ def _is_entry_active_for_service(meta: Dict[str, Any], eff_service: Optional[str
     return resolve_effective_service(eff_service) in active_services
 
 
+_INVENTORY_INACTIVE_LOOKBACK_SEC = 48 * 3600.0
+
+
 def _should_include_in_inventory(meta: Dict[str, Any], eff_service: Optional[str]) -> bool:
-    """Include active entries plus service-tracked entries (even inactive/tombstoned) for residual cleanup."""
+    """Include active entries plus recent inactive/tombstoned service entries for residual cleanup."""
     if _is_entry_active_for_service(meta, eff_service):
         return True
     if eff_service is not None:
         canon_req = resolve_effective_service(eff_service)
         service_states = meta.get("service_states")
         if isinstance(service_states, dict):
-            return any(
-                s and resolve_effective_service(str(s)) == canon_req
-                for s in service_states
-            )
+            now_ts = time.time()
+            for s, st in service_states.items():
+                if not s or resolve_effective_service(str(s)) != canon_req:
+                    continue
+                if isinstance(st, dict):
+                    raw_ts = st.get("updated_at") or meta.get("updated_at")
+                    if isinstance(raw_ts, (int, float)) and (now_ts - float(raw_ts)) > _INVENTORY_INACTIVE_LOOKBACK_SEC:
+                        continue
+                return True
     return False
 
 
@@ -2950,15 +2958,8 @@ def _inventory_entry_version(
     return None
 
 
-@app.post("/v1/clients/inventory")
-@app.get("/v1/clients/inventory")
-async def get_clients_inventory(
-    req: Optional[InventoryRequest] = None,
-    _: bool = Depends(verify_api_key),
-) -> Dict[str, Any]:
-    """
-    Returns verified observed runtime inventory directly from Xray memory across all managed inbounds.
-    """
+def _get_clients_inventory_sync(req: Optional[InventoryRequest] = None) -> Dict[str, Any]:
+    """Run blocking client_store read, epoch sync, and Xray gRPC presence probes off the event loop."""
     target_inbounds = (
         get_target_inbounds(service=req.service)
         if (req and req.service)
@@ -2967,7 +2968,7 @@ async def get_clients_inventory(
     running_epoch = epoch_manager.get_current_running_epoch() if epoch_manager else None
     if not running_epoch and epoch_manager:
         running_epoch = epoch_manager.load_state().get("node_epoch")
-    await asyncio.to_thread(sync_active_users_with_epoch, running_epoch)
+    sync_active_users_with_epoch(running_epoch)
 
     if not target_inbounds:
         return {
@@ -2985,7 +2986,7 @@ async def get_clients_inventory(
 
     stored_entries = {}
     try:
-        stored_entries = await asyncio.to_thread(client_store.load_client_entries)
+        stored_entries = client_store.load_client_entries()
     except ClientStoreCorruptedError as e:
         logger.critical("Inventory cannot load entries from corrupt store: %s", e)
         raise HTTPException(
@@ -3053,6 +3054,18 @@ async def get_clients_inventory(
         "inventory": inventory,
         "count": len(inventory),
     }
+
+
+@app.post("/v1/clients/inventory")
+@app.get("/v1/clients/inventory")
+async def get_clients_inventory(
+    req: Optional[InventoryRequest] = None,
+    _: bool = Depends(verify_api_key),
+) -> Dict[str, Any]:
+    """
+    Returns verified observed runtime inventory directly from Xray memory across all managed inbounds.
+    """
+    return await asyncio.to_thread(_get_clients_inventory_sync, req)
 
 
 

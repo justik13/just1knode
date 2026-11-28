@@ -94,6 +94,19 @@ def is_valid_nginx_path(val):
     return True
 
 
+def is_valid_secret_base_path(val):
+    if not is_valid_nginx_path(val):
+        return False
+    clean = val.rstrip("/")
+    if len(clean) < 3 or "//" in clean:
+        return False
+    if clean in ("/.", "/sub", "/std", "/none") or "/./" in clean or clean.endswith("/."):
+        return False
+    if clean.startswith(("/sub/", "/std/")):
+        return False
+    return True
+
+
 def main():
     if len(sys.argv) < 13:
         sys.stderr.write(
@@ -144,11 +157,20 @@ def main():
     if not sub_prefix.startswith("/"):
         sub_prefix = "/" + sub_prefix
 
-    secret_base = str(state.get("secret_base_path") or "").strip().rstrip("/")
-    if not secret_base or secret_base in ("/", "/none"):
-        secret_base = "/assets_" + secrets.token_hex(4)
-    elif not secret_base.startswith("/"):
-        secret_base = "/" + secret_base
+    bi_links_sec = links.get("bi") if isinstance(links.get("bi"), dict) else {}
+    links_secret_raw = str(
+        bi_links_sec.get("secret_base_path") or links.get("secret_base_path") or ""
+    ).strip().rstrip("/")
+    if links_secret_raw and not links_secret_raw.startswith("/"):
+        links_secret_raw = "/" + links_secret_raw
+    if is_valid_secret_base_path(links_secret_raw):
+        secret_base = links_secret_raw
+    else:
+        secret_base = str(state.get("secret_base_path") or "").strip().rstrip("/")
+        if not secret_base or secret_base in ("/", "/none"):
+            secret_base = "/assets_" + secrets.token_hex(4)
+        elif not secret_base.startswith("/"):
+            secret_base = "/" + secret_base
 
     modules = state.get("modules") if isinstance(state.get("modules"), dict) else {}
 
