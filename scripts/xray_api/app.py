@@ -1543,6 +1543,74 @@ def healthcheck(response: Response) -> Dict[str, Any]:
     }
 
 
+_cpu_stat_lock = threading.Lock()
+_last_cpu_sample: Optional[tuple[int, int]] = None
+_last_cpu_percent: Optional[float] = None
+
+
+def _read_proc_cpu_times() -> Optional[tuple[int, int]]:
+    """Read aggregate (idle_ticks, total_ticks) from Linux /proc/stat."""
+    try:
+        with open("/proc/stat", "r", encoding="ascii", errors="replace") as f:
+            first_line = f.readline()
+    except OSError:
+        return None
+    if not first_line.startswith("cpu "):
+        return None
+    parts = first_line.split()
+    if len(parts) < 5:
+        return None
+    try:
+        # Exclude guest/guest_nice (indices 9+) because Linux already folds them into user/nice.
+        vals = [int(x) for x in parts[1:9]]
+    except ValueError:
+        return None
+    idle_ticks = vals[3] + (vals[4] if len(vals) > 4 else 0)
+    total_ticks = sum(vals)
+    return idle_ticks, total_ticks
+
+
+def _measure_real_cpu_percent() -> Optional[float]:
+    """Compute host CPU utilization (%) from consecutive /proc/stat samples."""
+    global _last_cpu_sample, _last_cpu_percent
+
+    sample = _read_proc_cpu_times()
+    if sample is None:
+        return None
+
+    with _cpu_stat_lock:
+        prev = _last_cpu_sample
+        prev_pct = _last_cpu_percent
+        if prev is not None:
+            idle_delta = sample[0] - prev[0]
+            total_delta = sample[1] - prev[1]
+            if total_delta <= 0:
+                if total_delta < 0:
+                    _last_cpu_sample = sample
+                return prev_pct
+            pct = round(max(0.0, min(100.0, (1.0 - (idle_delta / total_delta)) * 100.0)), 1)
+            _last_cpu_sample = sample
+            _last_cpu_percent = pct
+            return pct
+
+    # First check since process startup: take a short 50ms delta outside the lock.
+    time.sleep(0.05)
+    sample2 = _read_proc_cpu_times()
+    if sample2 is None:
+        return None
+
+    with _cpu_stat_lock:
+        base = _last_cpu_sample if _last_cpu_sample is not None else sample
+        idle_delta = sample2[0] - base[0]
+        total_delta = sample2[1] - base[1]
+        _last_cpu_sample = sample2
+        if total_delta <= 0:
+            return _last_cpu_percent if _last_cpu_percent is not None else 0.0
+        pct = round(max(0.0, min(100.0, (1.0 - (idle_delta / total_delta)) * 100.0)), 1)
+        _last_cpu_percent = pct
+        return pct
+
+
 def _get_system_load_info(disk_usage_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Lightweight host load telemetry (CPU, RAM, Disk) with zero external dependencies."""
     load_1m = 0.0
@@ -1556,7 +1624,12 @@ def _get_system_load_info(disk_usage_info: Dict[str, Any] | None = None) -> Dict
     except Exception:
         load_1m = 0.0
 
-    cpu_percent = round(min(100.0, max(0.0, (load_1m / cpu_cores) * 100.0)), 1)
+    real_cpu_percent = _measure_real_cpu_percent()
+    cpu_percent = (
+        real_cpu_percent
+        if real_cpu_percent is not None
+        else round(min(100.0, max(0.0, (load_1m / cpu_cores) * 100.0)), 1)
+    )
 
     ram_used_percent = 0.0
     try:
