@@ -1605,7 +1605,9 @@ def _measure_real_cpu_percent() -> Optional[float]:
         total_delta = sample2[1] - base[1]
         _last_cpu_sample = sample2
         if total_delta <= 0:
-            return _last_cpu_percent if _last_cpu_percent is not None else 0.0
+            if _last_cpu_percent is None:
+                _last_cpu_percent = 0.0
+            return _last_cpu_percent
         pct = round(max(0.0, min(100.0, (1.0 - (idle_delta / total_delta)) * 100.0)), 1)
         _last_cpu_percent = pct
         return pct
